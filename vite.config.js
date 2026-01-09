@@ -6,18 +6,23 @@ export const vitePort = 3000;
 
 export default defineConfig(({ mode }) => {
   return {
-    base: mode === 'production' ? './' : '/',
+    // 1. TELL VITE WHERE YOUR APP LIVES
+    root: 'client', 
+    
+    // 2. TELL VITE WHERE TO FIND .ENV FILES (Go up one level to root)
+    envDir: '../',
+
+    // 3. GitHub Pages Base Path
+    base: mode === 'production' ? '/pwo/' : '/',
+    
     plugins: [
       react(),
-      // Custom plugin to handle source map requests
       {
         name: 'handle-source-map-requests',
         apply: 'serve',
         configureServer(server) {
           server.middlewares.use((req, res, next) => {
-            // Check if the request is for a source map file
             if (req.url && req.url.endsWith('.map')) {
-              // Rewrite the URL to remove the query string that's causing the issue
               const cleanUrl = req.url.split('?')[0];
               req.url = cleanUrl;
             }
@@ -25,47 +30,39 @@ export default defineConfig(({ mode }) => {
           });
         },
       },
-      // Custom plugin to add CORS headers
       {
         name: 'add-cors-headers',
         apply: 'serve',
         configureServer(server) {
           server.middlewares.use((req, res, next) => {
-            // Add CORS headers to all responses
             res.setHeader('Access-Control-Allow-Origin', '*');
-            res.setHeader(
-              'Access-Control-Allow-Methods',
-              'GET, POST, PUT, DELETE, PATCH, OPTIONS',
-            );
-            res.setHeader(
-              'Access-Control-Allow-Headers',
-              'Content-Type, Authorization, X-Requested-With',
-            );
-
-            // Handle OPTIONS requests
+            res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+            res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
             if (req.method === 'OPTIONS') {
-              res.statusCode = 204;
-              return res.end();
+              res.statusCode = 200;
+              res.end();
+              return;
             }
-
             next();
           });
         },
       },
-    ].filter(Boolean),
+    ],
     resolve: {
       alias: {
+        // 4. FIX ALIAS PATH (Point to client/src)
         '@': path.resolve(__dirname, './client/src'),
       },
     },
-    root: path.join(process.cwd(), 'client'),
     build: {
-      outDir: path.join(process.cwd(), 'dist/public'),
-      emptyOutDir: true,
+      // 5. OUTPUT BACK TO ROOT DIST FOLDER
+      outDir: '../dist',
+      emptyOutDir: true, 
+      sourcemap: true,
+      minify: 'terser',
       rollupOptions: {
         output: {
           manualChunks: {
-            // Vendor chunks
             'react-vendor': ['react', 'react-dom'],
             'ui-vendor': ['@radix-ui/react-dialog', '@radix-ui/react-popover', '@radix-ui/react-select', '@radix-ui/react-switch', '@radix-ui/react-progress', '@radix-ui/react-checkbox', '@radix-ui/react-label', '@radix-ui/react-slider', '@radix-ui/react-toggle', '@radix-ui/react-tooltip'],
             'supabase-vendor': ['@supabase/supabase-js'],
@@ -74,36 +71,26 @@ export default defineConfig(({ mode }) => {
             'cmd-vendor': ['cmdk'],
           },
           chunkFileNames: (chunkInfo) => {
-            const facadeModuleId = chunkInfo.facadeModuleId ? chunkInfo.facadeModuleId.split('/').pop() : 'chunk';
             return `assets/[name]-[hash].js`;
           },
         },
       },
-      chunkSizeWarningLimit: 1000, // Increase warning limit to 1MB
+      chunkSizeWarningLimit: 1000,
     },
     clearScreen: false,
     server: {
-      hmr: {
-        overlay: false,
-      },
+      hmr: { overlay: false },
       host: true,
       port: vitePort,
       allowedHosts: true,
-      cors: true, // Enable CORS in the dev server
+      cors: true,
       proxy: {
         '/api/': {
           target: 'http://localhost:3001',
           changeOrigin: true,
+          secure: false,
         },
       },
-    },
-    // Enable source maps for development
-    css: {
-      devSourcemap: true,
-    },
-    // Ensure source maps are properly generated
-    esbuild: {
-      sourcemap: true,
     },
   };
 });
