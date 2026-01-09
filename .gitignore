@@ -1,0 +1,15 @@
+# Dependencies
+node_modules
+
+# Build Outputs (HUGE FILES - DO NOT UPLOAD)
+dist
+build
+release
+
+# Secrets
+.env
+.env.local
+
+# Misc
+.DS_Store
+.vscode
