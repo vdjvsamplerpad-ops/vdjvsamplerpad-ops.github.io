@@ -76,6 +76,7 @@
     "ignore": "7.0.3",
     "postcss": "8.4.35",
     "tailwindcss": "3.4.17",
+    "terser": "^5.44.1",
     "tsx": "4.19.3",
     "typescript": "5.8.2",
     "vite": "^6.4.1"
