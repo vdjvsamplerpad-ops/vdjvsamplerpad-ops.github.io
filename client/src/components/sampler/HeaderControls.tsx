@@ -205,7 +205,7 @@ export function HeaderControls({
       <header className="text-center mb-6">
         <div className="flex items-center justify-center gap-4 mb-1">
           <img
-            src="/assets/logo.png"
+            src="./assets/logo.png"
             alt="VDJV Logo"
             className="w-12 h-12 object-contain"
           />
