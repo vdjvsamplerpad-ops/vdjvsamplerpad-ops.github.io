@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => {
     envDir: '../',
 
     // 3. GitHub Pages Base Path
-    base: mode === 'production' ? '/pwo/' : '/',
+    base: '/',
     
     plugins: [
       react(),
