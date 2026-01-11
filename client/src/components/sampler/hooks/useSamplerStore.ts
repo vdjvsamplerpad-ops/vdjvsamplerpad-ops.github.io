@@ -49,6 +49,7 @@ interface SamplerStore {
 
 const STORAGE_KEY = 'vdjv-sampler-banks';
 const STATE_STORAGE_KEY = 'vdjv-sampler-state';
+const DEFAULT_BANK_LOADED_KEY = 'vdjv-default-bank-loaded';
 
 // File System Access API support check
 const supportsFileSystemAccess = () => {
@@ -408,6 +409,7 @@ export function useSamplerStore(): SamplerStore {
   const [primaryBankId, setPrimaryBankIdState] = React.useState<string | null>(null);
   const [secondaryBankId, setSecondaryBankIdState] = React.useState<string | null>(null);
   const [currentBankId, setCurrentBankIdState] = React.useState<string | null>(null);
+  const [shouldLoadDefaultBank, setShouldLoadDefaultBank] = React.useState<boolean>(false);
 
   const primaryBank = React.useMemo(() => banks.find(b => b.id === primaryBankId) || null, [banks, primaryBankId]);
   const secondaryBank = React.useMemo(() => banks.find(b => b.id === secondaryBankId) || null, [banks, secondaryBankId]);
@@ -426,9 +428,18 @@ export function useSamplerStore(): SamplerStore {
     const savedState = localStorage.getItem(STATE_STORAGE_KEY);
 
     if (!savedData) {
-      const defaultBank: SamplerBank = { id: generateId(), name: 'Default Bank', defaultColor: '#3b82f6', pads: [], createdAt: new Date(), sortOrder: 0 };
-      setBanks([defaultBank]); setCurrentBankIdState(defaultBank.id);
-      return;
+      // Check if default bank has already been loaded
+      const defaultBankLoaded = localStorage.getItem(DEFAULT_BANK_LOADED_KEY);
+      if (!defaultBankLoaded) {
+        // First install - trigger default bank loading
+        setShouldLoadDefaultBank(true);
+        return;
+      } else {
+        // Default bank was loaded before but no saved data exists (edge case)
+        const defaultBank: SamplerBank = { id: generateId(), name: 'Default Bank', defaultColor: '#3b82f6', pads: [], createdAt: new Date(), sortOrder: 0 };
+        setBanks([defaultBank]); setCurrentBankIdState(defaultBank.id);
+        return;
+      }
     }
     try {
       const { banks: savedBanks } = JSON.parse(savedData);
@@ -1082,6 +1093,52 @@ export function useSamplerStore(): SamplerStore {
     if (bank.bankMetadata && typeof bank.bankMetadata.transferable === 'boolean') return bank.bankMetadata.transferable;
     return true; // Default allow if flag is missing
   }, [banks]);
+
+  // Auto-load default bank on first install
+  React.useEffect(() => {
+    if (!shouldLoadDefaultBank || banks.length > 0) return;
+    
+    const loadDefaultBank = async () => {
+      try {
+        console.log('📦 Loading default bank on first install...');
+        const response = await fetch('/assets/DEFAULT_BANK.bank');
+        if (!response.ok) {
+          throw new Error(`Default bank file not found: ${response.status}`);
+        }
+        const blob = await response.blob();
+        const file = new File([blob], 'DEFAULT_BANK.bank', { type: 'application/zip' });
+        
+        // Import the bank
+        const importedBank = await importBank(file);
+        if (importedBank) {
+          // Rename to "Default Bank" and set as current
+          updateBank(importedBank.id, { name: 'Default Bank' });
+          setCurrentBankIdState(importedBank.id);
+          // Mark as loaded to prevent re-importing
+          localStorage.setItem(DEFAULT_BANK_LOADED_KEY, 'true');
+          setShouldLoadDefaultBank(false);
+          console.log('✅ Default bank loaded successfully');
+        }
+      } catch (error) {
+        console.warn('⚠️ Failed to load default bank, creating empty bank instead:', error);
+        // Fallback to creating empty default bank
+        const defaultBank: SamplerBank = { 
+          id: generateId(), 
+          name: 'Default Bank', 
+          defaultColor: '#3b82f6', 
+          pads: [], 
+          createdAt: new Date(), 
+          sortOrder: 0 
+        };
+        setBanks([defaultBank]);
+        setCurrentBankIdState(defaultBank.id);
+        localStorage.setItem(DEFAULT_BANK_LOADED_KEY, 'true');
+        setShouldLoadDefaultBank(false);
+      }
+    };
+
+    loadDefaultBank();
+  }, [shouldLoadDefaultBank, banks.length, importBank, updateBank]);
 
   return {
     banks, primaryBankId, secondaryBankId, currentBankId, primaryBank, secondaryBank, currentBank, isDualMode,
