@@ -1,25 +1,10 @@
-import { CapacitorConfig } from '@capacitor/cli';
+import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.vdjv.samplerpad',
-  appName: 'VDJV Sampler Pad',
-  webDir: 'dist/public',
-  server: {
-    androidScheme: 'https'
-  },
-  plugins: {
-    SplashScreen: {
-      launchShowDuration: 2000,
-      backgroundColor: "#dc2626",
-      showSpinner: true,
-      spinnerColor: "#ffffff"
-    },
-    StatusBar: {
-      style: 'dark',
-      backgroundColor: '#dc2626'
-    }
-  }
+  appId: 'com.powerworkout.vdjv',
+  appName: 'vdjv-sampler-pad',
+  webDir: 'dist',
+  icon: 'client/public/assets/icon.png'
 };
 
 export default config;
-

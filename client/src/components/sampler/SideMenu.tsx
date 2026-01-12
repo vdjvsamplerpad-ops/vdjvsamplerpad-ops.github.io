@@ -9,6 +9,9 @@ import { ProgressDialog } from '@/components/ui/progress-dialog';
 import { Plus, Settings, Upload, X, Crown, Minus, RotateCcw, Sun, Moon, ChevronUp, ChevronDown, Loader2 } from 'lucide-react';
 import { SamplerBank, StopMode, PadData } from './types/sampler';
 import { BankEditDialog } from './BankEditDialog';
+import { createPortal } from 'react-dom';
+
+type Notice = { id: string; variant: 'success' | 'error' | 'info'; message: string };
 
 interface EqSettings {
   low: number;
@@ -104,6 +107,22 @@ export function SideMenu({
   // Loading State
   const [isLoadingBanks, setIsLoadingBanks] = React.useState(true);
 
+  // Toast notification state
+  const [notices, setNotices] = React.useState<Notice[]>([]);
+
+  const pushNotice = React.useCallback((n: Omit<Notice, 'id'>) => {
+    const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto) ? (crypto as any).randomUUID() : String(Date.now() + Math.random());
+    const notice: Notice = { id, ...n };
+    setNotices((arr) => [notice, ...arr]);
+    setTimeout(() => {
+      setNotices((arr) => arr.filter((n) => n.id !== id));
+    }, 5000);
+  }, []);
+
+  const dismissNotice = React.useCallback((id: string) => {
+    setNotices((arr) => arr.filter((n) => n.id !== id));
+  }, []);
+
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const isMobile = windowWidth < 768;
@@ -167,38 +186,135 @@ export function SideMenu({
     }
   };
 
-  const handleImportClick = () => {
-    fileInputRef.current?.click();
-  };
+  // Detect Android/WebView environment
+  const isAndroid = React.useMemo(() => /Android/.test(navigator.userAgent), []);
+  const isWebView = React.useMemo(() => {
+    return !!(window as any).Android || 
+           navigator.userAgent.includes('wv') || 
+           navigator.userAgent.includes('WebView');
+  }, []);
 
-  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file && file.name.endsWith('.bank')) {
-      setShowImportProgress(true);
-      setImportStatus('loading');
-      setImportProgress(0);
-      setImportError('');
+  // Create Android/WebView compatible file input
+  const createCompatibleFileInput = React.useCallback((): HTMLInputElement => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.bank,application/zip,application/x-zip-compressed';
+    input.setAttribute('capture', 'none');
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('autocorrect', 'off');
+    input.setAttribute('autocapitalize', 'off');
+    input.setAttribute('spellcheck', 'false');
+    return input;
+  }, []);
+
+  const handleImportClick = React.useCallback(() => {
+    // Use enhanced file picker for Android/WebView
+    if (isAndroid || isWebView) {
+      console.log('📱 Android/WebView detected, using enhanced file picker...');
+      const compatibleInput = createCompatibleFileInput();
       
-      // Reset ETA calculation
-      setImportStartTime(Date.now());
-      setImportEta(null);
+      const handleChange = async (event: Event) => {
+        const target = event.target as HTMLInputElement;
+        const file = target.files?.[0];
+        
+        if (file) {
+          console.log('✅ File selected:', file.name, file.size, 'bytes');
+          await processFileImport(file);
+        } else {
+          console.warn('⚠️ No file selected');
+          pushNotice({ variant: 'error', message: 'No file selected. Please try again.' });
+        }
+        
+        // Clean up
+        compatibleInput.removeEventListener('change', handleChange);
+        compatibleInput.remove();
+      };
+
+      compatibleInput.addEventListener('change', handleChange);
+      
+      // Add timeout to detect silent failures
+      const timeoutId = setTimeout(() => {
+        console.warn('⚠️ File picker timeout - no file selected within 5 seconds');
+        pushNotice({ 
+          variant: 'error', 
+          message: 'File picker did not respond. Please try selecting the file again or use Google Drive to import.' 
+        });
+        compatibleInput.removeEventListener('change', handleChange);
+        compatibleInput.remove();
+      }, 5000);
+
+      compatibleInput.addEventListener('change', () => clearTimeout(timeoutId), { once: true });
 
       try {
-        await onImportBank(file, (progress) => {
-          setImportProgress(progress);
-        });
-        setImportStatus('success');
+        compatibleInput.click();
+        console.log('📱 Enhanced file picker triggered');
       } catch (error) {
-        console.error('Import failed:', error);
-        setImportStatus('error');
-        setImportError(error instanceof Error ? error.message : 'Import failed');
+        console.error('❌ Failed to trigger file picker:', error);
+        pushNotice({ 
+          variant: 'error', 
+          message: 'Failed to open file picker. Please try again or use Google Drive to import.' 
+        });
+        clearTimeout(timeoutId);
       }
-
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
+    } else {
+      // Standard file input for other platforms
+      fileInputRef.current?.click();
     }
-  };
+  }, [isAndroid, isWebView, createCompatibleFileInput, pushNotice]);
+
+  const processFileImport = React.useCallback(async (file: File) => {
+    // Validate file
+    if (!file) {
+      pushNotice({ variant: 'error', message: 'No file selected.' });
+      return;
+    }
+
+    if (!file.name.endsWith('.bank')) {
+      pushNotice({ variant: 'error', message: 'Invalid file type. Please select a .bank file.' });
+      return;
+    }
+
+    if (file.size === 0) {
+      pushNotice({ variant: 'error', message: 'Selected file is empty.' });
+      return;
+    }
+
+    console.log('📦 Starting import process for:', file.name, `(${(file.size / 1024).toFixed(1)}KB)`);
+
+    setShowImportProgress(true);
+    setImportStatus('loading');
+    setImportProgress(0);
+    setImportError('');
+    
+    // Reset ETA calculation
+    setImportStartTime(Date.now());
+    setImportEta(null);
+
+    try {
+      await onImportBank(file, (progress) => {
+        setImportProgress(progress);
+      });
+      setImportStatus('success');
+      pushNotice({ variant: 'success', message: 'Bank imported successfully!' });
+    } catch (error) {
+      console.error('❌ Import failed:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Import failed';
+      setImportStatus('error');
+      setImportError(errorMessage);
+      pushNotice({ variant: 'error', message: `Import failed: ${errorMessage}` });
+    }
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  }, [onImportBank, pushNotice]);
+
+  const handleFileSelect = React.useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      await processFileImport(file);
+    }
+  }, [processFileImport]);
 
   // ETA Calculation Effect
   React.useEffect(() => {
@@ -539,7 +655,7 @@ export function SideMenu({
           <input
             ref={fileInputRef}
             type="file"
-            accept=".bank"
+            accept=".bank,application/zip,application/x-zip-compressed"
             onChange={handleFileSelect}
             className="hidden"
           />
@@ -798,6 +914,54 @@ export function SideMenu({
           handleImportClick();
         }}
       />
+
+      {/* Toast Notifications */}
+      {typeof document !== 'undefined' && createPortal(
+        <div className="fixed top-0 left-0 right-0 z-[2147483647] flex justify-center pointer-events-none">
+          <div className="w-full max-w-xl px-3">
+            {notices.map((notice) => (
+              <NoticeItem key={notice.id} notice={notice} dismiss={dismissNotice} theme={theme} />
+            ))}
+          </div>
+        </div>,
+        document.body
+      )}
     </>
+  );
+}
+
+// Toast notification component
+function NoticeItem({ notice, dismiss, theme }: { notice: Notice; dismiss: (id: string) => void; theme: 'light' | 'dark' }) {
+  const [show, setShow] = React.useState(false);
+  React.useEffect(() => {
+    const t = setTimeout(() => setShow(true), 10);
+    return () => clearTimeout(t);
+  }, []);
+
+  const base = 'pointer-events-auto mt-3 rounded-lg border px-4 py-2 shadow-lg transition-all duration-300';
+  const colors =
+    notice.variant === 'success'
+      ? (theme === 'dark' ? 'bg-green-600/90 border-green-500 text-white' : 'bg-green-600 text-white border-green-700')
+      : notice.variant === 'error'
+        ? (theme === 'dark' ? 'bg-red-600/90 border-red-500 text-white' : 'bg-red-600 text-white border-red-700')
+        : (theme === 'dark' ? 'bg-gray-800/90 border-gray-700 text-white' : 'bg-gray-900 text-white border-gray-800');
+
+  return (
+    <div
+      className={`${base} ${colors} ${show ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-3'}`}
+      onMouseEnter={() => setShow(true)}
+      onMouseLeave={() => setShow(true)}
+    >
+      <div className="flex items-start gap-3">
+        <div className="flex-1 text-sm">{notice.message}</div>
+        <button
+          className="text-white/80 hover:text-white"
+          onClick={() => dismiss(notice.id)}
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+    </div>
   );
 }

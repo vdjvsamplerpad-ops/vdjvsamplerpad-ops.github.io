@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && tsc --project tsconfig.server.json",
+    "build:electron": "cross-env ELECTRON=true vite build && tsc --project tsconfig.server.json",
+    "build:electron:package": "npm run build:electron && electron-builder",
     "start": "tsx watch scripts/dev.ts",
     "preview": "vite preview",
     "electron:dev": "npm run build && electron .",
@@ -17,9 +19,8 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint . --ext ts,tsx --fix",
     "type-check": "tsc --noEmit",
-    "build:electron": "npm run build && electron-builder",
     "dist": "electron-builder",
-    "build:win": "npm run build && electron-builder --win nsis --x64 --ia32",
+    "build:win": "npm run build:electron:package -- --win nsis --x64 --ia32",
     "cap:init": "npx cap init",
     "cap:add:android": "npx cap add android",
     "cap:add:ios": "npx cap add ios",
@@ -57,10 +58,10 @@
     "tailwindcss-animate": "1.0.7"
   },
   "devDependencies": {
-    "@capacitor/android": "^6.0.0",
+    "@capacitor/android": "^6.2.1",
     "@capacitor/assets": "^3.0.5",
-    "@capacitor/cli": "^6.0.0",
-    "@capacitor/core": "^6.0.0",
+    "@capacitor/cli": "^6.2.1",
+    "@capacitor/core": "^6.2.1",
     "@capacitor/ios": "^6.0.0",
     "@types/express": "5.0.0",
     "@types/node": "22.13.5",
@@ -68,6 +69,7 @@
     "@types/react-dom": "19.0.4",
     "@vitejs/plugin-react": "4.3.4",
     "autoprefixer": "10.4.18",
+    "cross-env": "^10.1.0",
     "electron": "^39.2.7",
     "electron-builder": "^24.13.3",
     "eslint": "^9.17.0",
@@ -125,7 +127,9 @@
           ]
         }
       ],
-      "artifactName": "VDJV-Sampler-Pad-Setup-${version}-${arch}.${ext}"
+      "artifactName": "VDJV-Sampler-Pad-Setup-${version}-${arch}.${ext}",
+      "icon": "build/icon.png",
+      "sign": null
     },
     "nsis": {
       "oneClick": false,

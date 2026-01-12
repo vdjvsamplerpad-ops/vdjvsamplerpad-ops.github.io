@@ -782,42 +782,145 @@ export function useSamplerStore(): SamplerStore {
   // --- FIXED IMPORT BANK ---
   const importBank = React.useCallback(async (file: File, onProgress?: (progress: number) => void) => {
     try {
-      console.log('🚀 Starting optimized import...');
+      console.log('🚀 Starting optimized import...', { fileName: file.name, fileSize: file.size });
+      
+      // Validate file before processing
+      if (!file || file.size === 0) {
+        throw new Error('Invalid file: File is empty or not accessible');
+      }
+      
+      if (!file.name.endsWith('.bank')) {
+        throw new Error('Invalid file type: File must have .bank extension');
+      }
+      
+      // Add timeout for file reading operations (30 seconds)
+      const importTimeout = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Import timeout: Operation took too long')), 30000);
+      });
+      
       onProgress && onProgress(10);
       
       const zip = new JSZip();
       let contents: JSZip;
 
       try {
-        contents = await zip.loadAsync(file);
+        // Try to load as regular zip with timeout
+        contents = await Promise.race([
+          zip.loadAsync(file),
+          importTimeout
+        ]);
+        console.log('✅ Bank file loaded successfully (unencrypted)');
       } catch (error) {
-        if (!user) throw new Error('Login required to import encrypted banks');
-        let decrypted = false;
-        for (const [cacheKey, derivedKey] of keyCache.entries()) {
-          try { contents = await zip.loadAsync(await decryptZip(file, derivedKey)); decrypted = true; break; } catch (e) {}
+        console.log('🔒 Attempting to decrypt bank file...');
+        
+        if (!user) {
+          throw new Error('Login required to import encrypted banks. Please sign in and try again.');
         }
+        
+        let decrypted = false;
+        let lastError: Error | null = null;
+        
+        // Try cached keys
+        for (const [cacheKey, derivedKey] of keyCache.entries()) {
+          try { 
+            contents = await Promise.race([
+              zip.loadAsync(await decryptZip(file, derivedKey)),
+              importTimeout
+            ]);
+            decrypted = true;
+            console.log('✅ Decrypted using cached key');
+            break;
+          } catch (e) {
+            lastError = e instanceof Error ? e : new Error(String(e));
+            console.warn('Decryption attempt failed with cached key:', e);
+          }
+        }
+        
+        // Try hinted ID from filename
         if (!decrypted) {
           const hintedId = parseBankIdFromFileName(file.name);
           if (hintedId) {
-             const d = await getDerivedKey(hintedId, user.id);
-             if (d) try { contents = await zip.loadAsync(await decryptZip(file, d)); decrypted = true; } catch (e) {}
+            try {
+              const d = await getDerivedKey(hintedId, user.id);
+              if (d) {
+                contents = await Promise.race([
+                  zip.loadAsync(await decryptZip(file, d)),
+                  importTimeout
+                ]);
+                decrypted = true;
+                console.log('✅ Decrypted using hinted bank ID');
+              }
+            } catch (e) {
+              lastError = e instanceof Error ? e : new Error(String(e));
+              console.warn('Decryption attempt failed with hinted ID:', e);
+            }
           }
         }
+        
+        // Try all accessible banks
         if (!decrypted) {
-           const accessible = await listAccessibleBankIds(user.id);
-           for (const bankId of accessible) {
-             const d = await getDerivedKey(bankId, user.id);
-             if (d) try { contents = await zip.loadAsync(await decryptZip(file, d)); decrypted = true; break; } catch (e) {}
-           }
+          try {
+            const accessible = await listAccessibleBankIds(user.id);
+            console.log(`🔍 Trying ${accessible.length} accessible banks...`);
+            for (const bankId of accessible) {
+              try {
+                const d = await getDerivedKey(bankId, user.id);
+                if (d) {
+                  contents = await Promise.race([
+                    zip.loadAsync(await decryptZip(file, d)),
+                    importTimeout
+                  ]);
+                  decrypted = true;
+                  console.log('✅ Decrypted using accessible bank ID:', bankId);
+                  break;
+                }
+              } catch (e) {
+                // Continue to next bank
+              }
+            }
+          } catch (e) {
+            console.error('Error checking accessible banks:', e);
+          }
         }
-        if (!decrypted) throw new Error('Encryption error or access denied');
+        
+        if (!decrypted) {
+          const errorMsg = lastError?.message || 'Unknown decryption error';
+          throw new Error(`Cannot decrypt bank file. ${errorMsg}. Please ensure you have access to this bank.`);
+        }
       }
 
       onProgress && onProgress(20);
       
+      // Validate bank.json exists
       const bankJsonFile = contents.file('bank.json');
-      if (!bankJsonFile) throw new Error('Invalid bank file');
-      const bankData = JSON.parse(await bankJsonFile.async('string'));
+      if (!bankJsonFile) {
+        throw new Error('Invalid bank file: bank.json not found. This may not be a valid bank file.');
+      }
+      
+      // Parse bank data with error handling
+      let bankData: any;
+      try {
+        const jsonString = await Promise.race([
+          bankJsonFile.async('string'),
+          importTimeout
+        ]);
+        bankData = JSON.parse(jsonString);
+        
+        if (!bankData || typeof bankData !== 'object') {
+          throw new Error('Invalid bank data structure');
+        }
+        
+        if (!bankData.name || !Array.isArray(bankData.pads)) {
+          throw new Error('Invalid bank file format: Missing required fields');
+        }
+        
+        console.log('✅ Bank data parsed:', { name: bankData.name, padCount: bankData.pads.length });
+      } catch (error) {
+        if (error instanceof SyntaxError) {
+          throw new Error('Invalid bank file: bank.json is corrupted or invalid JSON');
+        }
+        throw error;
+      }
       
       const metadata = await extractBankMetadata(contents);
       const isAdminBank = metadata?.password === true;
@@ -872,7 +975,7 @@ export function useSamplerStore(): SamplerStore {
         const batchPads = bankData.pads.slice(i, i + BATCH_SIZE);
         const batchFilesToStore: BatchFileItem[] = [];
         
-        const processedBatch = await Promise.all(batchPads.map(async (padData: any) => {
+        const processedBatch = await Promise.all(batchPads.map(async (padData: any, padIndex: number) => {
           try {
              const newPadId = generateId();
              const audioFile = contents.file(`audio/${padData.id}.audio`);
@@ -881,14 +984,41 @@ export function useSamplerStore(): SamplerStore {
              let imageUrl: string | null = null;
 
              if (audioFile) {
-               const audioBlob = await audioFile.async('blob');
-               batchFilesToStore.push({ id: newPadId, blob: audioBlob, type: 'audio' });
-               audioUrl = await createFastIOSBlobURL(audioBlob);
+               try {
+                 const audioBlob = await Promise.race([
+                   audioFile.async('blob'),
+                   importTimeout
+                 ]);
+                 
+                 if (!audioBlob || audioBlob.size === 0) {
+                   console.warn(`⚠️ Audio file for pad "${padData.name || padData.id}" is empty`);
+                 } else {
+                   batchFilesToStore.push({ id: newPadId, blob: audioBlob, type: 'audio' });
+                   audioUrl = await createFastIOSBlobURL(audioBlob);
+                 }
+               } catch (e) {
+                 console.error(`❌ Failed to load audio for pad "${padData.name || padData.id}":`, e);
+                 // Continue without audio - pad will be imported but won't play
+               }
              }
+             
              if (imageFile) {
-               const imageBlob = await imageFile.async('blob');
-               batchFilesToStore.push({ id: newPadId, blob: imageBlob, type: 'image' });
-               imageUrl = await createFastIOSBlobURL(imageBlob);
+               try {
+                 const imageBlob = await Promise.race([
+                   imageFile.async('blob'),
+                   importTimeout
+                 ]);
+                 
+                 if (!imageBlob || imageBlob.size === 0) {
+                   console.warn(`⚠️ Image file for pad "${padData.name || padData.id}" is empty`);
+                 } else {
+                   batchFilesToStore.push({ id: newPadId, blob: imageBlob, type: 'image' });
+                   imageUrl = await createFastIOSBlobURL(imageBlob);
+                 }
+               } catch (e) {
+                 console.error(`❌ Failed to load image for pad "${padData.name || padData.id}":`, e);
+                 // Continue without image
+               }
              }
 
              if (audioUrl) {
@@ -903,18 +1033,29 @@ export function useSamplerStore(): SamplerStore {
                  startTimeMs: padData.startTimeMs || 0,
                  endTimeMs: padData.endTimeMs || 0,
                  pitch: padData.pitch || 0,
-                 position: padData.position ?? (newPads.length + batchPads.indexOf(padData)),
+                 position: padData.position ?? (newPads.length + padIndex),
                };
+             } else {
+               console.warn(`⚠️ Skipping pad "${padData.name || padData.id}" - no audio file found`);
+               return null;
              }
-             return null;
           } catch (e) {
-            console.error('Pad import error:', e);
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            console.error(`❌ Pad import error for pad at index ${padIndex}:`, errorMsg);
             return null;
           }
         }));
 
         if (batchFilesToStore.length > 0) {
-          await saveBatchBlobsToDB(batchFilesToStore);
+          try {
+            await Promise.race([
+              saveBatchBlobsToDB(batchFilesToStore),
+              importTimeout
+            ]);
+          } catch (e) {
+            console.error('❌ Failed to save batch files to database:', e);
+            throw new Error(`Failed to save files to storage: ${e instanceof Error ? e.message : String(e)}`);
+          }
         }
 
         const validPads = processedBatch.filter(p => p !== null);
@@ -924,15 +1065,33 @@ export function useSamplerStore(): SamplerStore {
         onProgress && onProgress(Math.min(95, currentProgress));
       }
 
+      if (newPads.length === 0) {
+        console.warn('⚠️ No valid pads were imported from the bank file');
+        throw new Error('No valid pads found in bank file. The bank may be corrupted or empty.');
+      }
+
       newBank.pads = newPads;
       setBanks(prev => [...prev, newBank]);
       onProgress && onProgress(100);
-      console.log(`✅ Import complete: ${newPads.length} pads loaded`);
+      console.log(`✅ Import complete: ${newPads.length} pads loaded from "${newBank.name}"`);
       return newBank;
 
     } catch (e) {
-      console.error('Import failed:', e);
-      throw e;
+      const errorMessage = e instanceof Error ? e.message : 'Unknown import error';
+      console.error('❌ Import failed:', errorMessage, e);
+      
+      // Provide more specific error messages
+      if (errorMessage.includes('timeout')) {
+        throw new Error('Import timed out. The file may be too large or corrupted. Please try again.');
+      } else if (errorMessage.includes('decrypt') || errorMessage.includes('encryption')) {
+        throw new Error('Cannot decrypt bank file. Please ensure you have access to this bank and are signed in.');
+      } else if (errorMessage.includes('Invalid bank')) {
+        throw new Error('Invalid bank file format. Please ensure you selected a valid .bank file.');
+      } else if (errorMessage.includes('Login required')) {
+        throw new Error('Please sign in to import this bank file.');
+      }
+      
+      throw new Error(`Import failed: ${errorMessage}`);
     }
   }, [banks, user]);
 
@@ -1094,6 +1253,23 @@ export function useSamplerStore(): SamplerStore {
     return true; // Default allow if flag is missing
   }, [banks]);
 
+  // Detect environment for asset path resolution
+  const getDefaultBankPath = React.useCallback(() => {
+    const isElectron = window.navigator.userAgent.includes('Electron');
+    const isAndroid = /Android/.test(navigator.userAgent);
+    
+    if (isElectron) {
+      // Electron uses file:// protocol, needs relative path
+      return './assets/DEFAULT_BANK.bank';
+    } else if (isAndroid) {
+      // Android APK - try absolute first, fallback to relative
+      return '/assets/DEFAULT_BANK.bank';
+    } else {
+      // Web - use absolute path
+      return '/assets/DEFAULT_BANK.bank';
+    }
+  }, []);
+
   // Auto-load default bank on first install
   React.useEffect(() => {
     if (!shouldLoadDefaultBank || banks.length > 0) return;
@@ -1101,11 +1277,34 @@ export function useSamplerStore(): SamplerStore {
     const loadDefaultBank = async () => {
       try {
         console.log('📦 Loading default bank on first install...');
-        const response = await fetch('/assets/DEFAULT_BANK.bank');
-        if (!response.ok) {
-          throw new Error(`Default bank file not found: ${response.status}`);
+        const basePath = getDefaultBankPath();
+        console.log('🔍 Attempting to load from:', basePath);
+        
+        // Try primary path
+        let response = await fetch(basePath);
+        
+        // If failed and Android, try relative path as fallback
+        if (!response.ok && /Android/.test(navigator.userAgent) && basePath.startsWith('/')) {
+          console.log('⚠️ Absolute path failed, trying relative path...');
+          response = await fetch('./assets/DEFAULT_BANK.bank');
         }
+        
+        // If still failed and Electron, try absolute path as fallback
+        if (!response.ok && window.navigator.userAgent.includes('Electron') && basePath.startsWith('./')) {
+          console.log('⚠️ Relative path failed, trying absolute path...');
+          response = await fetch('/assets/DEFAULT_BANK.bank');
+        }
+        
+        if (!response.ok) {
+          throw new Error(`Default bank file not found: ${response.status} ${response.statusText}`);
+        }
+        
         const blob = await response.blob();
+        if (blob.size === 0) {
+          throw new Error('Default bank file is empty');
+        }
+        
+        console.log('✅ Default bank file loaded:', blob.size, 'bytes');
         const file = new File([blob], 'DEFAULT_BANK.bank', { type: 'application/zip' });
         
         // Import the bank
@@ -1118,9 +1317,12 @@ export function useSamplerStore(): SamplerStore {
           localStorage.setItem(DEFAULT_BANK_LOADED_KEY, 'true');
           setShouldLoadDefaultBank(false);
           console.log('✅ Default bank loaded successfully');
+        } else {
+          throw new Error('Import returned null');
         }
       } catch (error) {
         console.warn('⚠️ Failed to load default bank, creating empty bank instead:', error);
+        console.error('Error details:', error instanceof Error ? error.stack : error);
         // Fallback to creating empty default bank
         const defaultBank: SamplerBank = { 
           id: generateId(), 
@@ -1138,7 +1340,7 @@ export function useSamplerStore(): SamplerStore {
     };
 
     loadDefaultBank();
-  }, [shouldLoadDefaultBank, banks.length, importBank, updateBank]);
+  }, [shouldLoadDefaultBank, banks.length, importBank, updateBank, getDefaultBankPath]);
 
   return {
     banks, primaryBankId, secondaryBankId, currentBankId, primaryBank, secondaryBank, currentBank, isDualMode,

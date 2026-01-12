@@ -5,6 +5,10 @@ import path from 'path';
 export const vitePort = 3000;
 
 export default defineConfig(({ mode }) => {
+  // Use relative paths for Electron, absolute for web
+  const isElectron = process.env.ELECTRON === 'true';
+  const base = isElectron ? './' : '/';
+  
   return {
     // 1. TELL VITE WHERE YOUR APP LIVES
     root: 'client', 
@@ -12,8 +16,8 @@ export default defineConfig(({ mode }) => {
     // 2. TELL VITE WHERE TO FIND .ENV FILES (Go up one level to root)
     envDir: '../',
 
-    // 3. GitHub Pages Base Path
-    base: '/',
+    // 3. Base Path - relative for Electron, absolute for web
+    base: base,
     
     plugins: [
       react(),
@@ -55,8 +59,8 @@ export default defineConfig(({ mode }) => {
       },
     },
     build: {
-      // 5. OUTPUT BACK TO ROOT DIST FOLDER
-      outDir: '../dist',
+      // 5. OUTPUT BACK TO ROOT DIST FOLDER (public subdirectory for Capacitor/Electron)
+      outDir: '../dist/public',
       emptyOutDir: true, 
       sourcemap: true,
       minify: 'terser',
