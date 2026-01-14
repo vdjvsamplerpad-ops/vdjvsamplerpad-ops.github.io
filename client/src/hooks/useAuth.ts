@@ -1,6 +1,11 @@
 import * as React from 'react'
 import { supabase } from '@/lib/supabase'
 import type { User, AuthError, Session } from '@supabase/supabase-js'
+import { refreshAccessibleBanksCache } from '@/lib/bank-utils'
+
+// Keys for localStorage caching
+const USER_CACHE_KEY = 'vdjv-cached-user';
+const PROFILE_CACHE_KEY = 'vdjv-cached-profile';
 
 export interface Profile {
   id: string
@@ -14,6 +19,47 @@ interface AuthState {
   loading: boolean
   isPasswordRecovery: boolean
   redirectError: { code: string; description: string } | null
+}
+
+// Helper to get cached user from localStorage (for offline/sync issues)
+export function getCachedUser(): User | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const cached = localStorage.getItem(USER_CACHE_KEY);
+    return cached ? JSON.parse(cached) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Helper to get cached profile from localStorage
+export function getCachedProfile(): Profile | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const cached = localStorage.getItem(PROFILE_CACHE_KEY);
+    return cached ? JSON.parse(cached) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Helper to cache user data
+function cacheUserData(user: User | null, profile: Profile | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (user) {
+      localStorage.setItem(USER_CACHE_KEY, JSON.stringify(user));
+    } else {
+      localStorage.removeItem(USER_CACHE_KEY);
+    }
+    if (profile) {
+      localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify(profile));
+    } else {
+      localStorage.removeItem(PROFILE_CACHE_KEY);
+    }
+  } catch (e) {
+    console.warn('Failed to cache user data:', e);
+  }
 }
 
 interface AuthActions {
@@ -41,6 +87,9 @@ export function useAuth(): AuthState & AuthActions {
     isPasswordRecovery: false,
     redirectError: null,
   })
+  
+  // Track which user we've already refreshed cache for
+  const cacheRefreshedForUserIdRef = React.useRef<string | null>(null)
 
   const ensureProfile = React.useCallback(async (user: User) => {
     const { data: existing, error: selectErr } = await supabase
@@ -103,11 +152,21 @@ export function useAuth(): AuthState & AuthActions {
 
         if (error) {
           const created = await ensureProfile(session.user)
+          cacheUserData(session.user, created)
           setState((s) => ({ ...s, user: session.user, profile: created, loading: false }))
         } else {
+          cacheUserData(session.user, profile as Profile)
           setState((s) => ({ ...s, user: session.user, profile: profile as Profile, loading: false }))
         }
+        
+        // Refresh accessible banks cache ONLY once per user session (not on every auth state change)
+        if (cacheRefreshedForUserIdRef.current !== session.user.id) {
+          cacheRefreshedForUserIdRef.current = session.user.id
+          refreshAccessibleBanksCache(session.user.id).catch(console.warn)
+        }
       } else {
+        cacheUserData(null, null)
+        cacheRefreshedForUserIdRef.current = null
         setState((s) => ({ ...s, user: null, profile: null, loading: false }))
       }
     }
@@ -144,6 +203,8 @@ export function useAuth(): AuthState & AuthActions {
 
   const signOut = React.useCallback(async () => {
     const { error } = await supabase.auth.signOut()
+    // Clear cached user data on sign out
+    cacheUserData(null, null)
     return { error }
   }, [])
 

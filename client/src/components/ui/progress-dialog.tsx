@@ -15,6 +15,7 @@ interface ProgressDialogProps {
   theme?: 'light' | 'dark';
   errorMessage?: string;
   onRetry?: () => void;
+  onLogin?: () => void;
   etaSeconds?: number | null;
   statusMessage?: string;
   showWarning?: boolean;
@@ -31,10 +32,18 @@ export function ProgressDialog({
   theme = 'light',
   errorMessage,
   onRetry,
+  onLogin,
   etaSeconds,
   statusMessage,
   showWarning
 }: ProgressDialogProps) {
+  
+  // Check if error message indicates login is required
+  const needsLogin = errorMessage && (
+    errorMessage.toLowerCase().includes('sign in') ||
+    errorMessage.toLowerCase().includes('login required') ||
+    errorMessage.toLowerCase().includes('please sign in')
+  );
   
   const formatTime = (seconds: number) => {
     if (seconds === Infinity) return 'Calculating...';
@@ -182,21 +191,21 @@ export function ProgressDialog({
               >
                 Processing...
               </Button>
-            ) : status === 'error' && onRetry ? (
+            ) : status === 'error' && (needsLogin ? onLogin : onRetry) ? (
               <>
                 <Button
-                  onClick={onRetry}
+                  onClick={needsLogin ? onLogin : onRetry}
                   variant="default"
                   className="flex-1"
                 >
-                  Retry
+                  {needsLogin ? 'Login' : 'Retry'}
                 </Button>
                 <Button
                   onClick={() => onOpenChange(false)}
                   variant="outline"
                   className="flex-1"
                 >
-                  Close
+                  Cancel
                 </Button>
               </>
             ) : (

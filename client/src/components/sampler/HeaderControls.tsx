@@ -1,10 +1,11 @@
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
-import { Upload, Menu, Pencil, Volume2, VolumeX, Square, Sliders, Shield } from 'lucide-react';
+import { Upload, Menu, Pencil, Volume2, VolumeX, Square, Sliders, Shield, LogIn } from 'lucide-react';
 import { SamplerBank } from './types/sampler';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { createPortal } from 'react-dom'
 import { useAuth } from '@/hooks/useAuth';
+import { LoginModal } from '@/components/auth/LoginModal';
 
 
 interface HeaderControlsProps {
@@ -124,10 +125,11 @@ export function HeaderControls({
   onExitDualMode
 }: HeaderControlsProps) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const { profile } = useAuth();
+  const { user, profile, loading } = useAuth();
   const isAdmin = profile?.role === 'admin';
   const [adminDialogOpen, setAdminDialogOpen] = React.useState(false);
   const [AdminAccessDialog, setAdminAccessDialog] = React.useState<React.ComponentType<any> | null>(null);
+  const [showLoginModal, setShowLoginModal] = React.useState(false);
 
   // Dynamically load AdminAccessDialog only for admin users
   React.useEffect(() => {
@@ -142,6 +144,26 @@ export function HeaderControls({
 
   // Slide notices
   const { notices, pushNotice, dismiss } = useNotices()
+  
+  // Track previous user to detect login
+  const prevUserIdRef = React.useRef<string | null>(null);
+  
+  // Show greeting notification when user logs in
+  React.useEffect(() => {
+    const currentUserId = user?.id || null;
+    const justLoggedIn = currentUserId && prevUserIdRef.current !== currentUserId;
+    
+    if (justLoggedIn && profile) {
+      const greeting = getTimeBasedGreeting();
+      const displayName = profile.display_name || user?.email?.split('@')[0] || 'User';
+      pushNotice({
+        variant: 'success',
+        message: `${greeting}, ${displayName}! Welcome back.`
+      });
+    }
+    
+    prevUserIdRef.current = currentUserId;
+  }, [user, profile, pushNotice]);
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -340,6 +362,24 @@ export function HeaderControls({
             {!isMobileScreen && (isMobileScreen ? '' : 'Mixer')}
           </Button>
 
+          {/* Login Button (only shown when not logged in) */}
+          {!user && (
+            <Button
+              onClick={() => setShowLoginModal(true)}
+              variant="outline"
+              size={isMobileScreen ? "sm" : "default"}
+              disabled={loading}
+              className={`${isMobileScreen ? 'w-10' : 'w-24'} transition-all duration-200 ${theme === 'dark'
+                ? 'bg-blue-600/20 border-blue-500 text-blue-300 hover:bg-blue-500 hover:border-blue-400 hover:text-blue-200'
+                : 'bg-blue-50 border-blue-300 text-blue-600 hover:bg-blue-100 hover:border-blue-400 hover:text-blue-700'
+                }`}
+              title="Sign in to your account"
+            >
+              <LogIn className="w-4 h-4" />
+              {!isMobileScreen && 'Login'}
+            </Button>
+          )}
+
           {/* Admin Access (admin-only) */}
           {isAdmin && (
             <Button
@@ -362,6 +402,14 @@ export function HeaderControls({
       {isAdmin && AdminAccessDialog && (
         <AdminAccessDialog open={adminDialogOpen} onOpenChange={setAdminDialogOpen} theme={theme} />
       )}
+
+      {/* Login Modal */}
+      <LoginModal
+        open={showLoginModal}
+        onOpenChange={setShowLoginModal}
+        theme={theme}
+        pushNotice={pushNotice}
+      />
     </>
   );
 }

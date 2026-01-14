@@ -16,7 +16,70 @@ import {
   parseBankIdFromFileName,
   listAccessibleBankIds 
 } from '@/lib/bank-utils';
-import { useAuth } from '@/hooks/useAuth';
+import { useAuth, getCachedUser, getCachedProfile } from '@/hooks/useAuth';
+
+// Helper to detect if running in native Android app (not web browser)
+const isNativeAndroid = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const ua = navigator.userAgent;
+  const isAndroid = /Android/.test(ua);
+  // Check if Capacitor is available and we're in native platform
+  const capacitor = (window as any).Capacitor;
+  return isAndroid && capacitor?.isNativePlatform?.() === true;
+};
+
+// Helper to save file using Capacitor Filesystem or standard download
+// Returns object with success status and message
+const saveBankFile = async (blob: Blob, fileName: string): Promise<{ success: boolean; message?: string }> => {
+  if (isNativeAndroid()) {
+    try {
+      // Use Capacitor Filesystem for native Android
+      const { Filesystem, Directory } = await import('@capacitor/filesystem');
+      
+      // Convert blob to base64
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const result = reader.result as string;
+          // Remove data URL prefix (e.g., "data:application/zip;base64,")
+          const base64 = result.split(',')[1];
+          resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      
+      // Save to Documents directory
+      await Filesystem.writeFile({
+        path: fileName,
+        data: base64Data,
+        directory: Directory.Documents,
+        recursive: true
+      });
+      
+      console.log(`✅ Bank saved to Documents/${fileName}`);
+      return { 
+        success: true, 
+        message: `Bank saved to Documents folder: ${fileName}` 
+      };
+    } catch (error) {
+      console.error('❌ Failed to save using Capacitor Filesystem, falling back to download:', error);
+      // Fall through to standard download
+    }
+  }
+  
+  // Standard web download (works for web browsers and Electron)
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  
+  return { success: true };
+};
 
 interface SamplerStore {
   banks: SamplerBank[];
@@ -43,13 +106,18 @@ interface SamplerStore {
   moveBankUp: (id: string) => void;
   moveBankDown: (id: string) => void;
   transferPad: (padId: string, sourceBankId: string, targetBankId: string) => void;
-  exportAdminBank: (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, onProgress?: (progress: number) => void) => Promise<void>;
+  exportAdminBank: (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, allowExport: boolean, onProgress?: (progress: number) => void) => Promise<void>;
   canTransferFromBank: (bankId: string) => boolean;
 }
 
 const STORAGE_KEY = 'vdjv-sampler-banks';
 const STATE_STORAGE_KEY = 'vdjv-sampler-state';
 const DEFAULT_BANK_LOADED_KEY = 'vdjv-default-bank-loaded';
+
+// Shared encryption password for banks with "Allow Export" disabled
+// This provides security layer without requiring Supabase or user purchase
+// All users (logged in or not) can import these banks
+const SHARED_EXPORT_DISABLED_PASSWORD = 'vdjv-export-disabled-2024-secure';
 
 // File System Access API support check
 const supportsFileSystemAccess = () => {
@@ -409,7 +477,7 @@ export function useSamplerStore(): SamplerStore {
   const [primaryBankId, setPrimaryBankIdState] = React.useState<string | null>(null);
   const [secondaryBankId, setSecondaryBankIdState] = React.useState<string | null>(null);
   const [currentBankId, setCurrentBankIdState] = React.useState<string | null>(null);
-  const [shouldLoadDefaultBank, setShouldLoadDefaultBank] = React.useState<boolean>(false);
+  // Note: Default bank loading is now triggered by user login, not a separate state
 
   const primaryBank = React.useMemo(() => banks.find(b => b.id === primaryBankId) || null, [banks, primaryBankId]);
   const secondaryBank = React.useMemo(() => banks.find(b => b.id === secondaryBankId) || null, [banks, secondaryBankId]);
@@ -428,18 +496,12 @@ export function useSamplerStore(): SamplerStore {
     const savedState = localStorage.getItem(STATE_STORAGE_KEY);
 
     if (!savedData) {
-      // Check if default bank has already been loaded
-      const defaultBankLoaded = localStorage.getItem(DEFAULT_BANK_LOADED_KEY);
-      if (!defaultBankLoaded) {
-        // First install - trigger default bank loading
-        setShouldLoadDefaultBank(true);
-        return;
-      } else {
-        // Default bank was loaded before but no saved data exists (edge case)
-        const defaultBank: SamplerBank = { id: generateId(), name: 'Default Bank', defaultColor: '#3b82f6', pads: [], createdAt: new Date(), sortOrder: 0 };
-        setBanks([defaultBank]); setCurrentBankIdState(defaultBank.id);
-        return;
-      }
+      // No saved data - create empty default bank
+      // Default bank loading will be triggered separately when user logs in
+      const defaultBank: SamplerBank = { id: generateId(), name: 'Default Bank', defaultColor: '#3b82f6', pads: [], createdAt: new Date(), sortOrder: 0 };
+      setBanks([defaultBank]); 
+      setCurrentBankIdState(defaultBank.id);
+      return;
     }
     try {
       const { banks: savedBanks } = JSON.parse(savedData);
@@ -679,6 +741,12 @@ export function useSamplerStore(): SamplerStore {
   const exportBank = React.useCallback(async (id: string, onProgress?: (progress: number) => void) => {
     const bank = banks.find(b => b.id === id);
     if (!bank) throw new Error('Bank not found');
+    
+    // Block export if exportable is false
+    if (bank.exportable === false) {
+      throw new Error('Export is disabled for this bank');
+    }
+    
     try {
       const zip = new JSZip();
       
@@ -774,8 +842,12 @@ export function useSamplerStore(): SamplerStore {
       onProgress && onProgress(80);
       const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 9 } }, (m) => onProgress && onProgress(80 + (m.percent * 0.2)));
       onProgress && onProgress(100);
-      const url = URL.createObjectURL(zipBlob);
-      const a = document.createElement('a'); a.href = url; a.download = `${bank.name.replace(/[^a-z0-9]/gi, '_')}.bank`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+      
+      const fileName = `${bank.name.replace(/[^a-z0-9]/gi, '_')}.bank`;
+      const saveResult = await saveBankFile(zipBlob, fileName);
+      if (saveResult.message) {
+        console.log('✅', saveResult.message);
+      }
     } catch (e) { throw e; }
   }, [banks]);
 
@@ -813,73 +885,94 @@ export function useSamplerStore(): SamplerStore {
       } catch (error) {
         console.log('🔒 Attempting to decrypt bank file...');
         
-        if (!user) {
-          throw new Error('Login required to import encrypted banks. Please sign in and try again.');
-        }
-        
         let decrypted = false;
         let lastError: Error | null = null;
         
-        // Try cached keys
-        for (const [cacheKey, derivedKey] of keyCache.entries()) {
-          try { 
-            contents = await Promise.race([
-              zip.loadAsync(await decryptZip(file, derivedKey)),
-              importTimeout
-            ]);
-            decrypted = true;
-            console.log('✅ Decrypted using cached key');
-            break;
-          } catch (e) {
-            lastError = e instanceof Error ? e : new Error(String(e));
-            console.warn('Decryption attempt failed with cached key:', e);
-          }
+        // First, try shared password (for banks with "Allow Export" disabled)
+        // This works for all users (logged in or not) and doesn't require Supabase
+        try {
+          contents = await Promise.race([
+            zip.loadAsync(await decryptZip(file, SHARED_EXPORT_DISABLED_PASSWORD)),
+            importTimeout
+          ]);
+          decrypted = true;
+          console.log('✅ Decrypted using shared password (export disabled encryption)');
+        } catch (e) {
+          lastError = e instanceof Error ? e : new Error(String(e));
+          console.log('⚠️ Shared password decryption failed, trying user-specific keys...');
         }
         
-        // Try hinted ID from filename
+        // If shared password didn't work, try user-specific keys (requires login)
         if (!decrypted) {
-          const hintedId = parseBankIdFromFileName(file.name);
-          if (hintedId) {
-            try {
-              const d = await getDerivedKey(hintedId, user.id);
-              if (d) {
-                contents = await Promise.race([
-                  zip.loadAsync(await decryptZip(file, d)),
-                  importTimeout
-                ]);
-                decrypted = true;
-                console.log('✅ Decrypted using hinted bank ID');
-              }
+          // Use cached user if auth state not yet synced
+          const effectiveUser = user || getCachedUser();
+          console.log('🔐 Auth check:', { user: !!user, cachedUser: !!getCachedUser(), effectiveUser: !!effectiveUser });
+          
+          if (!effectiveUser) {
+            throw new Error('Login required to import encrypted banks. Please sign in and try again.');
+          }
+          
+            // Try cached keys
+          for (const [cacheKey, derivedKey] of keyCache.entries()) {
+            try { 
+              contents = await Promise.race([
+                zip.loadAsync(await decryptZip(file, derivedKey)),
+                importTimeout
+              ]);
+              decrypted = true;
+              console.log('✅ Decrypted using cached key');
+              break;
             } catch (e) {
               lastError = e instanceof Error ? e : new Error(String(e));
-              console.warn('Decryption attempt failed with hinted ID:', e);
+              console.warn('Decryption attempt failed with cached key:', e);
             }
           }
-        }
-        
-        // Try all accessible banks
-        if (!decrypted) {
-          try {
-            const accessible = await listAccessibleBankIds(user.id);
-            console.log(`🔍 Trying ${accessible.length} accessible banks...`);
-            for (const bankId of accessible) {
+          
+          // Try hinted ID from filename
+          if (!decrypted) {
+            const hintedId = parseBankIdFromFileName(file.name);
+            if (hintedId) {
               try {
-                const d = await getDerivedKey(bankId, user.id);
+                const d = await getDerivedKey(hintedId, effectiveUser.id);
                 if (d) {
                   contents = await Promise.race([
                     zip.loadAsync(await decryptZip(file, d)),
                     importTimeout
                   ]);
                   decrypted = true;
-                  console.log('✅ Decrypted using accessible bank ID:', bankId);
-                  break;
+                  console.log('✅ Decrypted using hinted bank ID');
                 }
               } catch (e) {
-                // Continue to next bank
+                lastError = e instanceof Error ? e : new Error(String(e));
+                console.warn('Decryption attempt failed with hinted ID:', e);
               }
             }
-          } catch (e) {
-            console.error('Error checking accessible banks:', e);
+          }
+          
+          // Try all accessible banks
+          if (!decrypted) {
+            try {
+              const accessible = await listAccessibleBankIds(effectiveUser.id);
+              console.log(`🔍 Trying ${accessible.length} accessible banks...`);
+              for (const bankId of accessible) {
+                try {
+                  const d = await getDerivedKey(bankId, effectiveUser.id);
+                  if (d) {
+                    contents = await Promise.race([
+                      zip.loadAsync(await decryptZip(file, d)),
+                      importTimeout
+                    ]);
+                    decrypted = true;
+                    console.log('✅ Decrypted using accessible bank ID:', bankId);
+                    break;
+                  }
+                } catch (e) {
+                  // Continue to next bank
+                }
+              }
+            } catch (e) {
+              console.error('Error checking accessible banks:', e);
+            }
           }
         }
         
@@ -928,9 +1021,11 @@ export function useSamplerStore(): SamplerStore {
       // LOGIC FIX: 'transferable' should come from metadata explicitly, independent of admin/encryption status
       const isTransferable = metadata?.transferable ?? true;
 
-      if (isAdminBank && !user) throw new Error('Login required');
-      if (isAdminBank && user && metadata?.bankId) {
-        if (!await hasBankAccess(user.id, metadata.bankId)) throw new Error('Access denied');
+      // Use cached user for admin bank access checks (same effectiveUser from above)
+      const userForAccess = user || getCachedUser();
+      if (isAdminBank && !userForAccess) throw new Error('Login required');
+      if (isAdminBank && userForAccess && metadata?.bankId) {
+        if (!await hasBankAccess(userForAccess.id, metadata.bankId)) throw new Error('Access denied');
       }
 
       onProgress && onProgress(30);
@@ -1096,7 +1191,7 @@ export function useSamplerStore(): SamplerStore {
   }, [banks, user]);
 
   // --- FIXED ADMIN EXPORT (Respects "Transferable" & Prevents Audio Bloat) ---
-  const exportAdminBank = React.useCallback(async (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, onProgress?: (progress: number) => void) => {
+  const exportAdminBank = React.useCallback(async (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, allowExport: boolean, onProgress?: (progress: number) => void) => {
       if (!user || profile?.role !== 'admin') throw new Error('Admin only');
       const bank = banks.find(b => b.id === id);
       if (!bank) throw new Error('Bank not found');
@@ -1195,7 +1290,7 @@ export function useSamplerStore(): SamplerStore {
         const bankId = adminBank.id;
         const derivedKey = adminBank.derived_key;
         
-        // LOGIC FIX: Always set transferable to explicit argument
+        // When Add to Database is enabled, export is automatically blocked (exportable: false)
         addBankMetadata(zip, { password: true, transferable, exportable: false, title, description, bankId });
         
         onProgress && onProgress(60);
@@ -1208,37 +1303,46 @@ export function useSamplerStore(): SamplerStore {
         const encrypted = await encryptZip(zip, derivedKey);
         onProgress && onProgress(80);
         
-        const url = URL.createObjectURL(encrypted);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${title.replace(/[^a-z0-9]/gi, '_')}.bank`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        const fileName = `${title.replace(/[^a-z0-9]/gi, '_')}.bank`;
+        const saveResult = await saveBankFile(encrypted, fileName);
+        if (saveResult.message) {
+          console.log('✅', saveResult.message);
+        }
       } else {
-        // LOGIC FIX: 'password: false' means unencrypted, but 'transferable' must still be respected
-        addBankMetadata(zip, { password: false, transferable, exportable: true, title, description });
+        // When Add to Database is disabled, use allowExport value to control export permission
+        addBankMetadata(zip, { password: !allowExport, transferable, exportable: allowExport, title, description });
         
         onProgress && onProgress(60);
-        console.log('📦 Creating shareable admin bank (unencrypted, no database entry)');
         
-        const zipBlob = await zip.generateAsync({ 
-          type: 'blob', 
-          compression: 'DEFLATE', 
-          compressionOptions: { level: 9 } 
-        }, (m) => onProgress && onProgress(60 + (m.percent * 0.3)));
-        
-        onProgress && onProgress(90);
-        
-        const url = URL.createObjectURL(zipBlob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${title.replace(/[^a-z0-9]/gi, '_')}.bank`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        if (!allowExport) {
+          // Encrypt with shared password when Allow Export is disabled
+          console.log('🔒 Encrypting bank with shared password (export disabled)');
+          const encrypted = await encryptZip(zip, SHARED_EXPORT_DISABLED_PASSWORD);
+          onProgress && onProgress(90);
+          
+          const fileName = `${title.replace(/[^a-z0-9]/gi, '_')}.bank`;
+          const saveResult = await saveBankFile(encrypted, fileName);
+          if (saveResult.message) {
+            console.log('✅', saveResult.message);
+          }
+        } else {
+          // Unencrypted when Allow Export is enabled
+          console.log('📦 Creating shareable admin bank (unencrypted, no database entry)');
+          
+          const zipBlob = await zip.generateAsync({ 
+            type: 'blob', 
+            compression: 'DEFLATE', 
+            compressionOptions: { level: 9 } 
+          }, (m) => onProgress && onProgress(60 + (m.percent * 0.3)));
+          
+          onProgress && onProgress(90);
+          
+          const fileName = `${title.replace(/[^a-z0-9]/gi, '_')}.bank`;
+          const saveResult = await saveBankFile(zipBlob, fileName);
+          if (saveResult.message) {
+            console.log('✅', saveResult.message);
+          }
+        }
       }
       
       onProgress && onProgress(100);
@@ -1270,13 +1374,45 @@ export function useSamplerStore(): SamplerStore {
     }
   }, []);
 
-  // Auto-load default bank on first install
+  // Track previous user ID to detect login events
+  const prevUserIdRef = React.useRef<string | null>(null);
+  
+  // Auto-load default bank ONLY when user logs in (not on every render)
   React.useEffect(() => {
-    if (!shouldLoadDefaultBank || banks.length > 0) return;
+    const currentUser = user || getCachedUser();
+    const currentUserId = currentUser?.id || null;
+    
+    // Only proceed if user just logged in (user ID changed from null/other to current)
+    const justLoggedIn = currentUserId && prevUserIdRef.current !== currentUserId;
+    
+    if (!justLoggedIn) {
+      prevUserIdRef.current = currentUserId;
+      return;
+    }
+    
+    // Update ref to prevent re-running
+    prevUserIdRef.current = currentUserId;
+    
+    // Check user-specific key to prevent re-loading
+    const userDefaultBankKey = `${DEFAULT_BANK_LOADED_KEY}_${currentUserId}`;
+    const alreadyLoaded = localStorage.getItem(userDefaultBankKey);
     
     const loadDefaultBank = async () => {
       try {
-        console.log('📦 Loading default bank on first install...');
+        console.log('📦 Loading default bank for user:', currentUserId);
+        
+        // Find and delete empty "Default Bank" if it exists
+        const emptyDefaultBank = banks.find(b => 
+          b.name === 'Default Bank' && (!b.pads || b.pads.length === 0)
+        );
+        if (emptyDefaultBank) {
+          console.log('🗑️ Removing empty Default Bank before loading DEFAULT_BANK.bank');
+          setBanks(prev => prev.filter(b => b.id !== emptyDefaultBank.id));
+          if (currentBankId === emptyDefaultBank.id) {
+            setCurrentBankIdState(null);
+          }
+        }
+        
         const basePath = getDefaultBankPath();
         console.log('🔍 Attempting to load from:', basePath);
         
@@ -1313,34 +1449,26 @@ export function useSamplerStore(): SamplerStore {
           // Rename to "Default Bank" and set as current
           updateBank(importedBank.id, { name: 'Default Bank' });
           setCurrentBankIdState(importedBank.id);
-          // Mark as loaded to prevent re-importing
-          localStorage.setItem(DEFAULT_BANK_LOADED_KEY, 'true');
-          setShouldLoadDefaultBank(false);
-          console.log('✅ Default bank loaded successfully');
+          // Mark as loaded for this specific user
+          localStorage.setItem(userDefaultBankKey, 'true');
+          console.log('✅ Default bank loaded successfully for user:', currentUserId);
         } else {
           throw new Error('Import returned null');
         }
       } catch (error) {
-        console.warn('⚠️ Failed to load default bank, creating empty bank instead:', error);
-        console.error('Error details:', error instanceof Error ? error.stack : error);
-        // Fallback to creating empty default bank
-        const defaultBank: SamplerBank = { 
-          id: generateId(), 
-          name: 'Default Bank', 
-          defaultColor: '#3b82f6', 
-          pads: [], 
-          createdAt: new Date(), 
-          sortOrder: 0 
-        };
-        setBanks([defaultBank]);
-        setCurrentBankIdState(defaultBank.id);
-        localStorage.setItem(DEFAULT_BANK_LOADED_KEY, 'true');
-        setShouldLoadDefaultBank(false);
+        console.warn('⚠️ Failed to load default bank:', error);
+        // Mark as loaded anyway to prevent repeated attempts
+        localStorage.setItem(userDefaultBankKey, 'true');
       }
     };
 
-    loadDefaultBank();
-  }, [shouldLoadDefaultBank, banks.length, importBank, updateBank, getDefaultBankPath]);
+    // Only load if not already loaded for this user
+    if (!alreadyLoaded) {
+      loadDefaultBank();
+    } else {
+      console.log('📦 Default bank: Already loaded for this user, skipping');
+    }
+  }, [user, importBank, updateBank, getDefaultBankPath, banks, currentBankId]);
 
   return {
     banks, primaryBankId, secondaryBankId, currentBankId, primaryBank, secondaryBank, currentBank, isDualMode,

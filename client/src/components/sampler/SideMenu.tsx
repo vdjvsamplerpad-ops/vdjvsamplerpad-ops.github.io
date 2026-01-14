@@ -9,6 +9,8 @@ import { ProgressDialog } from '@/components/ui/progress-dialog';
 import { Plus, Settings, Upload, X, Crown, Minus, RotateCcw, Sun, Moon, ChevronUp, ChevronDown, Loader2 } from 'lucide-react';
 import { SamplerBank, StopMode, PadData } from './types/sampler';
 import { BankEditDialog } from './BankEditDialog';
+import { LoginModal } from '@/components/auth/LoginModal';
+import { useAuth } from '@/hooks/useAuth';
 import { createPortal } from 'react-dom';
 
 type Notice = { id: string; variant: 'success' | 'error' | 'info'; message: string };
@@ -48,7 +50,7 @@ interface SideMenuProps {
   onMoveBankDown: (id: string) => void;
   onTransferPad: (padId: string, sourceBankId: string, targetBankId: string) => void;
   canTransferFromBank?: (bankId: string) => boolean;
-  onExportAdmin?: (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, onProgress?: (progress: number) => void) => Promise<void>;
+  onExportAdmin?: (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, allowExport: boolean, onProgress?: (progress: number) => void) => Promise<void>;
 }
 
 export function SideMenu({
@@ -88,6 +90,8 @@ export function SideMenu({
   const [newBankName, setNewBankName] = React.useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = React.useState(false);
   const [bankToDelete, setBankToDelete] = React.useState<SamplerBank | null>(null);
+  const [showLoginModal, setShowLoginModal] = React.useState(false);
+  const [pendingImportFile, setPendingImportFile] = React.useState<File | null>(null);
   
   // Progress State
   const [showExportProgress, setShowExportProgress] = React.useState(false);
@@ -124,6 +128,8 @@ export function SideMenu({
   }, []);
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const { user } = useAuth();
+  const prevUserIdRef = React.useRef<string | null>(null);
 
   const isMobile = windowWidth < 768;
   const maxPadSize = isMobile ? 6 : 14;
@@ -296,11 +302,25 @@ export function SideMenu({
       });
       setImportStatus('success');
       pushNotice({ variant: 'success', message: 'Bank imported successfully!' });
+      setPendingImportFile(null); // Clear pending file on success
     } catch (error) {
       console.error('❌ Import failed:', error);
       const errorMessage = error instanceof Error ? error.message : 'Import failed';
       setImportStatus('error');
       setImportError(errorMessage);
+      
+      // Check if error is login-related
+      const needsLogin = errorMessage.toLowerCase().includes('sign in') || 
+                        errorMessage.toLowerCase().includes('login required') ||
+                        errorMessage.toLowerCase().includes('please sign in');
+      
+      if (needsLogin) {
+        // Store file for auto-import after login
+        setPendingImportFile(file);
+      } else {
+        setPendingImportFile(null);
+      }
+      
       pushNotice({ variant: 'error', message: `Import failed: ${errorMessage}` });
     }
 
@@ -315,6 +335,28 @@ export function SideMenu({
       await processFileImport(file);
     }
   }, [processFileImport]);
+
+  // Auto-import pending file after login (moved here after processFileImport is defined)
+  React.useEffect(() => {
+    const currentUserId = user?.id || null;
+    const justLoggedIn = currentUserId && prevUserIdRef.current !== currentUserId;
+    
+    if (justLoggedIn && pendingImportFile) {
+      prevUserIdRef.current = currentUserId;
+      // Close login modal
+      setShowLoginModal(false);
+      
+      // Small delay to ensure login state is fully propagated
+      setTimeout(() => {
+        // Auto-import the pending file
+        processFileImport(pendingImportFile).finally(() => {
+          setPendingImportFile(null);
+        });
+      }, 100);
+    } else {
+      prevUserIdRef.current = currentUserId;
+    }
+  }, [user, pendingImportFile, processFileImport]);
 
   // ETA Calculation Effect
   React.useEffect(() => {
@@ -913,6 +955,10 @@ export function SideMenu({
         onRetry={() => {
           handleImportClick();
         }}
+        onLogin={() => {
+          // File is already stored in pendingImportFile when error occurred
+          setShowLoginModal(true);
+        }}
       />
 
       {/* Toast Notifications */}
@@ -926,6 +972,14 @@ export function SideMenu({
         </div>,
         document.body
       )}
+
+      {/* Login Modal */}
+      <LoginModal
+        open={showLoginModal}
+        onOpenChange={setShowLoginModal}
+        theme={theme}
+        pushNotice={pushNotice}
+      />
     </>
   );
 }

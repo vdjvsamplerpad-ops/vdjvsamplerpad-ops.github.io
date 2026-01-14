@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">VDJV Sampler Pad</string>
-    <string name="title_activity_main">VDJV Sampler Pad</string>
-    <string name="package_name">com.vdjv.samplerpad</string>
-    <string name="custom_url_scheme">com.vdjv.samplerpad</string>
+    <string name="app_name">vdjv-sampler-pad</string>
+    <string name="title_activity_main">vdjv-sampler-pad</string>
+    <string name="package_name">com.powerworkout.vdjv</string>
+    <string name="custom_url_scheme">com.powerworkout.vdjv</string>
 </resources>

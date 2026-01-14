@@ -1,4 +1,4 @@
-package com.vdjv.samplerpad;
+package com.powerworkout.vdjv;
 
 import com.getcapacitor.BridgeActivity;
 

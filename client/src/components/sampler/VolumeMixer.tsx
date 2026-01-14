@@ -2,9 +2,8 @@ import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Label } from '@/components/ui/label';
-import { Volume2, X, Square, Waves, SlidersHorizontal as Equalizer, LogIn, LogOut } from 'lucide-react';
+import { Volume2, X, Square, Waves, SlidersHorizontal as Equalizer, LogOut } from 'lucide-react';
 import { PlayingPadInfo, StopMode } from './types/sampler';
-import { LoginModal } from '@/components/auth/LoginModal';
 import { useAuth } from '@/hooks/useAuth';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { createPortal } from 'react-dom';
@@ -123,7 +122,6 @@ export function VolumeMixer({
   theme,
   windowWidth
 }: VolumeMixerProps) {
-  const [showLoginModal, setShowLoginModal] = React.useState(false);
   const { user, loading, signOut } = useAuth();
   const [showLogoutConfirm, setShowLogoutConfirm] = React.useState(false);
   
@@ -138,12 +136,8 @@ export function VolumeMixer({
     onEqChange({ ...eqSettings, [type]: 0 });
   };
 
-  const handleAuthAction = async () => {
-    if (user) {
-      setShowLogoutConfirm(true);
-    } else {
-      setShowLoginModal(true);
-    }
+  const handleLogout = () => {
+    setShowLogoutConfirm(true);
   };
 
   const confirmLogout = async () => {
@@ -167,24 +161,24 @@ export function VolumeMixer({
         } ${open ? 'translate-x-0' : 'translate-x-full'}`}>
         <div className={`flex items-center justify-between p-4 border-b ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'
           }`}>
-          {/* Auth Button */}
-          <Button
-            onClick={handleAuthAction}
-            variant="outline"
-            size="sm"
-            disabled={loading}
-            className={`transition-all duration-200 ${user
-              ? theme === 'dark'
+          {/* Logout Button (only shown when logged in) */}
+          {user ? (
+            <Button
+              onClick={handleLogout}
+              variant="outline"
+              size="sm"
+              disabled={loading}
+              className={`transition-all duration-200 ${theme === 'dark'
                 ? 'bg-red-600/20 border-red-500 text-red-300 hover:bg-red-500 hover:border-red-400 hover:text-red-200'
                 : 'bg-red-50 border-red-300 text-red-600 hover:bg-red-100 hover:border-red-400 hover:text-red-700'
-              : theme === 'dark'
-                ? 'bg-blue-600/20 border-blue-500 text-blue-300 hover:bg-blue-500 hover:border-blue-400 hover:text-blue-200'
-                : 'bg-blue-50 border-blue-300 text-blue-600 hover:bg-blue-100 hover:border-blue-400 hover:text-blue-700'
-              }`}
-            title={user ? 'Sign out' : 'Sign in to your account'}
-          >
-            {user ? <LogOut className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}
-          </Button>
+                }`}
+              title="Sign out"
+            >
+              <LogOut className="w-4 h-4" />
+            </Button>
+          ) : (
+            <div className="w-8" /> /* Spacer when not logged in */
+          )}
 
           <h2 className={`text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
             Mixer
@@ -380,13 +374,6 @@ export function VolumeMixer({
           </div>
         </div>
       </div>
-
-      <LoginModal
-        open={showLoginModal}
-        onOpenChange={setShowLoginModal}
-        theme={theme}
-        pushNotice={pushNotice}
-      />
 
       {/* Logout Confirmation */}
       <ConfirmationDialog

@@ -65,6 +65,9 @@ export interface PlayingPadInfo {
   bankName: string;
   color: string;
   volume: number;
+  effectiveVolume?: number; // Runtime volume that may differ from original
+  currentMs?: number; // Current playback position
+  endMs?: number; // Total duration
 }
 
 export interface AudioControls {

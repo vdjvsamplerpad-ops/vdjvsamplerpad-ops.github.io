@@ -18,7 +18,7 @@ interface BankEditDialogProps {
   onSave: (updates: Partial<SamplerBank>) => void;
   onDelete: () => void;
   onExport: () => void;
-  onExportAdmin?: (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, onProgress?: (progress: number) => void) => Promise<void>;
+  onExportAdmin?: (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, allowExport: boolean, onProgress?: (progress: number) => void) => Promise<void>;
 }
 
 const colorOptions = [
@@ -63,6 +63,7 @@ export function BankEditDialog({ bank, open, onOpenChange, theme, onSave, onDele
   const [adminDescription, setAdminDescription] = React.useState('');
   const [adminTransferable, setAdminTransferable] = React.useState(false);
   const [adminAddToDatabase, setAdminAddToDatabase] = React.useState(false);
+  const [adminAllowExport, setAdminAllowExport] = React.useState(false);
   const [showAdminExportProgress, setShowAdminExportProgress] = React.useState(false);
   const [adminExportProgress, setAdminExportProgress] = React.useState(0);
   const [adminExportStatus, setAdminExportStatus] = React.useState<'loading' | 'success' | 'error'>('loading');
@@ -76,6 +77,7 @@ export function BankEditDialog({ bank, open, onOpenChange, theme, onSave, onDele
       setAdminDescription('');
       setAdminTransferable(false);
       setAdminAddToDatabase(false);
+      setAdminAllowExport(true); // Default to true when Add to Database is disabled
     }
   }, [open, bank]);
 
@@ -103,7 +105,7 @@ export function BankEditDialog({ bank, open, onOpenChange, theme, onSave, onDele
     setAdminExportError('');
 
     try {
-      await onExportAdmin(bank.id, adminTitle, adminDescription, adminTransferable, adminAddToDatabase, (progress) => {
+      await onExportAdmin(bank.id, adminTitle, adminDescription, adminTransferable, adminAddToDatabase, adminAllowExport, (progress) => {
         setAdminExportProgress(progress);
       });
       setAdminExportStatus('success');
@@ -204,8 +206,8 @@ export function BankEditDialog({ bank, open, onOpenChange, theme, onSave, onDele
               </Button>
               <Button
                 onClick={() => {
-                  // Disable export if this is an admin-imported bank marked non-exportable
-                  if (bank.isAdminBank && bank.exportable === false) {
+                  // Block export if exportable is false
+                  if (bank.exportable === false) {
                     return;
                   }
                   if (isAdmin && onExportAdmin) {
@@ -215,8 +217,9 @@ export function BankEditDialog({ bank, open, onOpenChange, theme, onSave, onDele
                   }
                 }}
                 variant="outline"
-                className={`px-3 ${bank.isAdminBank && bank.exportable === false ? 'opacity-50 cursor-not-allowed' : ''}`}
-                title={isAdmin ? 'Export (admin)' : 'Export'}
+                disabled={bank.exportable === false}
+                className={`px-3 ${bank.exportable === false ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title={bank.exportable === false ? 'Export disabled for this bank' : (isAdmin ? 'Export (admin)' : 'Export')}
               >
                 <Download className="w-4 h-4" />
               </Button>
@@ -281,15 +284,37 @@ export function BankEditDialog({ bank, open, onOpenChange, theme, onSave, onDele
               <div>
                 <Label htmlFor="adminAddToDatabase">Add to Database</Label>
                 <p className={`text-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
-                  Official bank with user access control
+                  Official bank with user access control (export automatically disabled)
                 </p>
               </div>
               <Switch
                 id="adminAddToDatabase"
                 checked={adminAddToDatabase}
-                onCheckedChange={setAdminAddToDatabase}
+                onCheckedChange={(checked) => {
+                  setAdminAddToDatabase(checked);
+                  if (checked) {
+                    // When Add to Database is enabled, export is automatically blocked
+                    setAdminAllowExport(false);
+                  }
+                }}
               />
             </div>
+
+            {!adminAddToDatabase && (
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label htmlFor="adminAllowExport">Allow Export</Label>
+                  <p className={`text-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+                    Users can export this bank after importing
+                  </p>
+                </div>
+                <Switch
+                  id="adminAllowExport"
+                  checked={adminAllowExport}
+                  onCheckedChange={setAdminAllowExport}
+                />
+              </div>
+            )}
 
             <div className="flex gap-2 pt-4">
               <Button onClick={handleAdminExport} className="flex-1" disabled={!adminTitle.trim()}>

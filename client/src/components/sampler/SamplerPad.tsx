@@ -44,7 +44,7 @@ export function SamplerPad({
   theme,
   stopMode,
   eqSettings,
-  padSize = 4,
+  padSize = 5,
   onUpdatePad,
   onRemovePad,
   onDragStart,

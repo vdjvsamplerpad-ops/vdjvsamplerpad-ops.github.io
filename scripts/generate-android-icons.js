@@ -53,6 +53,19 @@ async function generateIcons() {
     await sharp(sourceIcon)
       .resize(foregroundSize, foregroundSize, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
       .toFile(foregroundPath);
+
+    // Generate background for adaptive icon (solid black background)
+    const backgroundPath = join(outputDir, 'ic_launcher_background.png');
+    await sharp({
+      create: {
+        width: size,
+        height: size,
+        channels: 4,
+        background: { r: 0, g: 0, b: 0, alpha: 1 }
+      }
+    })
+      .png()
+      .toFile(backgroundPath);
   }
 
   console.log('✓ Android icons generated successfully!');

@@ -11,6 +11,102 @@ const keyCache = new Map<string, string>();
 // Export keyCache for use in other modules
 export { keyCache };
 
+// LocalStorage keys for offline caching
+const ACCESSIBLE_BANKS_CACHE_KEY = 'vdjv-accessible-banks';
+const BANK_KEYS_CACHE_KEY = 'vdjv-bank-derived-keys';
+
+interface CachedAccessibleBanks {
+  userId: string;
+  bankIds: string[];
+  timestamp: number;
+}
+
+interface CachedBankKeys {
+  userId: string;
+  keys: Record<string, string>; // bankId -> derivedKey
+  timestamp: number;
+}
+
+// Helper to get cached accessible banks
+function getCachedAccessibleBanks(userId: string): string[] | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const cached = localStorage.getItem(ACCESSIBLE_BANKS_CACHE_KEY);
+    if (!cached) return null;
+    const data: CachedAccessibleBanks = JSON.parse(cached);
+    // Check if cache is for the same user
+    if (data.userId !== userId) return null;
+    // Cache is valid for 24 hours
+    if (Date.now() - data.timestamp > 24 * 60 * 60 * 1000) return null;
+    return data.bankIds;
+  } catch {
+    return null;
+  }
+}
+
+// Helper to cache accessible banks
+function setCachedAccessibleBanks(userId: string, bankIds: string[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const data: CachedAccessibleBanks = { userId, bankIds, timestamp: Date.now() };
+    localStorage.setItem(ACCESSIBLE_BANKS_CACHE_KEY, JSON.stringify(data));
+    console.log('✅ Cached accessible banks:', bankIds.length);
+  } catch (e) {
+    console.warn('Failed to cache accessible banks:', e);
+  }
+}
+
+// Helper to get cached bank derived keys
+function getCachedBankKeys(userId: string): Record<string, string> | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const cached = localStorage.getItem(BANK_KEYS_CACHE_KEY);
+    if (!cached) return null;
+    const data: CachedBankKeys = JSON.parse(cached);
+    if (data.userId !== userId) return null;
+    // Cache is valid for 24 hours
+    if (Date.now() - data.timestamp > 24 * 60 * 60 * 1000) return null;
+    return data.keys;
+  } catch {
+    return null;
+  }
+}
+
+// Helper to cache bank derived keys
+function setCachedBankKeys(userId: string, keys: Record<string, string>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const data: CachedBankKeys = { userId, keys, timestamp: Date.now() };
+    localStorage.setItem(BANK_KEYS_CACHE_KEY, JSON.stringify(data));
+    console.log('✅ Cached bank keys:', Object.keys(keys).length);
+  } catch (e) {
+    console.warn('Failed to cache bank keys:', e);
+  }
+}
+
+// Helper to update cached bank keys with a new key
+function addToCachedBankKeys(userId: string, bankId: string, derivedKey: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    let data: CachedBankKeys;
+    const cached = localStorage.getItem(BANK_KEYS_CACHE_KEY);
+    if (cached) {
+      data = JSON.parse(cached);
+      if (data.userId === userId) {
+        data.keys[bankId] = derivedKey;
+        data.timestamp = Date.now();
+      } else {
+        data = { userId, keys: { [bankId]: derivedKey }, timestamp: Date.now() };
+      }
+    } else {
+      data = { userId, keys: { [bankId]: derivedKey }, timestamp: Date.now() };
+    }
+    localStorage.setItem(BANK_KEYS_CACHE_KEY, JSON.stringify(data));
+  } catch (e) {
+    console.warn('Failed to add to cached bank keys:', e);
+  }
+}
+
 /**
  * Derive password from bank ID using SHA-256
  */
@@ -63,16 +159,26 @@ export async function decryptZip(encryptedBlob: Blob, password: string): Promise
 
 /**
  * Get derived key for a bank from cache or database
+ * Falls back to localStorage cache when offline
  */
 export async function getDerivedKey(bankId: string, userId: string): Promise<string | null> {
-  // Check cache first
+  // Check memory cache first
   const cacheKey = `${userId}-${bankId}`;
   if (keyCache.has(cacheKey)) {
     return keyCache.get(cacheKey)!;
   }
 
+  // Check localStorage cache (for offline support)
+  const cachedKeys = getCachedBankKeys(userId);
+  if (cachedKeys && cachedKeys[bankId]) {
+    const derivedKey = cachedKeys[bankId];
+    keyCache.set(cacheKey, derivedKey); // Populate memory cache
+    console.log('✅ Using cached derived key for bank:', bankId);
+    return derivedKey;
+  }
+
   try {
-      // Check if user has access to this bank
+    // Check if user has access to this bank
     const { data: access, error } = await supabase
       .from('user_bank_access')
       .select('*')
@@ -95,11 +201,19 @@ export async function getDerivedKey(bankId: string, userId: string): Promise<str
       return null;
     }
 
-    // Cache the derived key
+    // Cache the derived key in memory and localStorage
     keyCache.set(cacheKey, bank.derived_key);
+    addToCachedBankKeys(userId, bankId, bank.derived_key);
+    
     return bank.derived_key;
   } catch (error) {
     console.error('Error getting derived key:', error);
+    // Try localStorage cache as fallback when network fails
+    const fallbackKeys = getCachedBankKeys(userId);
+    if (fallbackKeys && fallbackKeys[bankId]) {
+      console.log('⚠️ Network failed, using cached key for:', bankId);
+      return fallbackKeys[bankId];
+    }
     return null;
   }
 }
@@ -238,15 +352,90 @@ export function parseBankIdFromFileName(fileName: string): string | null {
   return match ? match[0] : null;
 }
 
+/**
+ * List all bank IDs the user has access to
+ * Uses localStorage cache for offline support
+ */
 export async function listAccessibleBankIds(userId: string): Promise<string[]> {
+  // Check localStorage cache first (for offline support)
+  const cached = getCachedAccessibleBanks(userId);
+  
   try {
     const { data, error } = await supabase
       .from('user_bank_access')
       .select('bank_id')
       .eq('user_id', userId);
-    if (error || !data) return [];
-    return data.map((row: any) => row.bank_id as string);
-  } catch {
+    
+    if (error || !data) {
+      // Network failed, use cache if available
+      if (cached) {
+        console.log('⚠️ Network failed, using cached accessible banks');
+        return cached;
+      }
+      return [];
+    }
+    
+    const bankIds = data.map((row: any) => row.bank_id as string);
+    
+    // Cache the results for offline use
+    setCachedAccessibleBanks(userId, bankIds);
+    
+    return bankIds;
+  } catch (error) {
+    console.error('Error listing accessible banks:', error);
+    // Network failed, use cache if available
+    if (cached) {
+      console.log('⚠️ Network failed, using cached accessible banks');
+      return cached;
+    }
     return [];
+  }
+}
+
+/**
+ * Refresh the user's accessible banks cache
+ * Call this when user logs in or when app starts
+ */
+export async function refreshAccessibleBanksCache(userId: string): Promise<void> {
+  try {
+    console.log('🔄 Refreshing accessible banks cache for user:', userId);
+    
+    // Fetch all accessible banks
+    const { data: accessData, error: accessError } = await supabase
+      .from('user_bank_access')
+      .select('bank_id')
+      .eq('user_id', userId);
+    
+    if (accessError || !accessData) {
+      console.warn('Failed to fetch accessible banks:', accessError);
+      return;
+    }
+    
+    const bankIds = accessData.map((row: any) => row.bank_id as string);
+    setCachedAccessibleBanks(userId, bankIds);
+    
+    // Fetch and cache derived keys for all accessible banks
+    const keysToCache: Record<string, string> = {};
+    for (const bankId of bankIds) {
+      const { data: bankData, error: bankError } = await supabase
+        .from('banks')
+        .select('derived_key')
+        .eq('id', bankId)
+        .single();
+      
+      if (!bankError && bankData?.derived_key) {
+        keysToCache[bankId] = bankData.derived_key;
+        // Also populate memory cache
+        keyCache.set(`${userId}-${bankId}`, bankData.derived_key);
+      }
+    }
+    
+    if (Object.keys(keysToCache).length > 0) {
+      setCachedBankKeys(userId, keysToCache);
+    }
+    
+    console.log('✅ Cached', bankIds.length, 'accessible banks and', Object.keys(keysToCache).length, 'derived keys');
+  } catch (error) {
+    console.error('Error refreshing accessible banks cache:', error);
   }
 }

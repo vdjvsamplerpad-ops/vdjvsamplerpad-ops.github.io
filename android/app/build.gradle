@@ -1,10 +1,10 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace "com.vdjv.samplerpad"
+    namespace "com.powerworkout.vdjv"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.vdjv.samplerpad"
+        applicationId "com.powerworkout.vdjv"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
