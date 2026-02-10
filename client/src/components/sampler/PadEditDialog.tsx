@@ -7,52 +7,76 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Slider } from '@/components/ui/slider';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { Upload, Image as ImageIcon } from 'lucide-react';
-import { PadData } from './types/sampler';
+import { PadData, SamplerBank } from './types/sampler';
 import { WaveformTrim } from './WaveformTrim';
-import { isReservedShortcutCombo, normalizeShortcutKey, RESERVED_SHORTCUT_KEYS } from '@/lib/keyboard-shortcuts';
+import { isReservedShortcutCombo, normalizeShortcutKey, normalizeStoredShortcutKey, RESERVED_SHORTCUT_KEYS } from '@/lib/keyboard-shortcuts';
+import { MidiMessage } from '@/lib/midi';
+import { LED_COLOR_PALETTE } from '@/lib/led-colors';
 
 interface PadEditDialogProps {
   pad: PadData;
+  allBanks?: SamplerBank[];
   allPads?: PadData[];
+  bankPads?: PadData[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSave: (pad: PadData) => void;
   onUnload: () => void;
+  midiEnabled?: boolean;
+  blockedShortcutKeys?: Set<string>;
+  blockedMidiNotes?: Set<number>;
+  blockedMidiCCs?: Set<number>;
 }
 
-const colorOptions = [
-  { label: 'Red', value: '#ef4444' },
-  { label: 'Orange', value: '#f97316' },
-  { label: 'Amber', value: '#f59e0b' },
-  { label: 'Yellow', value: '#eab308' },
-  { label: 'Lime', value: '#84cc16' },
-  { label: 'Green', value: '#22c55e' },
-  { label: 'Emerald', value: '#10b981' },
-  { label: 'Teal', value: '#14b8a6' },
-  { label: 'Cyan', value: '#06b6d4' },
-  { label: 'Sky', value: '#0ea5e9' },
-  { label: 'Blue', value: '#3b82f6' },
-  { label: 'Indigo', value: '#6366f1' },
-  { label: 'Violet', value: '#8b5cf6' },
-  { label: 'Purple', value: '#a855f7' },
-  { label: 'Fuchsia', value: '#d946ef' },
-  { label: 'Pink', value: '#ec4899' },
-  { label: 'Rose', value: '#f43f5e' },
-  { label: 'Gray', value: '#6b7280' },
-  { label: 'Black', value: '#1f2937' },
-  { label: 'White', value: '#f9fafb' },
-  // New colors
-  { label: 'Brown', value: '#92400e' },
-  { label: 'Neon Green', value: '#39ff14' },
-  { label: 'Neon Yellow', value: '#ffff00' },
-  { label: 'Hot Pink', value: '#ff0095' },
-  { label: 'Gold', value: '#ffd700' },
-  { label: 'Maroon', value: '#800000' },
-  { label: 'Turquoise', value: '#40e0d0' },
-  { label: 'Coral', value: '#ff6600' },
+const PAD_PRIMARY_COLOR_NAMES = [
+  'Dim Gray',
+  'Gray',
+  'White',
+  'Red',
+  'Amber',
+  'Orange',
+  'Light Yellow',
+  'Yellow',
+  'Green',
+  'Aqua',
+  'Blue',
+  'Pure Blue',
+  'Violet',
+  'Purple',
+  'Hot Pink',
+  'Hot Pink 2',
+  'Deep Magenta',
+  'Deep Brown 2'
 ];
 
-export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, onUnload }: PadEditDialogProps) {
+const colorOptions = LED_COLOR_PALETTE
+  .filter((entry) => entry.velocity > 0)
+  .filter((entry, index, arr) => arr.findIndex((item) => item.hex === entry.hex) === index)
+  .map((entry) => ({ label: entry.name, value: entry.hex }));
+
+const primaryPadColors = PAD_PRIMARY_COLOR_NAMES
+  .map((name) => colorOptions.find((entry) => entry.label === name))
+  .filter(Boolean) as Array<{ label: string; value: string }>;
+
+const extraPadColors = colorOptions.filter(
+  (entry) => !primaryPadColors.some((primary) => primary.value === entry.value)
+);
+
+export function PadEditDialog({
+  pad,
+  allBanks = [],
+  allPads = [],
+  bankPads = [],
+  open,
+  onOpenChange,
+  onSave,
+  onUnload,
+  midiEnabled = false,
+  blockedShortcutKeys,
+  blockedMidiNotes,
+  blockedMidiCCs
+}: PadEditDialogProps) {
+  type PadWithMidi = PadData & { midiNote?: number; midiCC?: number };
   const [name, setName] = React.useState(pad.name);
   const [color, setColor] = React.useState(pad.color);
   const [triggerMode, setTriggerMode] = React.useState(pad.triggerMode);
@@ -67,11 +91,19 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
   const [imageData, setImageData] = React.useState(pad.imageData || '');
   const [shortcutKey, setShortcutKey] = React.useState(pad.shortcutKey || '');
   const [shortcutError, setShortcutError] = React.useState<string | null>(null);
+  const [midiError, setMidiError] = React.useState<string | null>(null);
+  const [midiNote, setMidiNote] = React.useState<number | undefined>((pad as PadWithMidi).midiNote);
+  const [midiCC, setMidiCC] = React.useState<number | undefined>((pad as PadWithMidi).midiCC);
+  const [ignoreChannel, setIgnoreChannel] = React.useState(!!pad.ignoreChannel);
+  const [midiLearnActive, setMidiLearnActive] = React.useState(false);
   const [audioDuration, setAudioDuration] = React.useState(0);
   const [isUploading, setIsUploading] = React.useState(false);
   const [uploadError, setUploadError] = React.useState<string | null>(null);
   const [showUnloadConfirm, setShowUnloadConfirm] = React.useState(false);
+  const [showUnsavedConfirm, setShowUnsavedConfirm] = React.useState(false);
+  const [showAllColors, setShowAllColors] = React.useState(false);
   const imageInputRef = React.useRef<HTMLInputElement>(null);
+  const initialSnapshotRef = React.useRef<string>('');
 
   React.useEffect(() => {
     if (open) {
@@ -89,7 +121,30 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
       setImageData(pad.imageData || '');
       setShortcutKey(pad.shortcutKey || '');
       setShortcutError(null);
+      setMidiNote((pad as PadWithMidi).midiNote);
+      setMidiCC((pad as PadWithMidi).midiCC);
+      setIgnoreChannel(!!pad.ignoreChannel);
+      setMidiLearnActive(false);
+      setMidiError(null);
       setUploadError(null);
+      initialSnapshotRef.current = JSON.stringify({
+        name: pad.name,
+        color: pad.color,
+        triggerMode: pad.triggerMode,
+        playbackMode: pad.playbackMode,
+        volume: pad.volume,
+        startTimeMs: pad.startTimeMs || 0,
+        endTimeMs: pad.endTimeMs || 0,
+        fadeInMs: pad.fadeInMs || 0,
+        fadeOutMs: pad.fadeOutMs || 0,
+        pitch: pad.pitch || 0,
+        imageUrl: pad.imageUrl || '',
+        imageData: pad.imageData || '',
+        shortcutKey: pad.shortcutKey || '',
+        midiNote: (pad as PadWithMidi).midiNote ?? null,
+        midiCC: (pad as PadWithMidi).midiCC ?? null,
+        ignoreChannel: !!pad.ignoreChannel
+      });
 
       if (pad.audioUrl) {
         let durationLoaded = false;
@@ -141,6 +196,111 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
       }
     }
   }, [open, pad]);
+
+  const getCurrentSnapshot = React.useCallback(() => {
+    return JSON.stringify({
+      name,
+      color,
+      triggerMode,
+      playbackMode,
+      volume: volume[0] / 100,
+      startTimeMs: startTimeMs[0],
+      endTimeMs: endTimeMs[0],
+      fadeInMs: fadeInMs[0],
+      fadeOutMs: fadeOutMs[0],
+      pitch: pitch[0],
+      imageUrl,
+      imageData,
+      shortcutKey: shortcutKey || '',
+      midiNote: midiNote ?? null,
+      midiCC: midiCC ?? null,
+      ignoreChannel
+    });
+  }, [
+    name,
+    color,
+    triggerMode,
+    playbackMode,
+    volume,
+    startTimeMs,
+    endTimeMs,
+    fadeInMs,
+    fadeOutMs,
+    pitch,
+    imageUrl,
+    imageData,
+    shortcutKey,
+    midiNote,
+    midiCC,
+    ignoreChannel
+  ]);
+
+  const isDirty = React.useMemo(() => {
+    if (!open) return false;
+    return initialSnapshotRef.current !== getCurrentSnapshot();
+  }, [open, getCurrentSnapshot]);
+
+  React.useEffect(() => {
+    if (!midiLearnActive) return;
+
+    const handleMidiEvent = (event: Event) => {
+      const detail = (event as CustomEvent<MidiMessage>).detail;
+      if (!detail) return;
+
+      if (detail.type === 'noteon') {
+        if (blockedMidiNotes?.has(detail.note)) {
+          setMidiError('That MIDI note is already assigned.');
+          setMidiLearnActive(false);
+          return;
+        }
+        const duplicateBank = allBanks.find((bank) => typeof bank.midiNote === 'number' && bank.midiNote === detail.note);
+        if (duplicateBank) {
+          setMidiError(`That MIDI note is already assigned to bank "${duplicateBank.name}".`);
+          setMidiLearnActive(false);
+          return;
+        }
+        const duplicatePad = bankPads.find((otherPad) => {
+          if (otherPad.id === pad.id) return false;
+          return typeof otherPad.midiNote === 'number' && otherPad.midiNote === detail.note;
+        });
+        if (duplicatePad) {
+          setMidiError(`That MIDI note is already assigned to pad "${duplicatePad.name}".`);
+          setMidiLearnActive(false);
+          return;
+        }
+        setMidiNote(detail.note);
+      } else if (detail.type === 'cc') {
+        if (blockedMidiCCs?.has(detail.cc)) {
+          setMidiError('That MIDI CC is already assigned.');
+          setMidiLearnActive(false);
+          return;
+        }
+        const duplicateBank = allBanks.find((bank) => typeof bank.midiCC === 'number' && bank.midiCC === detail.cc);
+        if (duplicateBank) {
+          setMidiError(`That MIDI CC is already assigned to bank "${duplicateBank.name}".`);
+          setMidiLearnActive(false);
+          return;
+        }
+        const duplicatePad = bankPads.find((otherPad) => {
+          if (otherPad.id === pad.id) return false;
+          return typeof otherPad.midiCC === 'number' && otherPad.midiCC === detail.cc;
+        });
+        if (duplicatePad) {
+          setMidiError(`That MIDI CC is already assigned to pad "${duplicatePad.name}".`);
+          setMidiLearnActive(false);
+          return;
+        }
+        setMidiCC(detail.cc);
+      } else {
+        return;
+      }
+      setMidiError(null);
+      setMidiLearnActive(false);
+    };
+
+    window.addEventListener('vdjv-midi', handleMidiEvent as EventListener);
+    return () => window.removeEventListener('vdjv-midi', handleMidiEvent as EventListener);
+  }, [midiLearnActive, blockedMidiNotes, blockedMidiCCs, allBanks, bankPads, pad.id]);
 
   // Image validation function
   const validateImage = (file: File): Promise<{ valid: boolean; error?: string }> => {
@@ -256,9 +416,24 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
       return;
     }
 
-    const duplicatePad = allPads.find((p) => {
+    if (blockedShortcutKeys?.has(nextKey)) {
+      setShortcutError(`"${nextKey}" is already assigned to system or channel mapping.`);
+      return;
+    }
+
+    const duplicateBank = allBanks.find((bank) => {
+      const existingKey = normalizeStoredShortcutKey(bank.shortcutKey);
+      return existingKey === nextKey;
+    });
+
+    if (duplicateBank) {
+      setShortcutError(`"${nextKey}" is already assigned to bank "${duplicateBank.name}".`);
+      return;
+    }
+
+    const duplicatePad = bankPads.find((p) => {
       if (p.id === pad.id) return false;
-      const existingKey = p.shortcutKey ? normalizeShortcutKey(p.shortcutKey) : '';
+      const existingKey = normalizeStoredShortcutKey(p.shortcutKey);
       return existingKey === nextKey;
     });
 
@@ -269,6 +444,7 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
 
     setShortcutKey(nextKey);
     setShortcutError(null);
+    setMidiError(null);
   };
 
   const handleShortcutKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -280,11 +456,21 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
       return;
     }
 
+    if (event.shiftKey) {
+      setShortcutError('Shift is reserved for the secondary bank.');
+      return;
+    }
+    if (event.ctrlKey) {
+      setShortcutError('Ctrl shortcuts are reserved by the browser. Use Alt or Meta instead.');
+      return;
+    }
+
     const normalized = normalizeShortcutKey(event.key, {
       shiftKey: event.shiftKey,
       ctrlKey: event.ctrlKey,
       altKey: event.altKey,
-      metaKey: event.metaKey
+      metaKey: event.metaKey,
+      code: event.code
     });
     if (!normalized) {
       setShortcutError('Please press a letter or number key.');
@@ -298,12 +484,13 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
     try {
       if (shortcutError) {
         setUploadError(shortcutError);
-        return;
+        return false;
       }
+      const trimmedName = name.slice(0, 32);
 
       const updatedPad: PadData = {
         ...pad,
-        name,
+        name: trimmedName,
         color,
         triggerMode,
         playbackMode,
@@ -316,9 +503,32 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
         imageUrl,
         imageData,
         shortcutKey: shortcutKey || undefined,
+        midiNote,
+        midiCC,
+        ignoreChannel
       };
       
       await onSave(updatedPad);
+      setName(trimmedName);
+      initialSnapshotRef.current = JSON.stringify({
+        name: trimmedName,
+        color,
+        triggerMode,
+        playbackMode,
+        volume: volume[0] / 100,
+        startTimeMs: startTimeMs[0],
+        endTimeMs: endTimeMs[0],
+        fadeInMs: fadeInMs[0],
+        fadeOutMs: fadeOutMs[0],
+        pitch: pitch[0],
+        imageUrl,
+        imageData,
+        shortcutKey: shortcutKey || '',
+        midiNote: midiNote ?? null,
+        midiCC: midiCC ?? null,
+        ignoreChannel
+      });
+      return true;
     } catch (error) {
       console.error('Failed to save pad:', error);
       if (error instanceof Error) {
@@ -326,8 +536,35 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
       } else {
         setUploadError('Failed to save pad changes. Please try again.');
       }
+      return false;
     }
   };
+
+  const handleSaveAndClose = React.useCallback(async () => {
+    if (isUploading) return;
+    const saved = await handleSave();
+    if (saved) {
+      onOpenChange(false);
+    }
+  }, [handleSave, onOpenChange, isUploading]);
+
+  const handleDialogOpenChange = React.useCallback((nextOpen: boolean) => {
+    if (!nextOpen && isDirty) {
+      setShowUnsavedConfirm(true);
+      return;
+    }
+    onOpenChange(nextOpen);
+  }, [isDirty, onOpenChange]);
+
+  const handleContentKeyDown = React.useCallback((event: React.KeyboardEvent) => {
+    if (event.key !== 'Enter') return;
+    if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+    const target = event.target as HTMLElement;
+    const tagName = target?.tagName?.toLowerCase();
+    if (tagName === 'textarea' || tagName === 'button') return;
+    event.preventDefault();
+    handleSaveAndClose();
+  }, [handleSaveAndClose]);
 
   const handleUnloadClick = () => {
     setShowUnloadConfirm(true);
@@ -358,8 +595,12 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-lg max-h-[80vh] overflow-y-auto" aria-describedby={undefined}> 
+      <Dialog open={open} onOpenChange={handleDialogOpenChange}>
+        <DialogContent
+          className="sm:max-w-lg max-h-[80vh] overflow-y-auto backdrop-blur-md bg-white/95 border-gray-300 dark:bg-gray-800/95 dark:border-gray-600"
+          aria-describedby={undefined}
+          onKeyDown={handleContentKeyDown}
+        > 
           <DialogHeader>
             <DialogTitle>Edit Pad Settings</DialogTitle>
           </DialogHeader>
@@ -375,7 +616,17 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
 
             {/* Image Upload */}
             <div className="space-y-2">
-              <Label>Pad Image</Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label>Pad Image</Label>
+                <Button
+                  onClick={handleSaveAndClose}
+                  variant="outline"
+                  size="sm"
+                  disabled={isUploading}
+                >
+                  {isUploading ? 'Saving...' : 'Save'}
+                </Button>
+              </div>
               {imageUrl ? (
                 <div className="flex items-center gap-2">
                   <img 
@@ -417,7 +668,7 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
                 </>
               )}
               <p className="text-xs text-gray-500">
-                When image is uploaded, it will replace the pad name display. Maximum: 1024x1024px, 2MB
+                It will replace the pad name display. Maximum: 1024x1024px, 2MB
               </p>
             </div>
 
@@ -426,12 +677,13 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
               <Input
                 id="name"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(e) => setName(e.target.value.slice(0, 32))}
                 placeholder="Enter pad name"
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck="false"
+                maxLength={32}
                 onFocus={(e) => {
                   // Prevent immediate focus on mobile
                   if (window.innerWidth <= 1800) {
@@ -441,29 +693,65 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="shortcutKey">Keyboard Shortcut</Label>
-              <Input
-                id="shortcutKey"
-                value={shortcutKey}
-                onKeyDown={handleShortcutKeyDown}
-                placeholder="Press a key"
-                readOnly
-              />
-              {shortcutError && (
-                <p className="text-xs text-red-500">{shortcutError}</p>
-              )}
-              {!shortcutError && (
-                <p className="text-xs text-gray-500">
-                  Reserved keys: {reservedKeysText}
-                </p>
+            <div className={`grid gap-3 ${midiEnabled ? 'grid-cols-2' : 'grid-cols-1'}`}>
+              <div className="space-y-2">
+                <Label htmlFor="shortcutKey">Keyboard Shortcut</Label>
+                <Input
+                  id="shortcutKey"
+                  value={shortcutKey}
+                  onKeyDown={handleShortcutKeyDown}
+                  placeholder="Press a key"
+                  readOnly
+                />
+                {shortcutError && (
+                  <p className="text-xs text-red-500">{shortcutError}</p>
+                )}
+                {!shortcutError && (
+                  <p className="text-xs text-gray-500">
+                    Reserved keys: {reservedKeysText}
+                  </p>
+                )}
+              </div>
+
+              {midiEnabled && (
+                <div className="space-y-2">
+                  <Label>MIDI Assignment</Label>
+                  <div className="text-xs text-gray-500">
+                    Note: {midiNote ?? '—'} | CC: {midiCC ?? '—'}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setMidiLearnActive(true)}
+                      className="flex-1"
+                    >
+                      {midiLearnActive ? 'Listening…' : 'Learn MIDI'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setMidiNote(undefined);
+                        setMidiCC(undefined);
+                        setMidiLearnActive(false);
+                        setMidiError(null);
+                      }}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                  {midiError && <p className="text-xs text-red-500">{midiError}</p>}
+                </div>
               )}
             </div>
 
             <div className="space-y-2">
               <Label>Pad Color</Label>
               <div className="flex gap-1 flex-wrap">
-                {colorOptions.map((colorOption) => (
+                {(showAllColors ? [...primaryPadColors, ...extraPadColors] : primaryPadColors).map((colorOption) => (
                   <button
                     key={colorOption.value}
                     onClick={() => setColor(colorOption.value)}
@@ -475,45 +763,70 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
                   />
                 ))}
               </div>
+              {extraPadColors.length > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-[10px]"
+                  onClick={() => setShowAllColors((prev) => !prev)}
+                >
+                  {showAllColors ? 'Show Less' : 'Load More'}
+                </Button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label>Trigger Mode</Label>
+                <Select value={triggerMode} onValueChange={(value: any) => setTriggerMode(value)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="toggle">On/Off - Click to play/pause</SelectItem>
+                    <SelectItem value="hold">Hold - Play while pressed</SelectItem>
+                    <SelectItem value="stutter">Stutter - Restart on each click</SelectItem>
+                    <SelectItem value="unmute">Unmute - Play continuously, mute when released</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Playback Mode</Label>
+                <Select value={playbackMode} onValueChange={(value: any) => setPlaybackMode(value)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="once">Play Once</SelectItem>
+                    <SelectItem value="loop">Loop</SelectItem>
+                    <SelectItem value="stopper">Stopper - Play and stop all other pads</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
 
             <div className="space-y-2">
-              <Label>Trigger Mode</Label>
-              <Select value={triggerMode} onValueChange={(value: any) => setTriggerMode(value)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="toggle">On/Off - Click to play/pause</SelectItem>
-                  <SelectItem value="hold">Hold - Play while pressed</SelectItem>
-                  <SelectItem value="stutter">Stutter - Restart on each click</SelectItem>
-                  <SelectItem value="unmute">Unmute - Play continuously, mute when released</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Playback Mode</Label>
-              <Select value={playbackMode} onValueChange={(value: any) => setPlaybackMode(value)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="once">Play Once</SelectItem>
-                  <SelectItem value="loop">Loop</SelectItem>
-                  <SelectItem value="stopper">Stopper - Play and stop all other pads</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <Label 
-                className="cursor-pointer" 
-                onDoubleClick={handleDoubleClickReset(setVolume, 100)}
-                title="Double-click to reset to 100%"
-              >
-                Volume: {volume[0]}%
-              </Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label 
+                  className="cursor-pointer" 
+                  onDoubleClick={handleDoubleClickReset(setVolume, 100)}
+                  title="Double-click to reset to 100%"
+                >
+                  Volume: {volume[0]}%
+                </Label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="ignoreChannel"
+                    type="checkbox"
+                    checked={ignoreChannel}
+                    onChange={(event) => setIgnoreChannel(event.target.checked)}
+                    className="h-4 w-4"
+                  />
+                  <Label htmlFor="ignoreChannel">Ignore Channel</Label>
+                </div>
+              </div>
               <Slider
                 value={volume}
                 onValueChange={setVolume}
@@ -622,18 +935,27 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
               />
             </div>
 
-            <div className="flex gap-2 pt-4">
+            <div className="grid grid-cols-3 gap-2 pt-4">
               <Button 
-                onClick={handleSave} 
-                className="flex-1"
+                onClick={handleSaveAndClose} 
+                className="w-full"
                 disabled={isUploading}
               >
                 {isUploading ? 'Saving...' : 'Save Changes'}
               </Button>
               <Button 
+                onClick={() => handleDialogOpenChange(false)}
+                variant="outline"
+                disabled={isUploading}
+                className="w-full"
+              >
+                Cancel
+              </Button>
+              <Button 
                 onClick={handleUnloadClick} 
                 variant="destructive"
                 disabled={isUploading}
+                className="w-full"
               >
                 Unload
               </Button>
@@ -652,6 +974,39 @@ export function PadEditDialog({ pad, allPads = [], open, onOpenChange, onSave, o
         variant="destructive"
         onConfirm={handleConfirmUnload}
       />
+
+      <Dialog open={showUnsavedConfirm} onOpenChange={setShowUnsavedConfirm}>
+        <DialogContent className="sm:max-w-md" aria-describedby={undefined}>
+          <DialogHeader>
+            <DialogTitle>Discard changes?</DialogTitle>
+          </DialogHeader>
+          <div className="text-sm text-gray-600 dark:text-gray-300">
+            You have unsaved changes for this pad. Save them or discard the changes.
+          </div>
+          <div className="flex gap-2 pt-2">
+            <Button
+              onClick={() => {
+                setShowUnsavedConfirm(false);
+                handleSaveAndClose();
+              }}
+              className="flex-1"
+              disabled={isUploading}
+            >
+              Save
+            </Button>
+            <Button
+              onClick={() => {
+                setShowUnsavedConfirm(false);
+                onOpenChange(false);
+              }}
+              variant="outline"
+              className="flex-1"
+            >
+              Discard
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Label } from '@/components/ui/label';
 import { Volume2, X, Square, Waves, SlidersHorizontal as Equalizer, LogOut } from 'lucide-react';
-import { PlayingPadInfo, StopMode } from './types/sampler';
+import { ChannelState, PlayingPadInfo, StopMode } from './types/sampler';
 import { useAuth } from '@/hooks/useAuth';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { createPortal } from 'react-dom';
@@ -91,11 +91,14 @@ interface EqSettings {
 interface VolumeMixerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  playingPads: PlayingPadInfo[];
+  channelStates: ChannelState[];
+  legacyPlayingPads: PlayingPadInfo[];
   masterVolume: number;
   onMasterVolumeChange: (volume: number) => void;
   onPadVolumeChange: (padId: string, volume: number) => void;
   onStopPad: (padId: string) => void;
+  onChannelVolumeChange: (channelId: number, volume: number) => void;
+  onStopChannel: (channelId: number) => void;
   eqSettings: EqSettings;
   onEqChange: (settings: EqSettings) => void;
   theme: 'light' | 'dark';
@@ -112,11 +115,14 @@ const msToMMSS = (ms: number) => {
 export function VolumeMixer({
   open,
   onOpenChange,
-  playingPads,
+  channelStates,
+  legacyPlayingPads,
   masterVolume,
   onMasterVolumeChange,
   onPadVolumeChange,
   onStopPad,
+  onChannelVolumeChange,
+  onStopChannel,
   eqSettings,
   onEqChange,
   theme,
@@ -124,6 +130,9 @@ export function VolumeMixer({
 }: VolumeMixerProps) {
   const { user, loading, signOut } = useAuth();
   const [showLogoutConfirm, setShowLogoutConfirm] = React.useState(false);
+  const [localChannelVolumes, setLocalChannelVolumes] = React.useState<number[]>([]);
+  const channelVolumeRafRef = React.useRef<Map<number, number>>(new Map());
+  const channelVolumePendingRef = React.useRef<Map<number, number>>(new Map());
   
   // Slide notices
   const { notices, pushNotice, dismiss } = useNotices();
@@ -136,8 +145,60 @@ export function VolumeMixer({
     onEqChange({ ...eqSettings, [type]: 0 });
   };
 
+  React.useEffect(() => {
+    setLocalChannelVolumes((prev) => {
+      if (prev.length !== channelStates.length) {
+        return channelStates.map((channel) => channel.channelVolume);
+      }
+      return channelStates.map((channel, index) => {
+        if (channelVolumePendingRef.current.has(channel.channelId)) {
+          return prev[index] ?? channel.channelVolume;
+        }
+        return channel.channelVolume;
+      });
+    });
+  }, [channelStates]);
+
+  const scheduleChannelVolumeUpdate = React.useCallback(
+    (channelId: number, volume: number) => {
+      channelVolumePendingRef.current.set(channelId, volume);
+      if (channelVolumeRafRef.current.has(channelId)) return;
+      const rafId = requestAnimationFrame(() => {
+        const next = channelVolumePendingRef.current.get(channelId);
+        if (typeof next === 'number') {
+          onChannelVolumeChange(channelId, next);
+        }
+        channelVolumePendingRef.current.delete(channelId);
+        channelVolumeRafRef.current.delete(channelId);
+      });
+      channelVolumeRafRef.current.set(channelId, rafId);
+    },
+    [onChannelVolumeChange]
+  );
+
+  const handleChannelSliderChange = React.useCallback(
+    (channelIndex: number, channelId: number, value: number) => {
+      setLocalChannelVolumes((prev) => {
+        const next = [...prev];
+        next[channelIndex] = value;
+        return next;
+      });
+      scheduleChannelVolumeUpdate(channelId, value);
+    },
+    [scheduleChannelVolumeUpdate]
+  );
+
+  React.useEffect(() => {
+    return () => {
+      channelVolumeRafRef.current.forEach((rafId) => cancelAnimationFrame(rafId));
+      channelVolumeRafRef.current.clear();
+      channelVolumePendingRef.current.clear();
+    };
+  }, []);
+
+
   const handleLogout = () => {
-    setShowLogoutConfirm(true);
+      setShowLogoutConfirm(true);
   };
 
   const confirmLogout = async () => {
@@ -163,19 +224,19 @@ export function VolumeMixer({
           }`}>
           {/* Logout Button (only shown when logged in) */}
           {user ? (
-            <Button
+          <Button
               onClick={handleLogout}
-              variant="outline"
-              size="sm"
-              disabled={loading}
+            variant="outline"
+            size="sm"
+            disabled={loading}
               className={`transition-all duration-200 ${theme === 'dark'
                 ? 'bg-red-600/20 border-red-500 text-red-300 hover:bg-red-500 hover:border-red-400 hover:text-red-200'
                 : 'bg-red-50 border-red-300 text-red-600 hover:bg-red-100 hover:border-red-400 hover:text-red-700'
-                }`}
+              }`}
               title="Sign out"
-            >
+          >
               <LogOut className="w-4 h-4" />
-            </Button>
+          </Button>
           ) : (
             <div className="w-8" /> /* Spacer when not logged in */
           )}
@@ -280,21 +341,131 @@ export function VolumeMixer({
                 className="w-full cursor-pointer"
                 onDoubleClick={() => handleEqDoubleClick('low')}
               />
-            </div>
+        </div>
           </div>
 
           {/* Currently Playing Pads */}
           <div className="space-y-3">
             <Label className={`font-medium flex items-center gap-2 ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
               <Waves className="w-4 h-4" />
-              Currently Playing ({playingPads.length})
+              Channels ({channelStates.filter((c) => c.pad).length}/8)
             </Label>
 
             <div className="space-y-2 max-h-128 overflow-y-auto">
-              {playingPads.map((playingPad) => {
-                // 👇 add this local, typed view so we can read currentMs/endMs
-                const pp = playingPad as typeof playingPad & { currentMs?: number; endMs?: number };
+              {channelStates.map((channel, index) => {
+                const playingPad = channel.pad;
+                const pp = playingPad as PlayingPadInfo & { currentMs?: number; endMs?: number };
+                const isActive = !!playingPad;
+                const localVolume = localChannelVolumes[index] ?? channel.channelVolume;
 
+                return (
+                  <div
+                    key={channel.channelId}
+                    className={`p-2 rounded-lg border transition-all ${isActive
+                      ? (theme === 'dark' ? 'bg-green-900 border-green-600' : 'bg-green-50 border-green-300')
+                      : (theme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200')
+                      }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className={`text-xs font-semibold ${theme === 'dark' ? 'text-gray-200' : 'text-gray-700'}`}>
+                        CH {channel.channelId}
+                      </div>
+                      <div className="flex-1 min-w-0" />
+                      <Button
+                        onClick={() => onStopChannel(channel.channelId)}
+                        variant="outline"
+                        size="sm"
+                        disabled={!isActive}
+                        className={`w-5 h-5 p-0 ${isActive
+                          ? (theme === 'dark'
+                            ? 'bg-red-500 border-red-400 text-red-100 hover:bg-red-600'
+                            : 'bg-red-50 border-red-300 text-red-600 hover:bg-red-100')
+                          : (theme === 'dark'
+                            ? 'bg-gray-700 border-gray-600 text-gray-400'
+                            : 'bg-gray-100 border-gray-200 text-gray-400')
+                          } active:scale-95 active:brightness-90 transition-transform`}
+                        title="Stop Channel"
+                      >
+                        <Square className="w-2.5 h-2.5" />
+                      </Button>
+                    </div>
+
+                    <div className="space-y-1 mb-2">
+                      <div className={`flex justify-between text-xs ${theme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
+                        <span>Channel Vol</span>
+                        <span>{Math.round(localVolume * 100)}%</span>
+                      </div>
+                      <Slider
+                        value={[ localVolume * 100 ]}
+                        onValueChange={([value]) => handleChannelSliderChange(index, channel.channelId, value / 100)}
+                        max={100}
+                        min={0}
+                        step={1}
+                        className="w-full cursor-pointer"
+                        onDoubleClick={() => handleChannelSliderChange(index, channel.channelId, 1)}
+                        title="Double-click to reset"
+                      />
+                    </div>
+
+                    {isActive ? (
+                      <>
+                        <div className="flex items-center gap-2 mb-1">
+                          <div
+                            className="w-2 h-2 rounded-full flex-shrink-0"
+                            style={{ backgroundColor: playingPad.color }}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1">
+                              <span className={`text-xs font-medium truncate ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+                                {playingPad.padName.length > 12 ? `${playingPad.padName.substring(0, 12)}...` : playingPad.padName}
+                              </span>
+                              <span className={`text-xs opacity-75 truncate ${theme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
+                                {playingPad.bankName.length > 8 ? `${playingPad.bankName.substring(0, 8)}...` : playingPad.bankName}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="w-1.5 h-1.5 bg-green-400 rounded-full flex-shrink-0" />
+                        </div>
+
+                        {/* Compact timestamp */}
+                        <div className={`text-xs mb-1 ${theme === 'dark' ? 'text-gray-200' : 'text-gray-700'}`}>
+                          {pp?.currentMs != null && pp?.endMs != null
+                            ? `${msToMMSS(pp.currentMs)} - ${msToMMSS(pp.endMs)}`
+                            : '—:— - —:—'}
+                        </div>
+                      </>
+                    ) : (
+                      <div className={`text-xs text-center py-2 ${theme === 'dark' ? 'text-gray-500' : 'text-gray-500'}`}>
+                        Empty
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {channelStates.every((channel) => !channel.pad) && (
+                <div className="text-center py-6">
+                  <p className={theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}>
+                    No channels currently playing
+                  </p>
+                  <p className={`text-xs ${theme === 'dark' ? 'text-gray-500' : 'text-gray-500'}`}>
+                    Start playing some pads to see controls here
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {legacyPlayingPads.length > 0 && (
+            <div className="space-y-3">
+              <Label className={`font-medium flex items-center gap-2 ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+                <Waves className="w-4 h-4" />
+                Ignore Channel ({legacyPlayingPads.length})
+              </Label>
+
+              <div className="space-y-2 max-h-128 overflow-y-auto">
+                {legacyPlayingPads.map((playingPad) => {
+                  const pp = playingPad as PlayingPadInfo & { currentMs?: number; endMs?: number };
                 return (
                   <div
                     key={playingPad.padId}
@@ -324,7 +495,7 @@ export function VolumeMixer({
                         variant="outline"
                         size="sm"
                         className={`w-5 h-5 p-0 ${theme === 'dark'
-                          ? 'bg-red-500 border-red-400 text-red-400 hover:bg-red-600'
+                            ? 'bg-red-500 border-red-400 text-red-100 hover:bg-red-600'
                           : 'bg-red-50 border-red-300 text-red-600 hover:bg-red-100'
                           }`}
                         title="Stop"
@@ -333,16 +504,15 @@ export function VolumeMixer({
                       </Button>
                     </div>
 
-                    {/* Compact timestamp */}
                     <div className={`text-xs mb-1 ${theme === 'dark' ? 'text-gray-200' : 'text-gray-700'}`}>
-                      {pp.currentMs != null && pp.endMs != null
+                        {pp?.currentMs != null && pp?.endMs != null
                         ? `${msToMMSS(pp.currentMs)} - ${msToMMSS(pp.endMs)}`
                         : '—:— - —:—'}
                     </div>
 
                     <div className="space-y-1">
                       <div className={`flex justify-between text-xs ${theme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
-                        <span>Vol</span>
+                          <span>Pad Vol</span>
                         <span>{Math.round((playingPad.effectiveVolume ?? playingPad.volume) * 100)}%</span>
                       </div>
                       <Slider
@@ -359,21 +529,11 @@ export function VolumeMixer({
                   </div>
                 );
               })}
-
-              {playingPads.length === 0 && (
-                <div className="text-center py-6">
-                  <p className={theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}>
-                    No pads currently playing
-                  </p>
-                  <p className={`text-xs ${theme === 'dark' ? 'text-gray-500' : 'text-gray-500'}`}>
-                    Start playing some pads to see controls here
-                  </p>
+              </div>
                 </div>
               )}
             </div>
           </div>
-        </div>
-      </div>
 
       {/* Logout Confirmation */}
       <ConfirmationDialog

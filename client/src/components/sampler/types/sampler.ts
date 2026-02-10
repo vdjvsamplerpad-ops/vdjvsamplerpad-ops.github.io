@@ -5,6 +5,9 @@ export interface PadData {
   imageUrl?: string; // For pad image display
   imageData?: string; // Base64 encoded image data for persistence
   shortcutKey?: string; // Optional keyboard shortcut
+  midiNote?: number; // Optional MIDI note mapping
+  midiCC?: number; // Optional MIDI CC mapping
+  ignoreChannel?: boolean; // Optional: bypass channel assignment
   color: string;
   triggerMode: 'toggle' | 'hold' | 'stutter' | 'unmute';
   playbackMode: 'once' | 'loop' | 'stopper';
@@ -24,8 +27,10 @@ export interface SamplerBank {
   pads: PadData[];
   createdAt: Date;
   sortOrder: number; // For bank ordering
+  sourceBankId?: string; // Original bank id from import file (for duplicate blocking)
   shortcutKey?: string; // Optional keyboard shortcut for bank selection
-  shortcutKey?: string; // Optional keyboard shortcut to select bank
+  midiNote?: number; // Optional MIDI note mapping
+  midiCC?: number; // Optional MIDI CC mapping
   // New fields for admin bank management
   isAdminBank?: boolean; // Whether this is an admin-exported bank
   transferable?: boolean; // Whether pads can be transferred from this bank
@@ -71,6 +76,13 @@ export interface PlayingPadInfo {
   effectiveVolume?: number; // Runtime volume that may differ from original
   currentMs?: number; // Current playback position
   endMs?: number; // Total duration
+  channelId?: number | null;
+}
+
+export interface ChannelState {
+  channelId: number;
+  channelVolume: number;
+  pad: PlayingPadInfo | null;
 }
 
 export interface AudioControls {

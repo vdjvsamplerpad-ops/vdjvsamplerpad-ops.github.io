@@ -1,11 +1,12 @@
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
-import { PadData, StopMode } from './types/sampler';
+import { PadData, SamplerBank, StopMode } from './types/sampler';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
 import { PadEditDialog } from './PadEditDialog';
 import { PadTransferDialog } from './PadTransferDialog';
 import { Play, Pause, MousePointer2, Zap, VolumeX } from 'lucide-react';
+import { normalizeShortcutKey, normalizeStoredShortcutKey } from '@/lib/keyboard-shortcuts';
 
 interface EqSettings {
   low: number;
@@ -17,7 +18,9 @@ interface SamplerPadProps {
   pad: PadData;
   bankId: string;
   bankName: string;
+  allBanks?: SamplerBank[];
   allPads?: PadData[];
+  bankPads?: PadData[];
   editMode: boolean;
   globalMuted: boolean;
   masterVolume: number;
@@ -31,13 +34,21 @@ interface SamplerPadProps {
   onTransferPad?: (padId: string, sourceBankId: string, targetBankId: string) => void;
   availableBanks?: Array<{ id: string; name: string; }>;
   canTransferFromBank?: (bankId: string) => boolean;
+  midiEnabled?: boolean;
+  blockedShortcutKeys?: Set<string>;
+  blockedMidiNotes?: Set<number>;
+  blockedMidiCCs?: Set<number>;
+  hideShortcutLabel?: boolean;
+  editRequestToken?: number;
 }
 
 export function SamplerPad({
   pad,
   bankId,
   bankName,
+  allBanks = [],
   allPads = [],
+  bankPads = [],
   editMode,
   globalMuted,
   masterVolume,
@@ -50,7 +61,13 @@ export function SamplerPad({
   onDragStart,
   onTransferPad,
   availableBanks = [],
-  canTransferFromBank
+  canTransferFromBank,
+  midiEnabled = false,
+  blockedShortcutKeys,
+  blockedMidiNotes,
+  blockedMidiCCs,
+  hideShortcutLabel = false,
+  editRequestToken
 }: SamplerPadProps) {
   const audioPlayer = useAudioPlayer(
     pad,
@@ -67,6 +84,22 @@ export function SamplerPad({
   const [isHolding, setIsHolding] = React.useState(false);
   const [imageError, setImageError] = React.useState(false);
   const [isDragging, setIsDragging] = React.useState(false);
+  const lastEditTokenRef = React.useRef<number | undefined>(undefined);
+
+  React.useEffect(() => {
+    if (!editMode || !editRequestToken) return;
+    if (lastEditTokenRef.current === editRequestToken) return;
+    lastEditTokenRef.current = editRequestToken;
+    setShowEditDialog(true);
+  }, [editMode, editRequestToken]);
+
+  const shortcutLabel = React.useMemo(() => {
+    if (!pad.shortcutKey) return null;
+    if (pad.shortcutKey.startsWith('Numpad')) {
+      return `Num${pad.shortcutKey.replace('Numpad', '')}`;
+    }
+    return normalizeStoredShortcutKey(pad.shortcutKey) || normalizeShortcutKey(pad.shortcutKey) || pad.shortcutKey;
+  }, [pad.shortcutKey]);
 
   const handlePadClick = (e: React.MouseEvent) => {
     // Don't handle pad click if clicking on the transfer indicator
@@ -208,28 +241,8 @@ export function SamplerPad({
     setImageError(false);
   };
 
-  const getTextProps = () => {
-    let textSize = 'text-sm';
-    let lineClamp = 'line-clamp-2';
-
-    if (padSize <= 2) {
-      textSize = 'text-lg';
-      lineClamp = 'line-clamp-4';
-    } else if (padSize <= 6) {
-      textSize = 'text-base';
-      lineClamp = 'line-clamp-3';
-    } else if (padSize <= 10) {
-      textSize = 'text-sm';
-      lineClamp = 'line-clamp-2';
-    } else {
-      textSize = 'text-[10px]'; // Smaller for very dense grids
-      lineClamp = 'line-clamp-2';
-    }
-
-    return { textSize, lineClamp };
-  };
-
-  const { textSize, lineClamp } = getTextProps();
+  const nameLength = pad.name?.length || 0;
+  const fontScale = nameLength > 40 ? 0.6 : nameLength > 30 ? 0.7 : nameLength > 22 ? 0.8 : nameLength > 16 ? 0.9 : 1;
 
   const getButtonOpacity = () => {
     if (pad.triggerMode === 'unmute' && isPlaying) {
@@ -316,6 +329,14 @@ export function SamplerPad({
           ...getEditModeButtonStyle()
         }}
       >
+        {shortcutLabel && !hideShortcutLabel && (
+          <div className={`absolute top-0 left-1/2 -translate-x-1/2 z-20 px-1.5 py-0.5 rounded text-[9px] font-semibold tracking-wide ${theme === 'dark'
+            ? 'bg-gray-900/70 text-gray-100'
+            : 'bg-white/70 text-gray-800'
+            }`}>
+            {shortcutLabel}
+          </div>
+        )}
         {/* Drag/Transfer indicator for edit mode - smaller on mobile */}
         {editMode && (
           <div
@@ -346,13 +367,13 @@ export function SamplerPad({
         {/* Trigger Mode Indicator - smaller on mobile to maximize text space */}
         <div className="absolute top-0.5 right-0.5 sm:top-1 sm:right-1 p-0.5 sm:p-1 rounded-full bg-black bg-opacity-20 pointer-events-none z-10">
           <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 flex items-center justify-center">
-            {getTriggerModeIcon()}
+          {getTriggerModeIcon()}
           </div>
         </div>
 
         <div className="flex flex-col items-center justify-center h-full w-full pointer-events-none p-0 sm:p-2 overflow-hidden">
           {shouldShowImage ? (
-            <div className="relative w-full max-w-[100%] aspect-square mb-1">
+            <div className="absolute inset-0 z-0">
               <img
                 src={pad.imageUrl}
                 alt={pad.name}
@@ -371,11 +392,11 @@ export function SamplerPad({
                - Strong text shadows for readability
                - Tighter line height for better space utilization
             */
-            <div className="absolute inset-0 flex items-center justify-center px-0 py-0 sm:relative sm:px-0 sm:py-0 sm:mb-1 w-full h-full overflow-hidden">
+            <div className="absolute inset-0 flex items-center justify-center px-0 py-0 w-full h-full overflow-hidden">
               <span 
-                className={`text-center font-bold leading-[1.1] break-words whitespace-normal line-clamp-4 sm:${lineClamp} ${isPlaying
+                className={`text-center font-bold leading-[1.05] break-words whitespace-normal ${isPlaying
                   ? 'text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]'
-                  : theme === 'dark'
+                : theme === 'dark'
                     ? 'text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]'
                     : 'text-gray-900 drop-shadow-[0_2px_4px_rgba(255,255,255,0.9)]'
                   }`}
@@ -383,14 +404,14 @@ export function SamplerPad({
                   // Responsive font sizing that scales with viewport and pad size
                   // Uses clamp for min/max bounds, viewport units for scaling
                   // Minimum sizes ensure readability even on very small pads
-                  fontSize: padSize <= 6 
-                    ? 'clamp(11px, min(4.5vw, 4.5vh, 1.2em), 18px)' // Larger for small pad counts
-                    : padSize <= 10
-                      ? 'clamp(10px, min(4vw, 4vh, 1.1em), 16px)' // Medium
-                      : 'clamp(9px, min(3.5vw, 3.5vh, 1em), 14px)', // Smaller for dense grids
+                  fontSize: padSize <= 4 
+                    ? `clamp(${Math.round(12 * fontScale)}px, min(6vw, 6vh, 1.4em), ${Math.round(24 * fontScale)}px)`
+                    : padSize <= 8
+                      ? `clamp(${Math.round(11 * fontScale)}px, min(5vw, 5vh, 1.2em), ${Math.round(20 * fontScale)}px)`
+                      : `clamp(${Math.round(10 * fontScale)}px, min(4vw, 4vh, 1.1em), ${Math.round(16 * fontScale)}px)`,
                   padding: '1px 2px',
                   maxWidth: 'calc(100% - 4px)',
-                  maxHeight: 'calc(100% - 18px)', // Reserve space for volume/progress
+                  maxHeight: '100%',
                   wordBreak: 'break-word',
                   overflowWrap: 'break-word',
                   display: 'flex',
@@ -409,19 +430,19 @@ export function SamplerPad({
           {/* Volume percentage - smaller and positioned at bottom on mobile, hidden if playing */}
           {!isPlaying && (
             <div 
-              className={`absolute bottom-0 right-0 sm:relative sm:bottom-0 sm:right-0 sm:px-0 sm:py-0 opacity-60 sm:opacity-75 whitespace-nowrap z-10 ${theme === 'dark'
+              className={`absolute bottom-0 right-0 opacity-75 whitespace-nowrap z-20 ${theme === 'dark'
                 ? 'text-gray-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]'
                 : 'text-gray-600 drop-shadow-[0_1px_2px_rgba(255,255,255,0.8)]'
               }`}
               style={{ fontSize: 'clamp(7px, min(2vw, 2vh), 10px)', padding: '1px 2px' }}
             >
               {Math.round(pad.volume * 100)}%
-            </div>
+          </div>
           )}
 
           {/* Progress bar - only show when playing, positioned at very bottom */}
           {isPlaying && (
-            <div className="absolute bottom-0 left-0 right-0 px-0 sm:relative sm:bottom-0 sm:px-0 sm:mt-1 w-full z-10">
+            <div className="absolute bottom-0 left-0 right-0 px-0 w-full z-10">
               <Progress value={progress} className="h-0.5 sm:h-1 rounded-full" />
               <div 
                 className={`absolute bottom-0 right-0 opacity-75 whitespace-nowrap ${theme === 'dark'
@@ -440,11 +461,17 @@ export function SamplerPad({
       {showEditDialog && (
         <PadEditDialog
           pad={pad}
+          allBanks={allBanks}
           allPads={allPads}
+          bankPads={bankPads}
           open={showEditDialog}
           onOpenChange={setShowEditDialog}
           onSave={handleSave}
           onUnload={handleUnload}
+          midiEnabled={midiEnabled}
+          blockedShortcutKeys={blockedShortcutKeys}
+          blockedMidiNotes={blockedMidiNotes}
+          blockedMidiCCs={blockedMidiCCs}
         />
       )}
 

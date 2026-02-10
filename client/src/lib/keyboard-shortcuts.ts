@@ -4,9 +4,16 @@ export const RESERVED_SHORTCUT_KEYS = [
   'Z',
   'X',
   'B',
+  '[',
+  ']',
   'N',
   'ArrowDown',
-  'ArrowUp'
+  'ArrowUp',
+  '+',
+  '-',
+  'V',
+  '`',
+  'C'
 ] as const;
 
 const RESERVED_SET = new Set(RESERVED_SHORTCUT_KEYS);
@@ -15,14 +22,34 @@ export type ReservedShortcutKey = (typeof RESERVED_SHORTCUT_KEYS)[number];
 
 export function normalizeShortcutKey(
   rawKey: string,
-  modifiers?: { shiftKey?: boolean; ctrlKey?: boolean; altKey?: boolean; metaKey?: boolean }
+  modifiers?: {
+    shiftKey?: boolean;
+    ctrlKey?: boolean;
+    altKey?: boolean;
+    metaKey?: boolean;
+    code?: string;
+  }
 ): string | null {
   if (!rawKey) return null;
 
+  const code = modifiers?.code;
   let baseKey = rawKey;
-  if (rawKey === ' ' || rawKey === 'Spacebar') baseKey = 'Space';
+  if (code?.startsWith('Digit') && code.length === 6) {
+    baseKey = code.replace('Digit', '');
+  } else if (code?.startsWith('Key') && code.length === 4) {
+    baseKey = code.replace('Key', '').toUpperCase();
+  } else if (code === 'Semicolon') {
+    baseKey = ';';
+  } else if (code === 'Comma') {
+    baseKey = ',';
+  } else if (code === 'Period') {
+    baseKey = '.';
+  } else if (rawKey === ' ' || rawKey === 'Spacebar') baseKey = 'Space';
   else if (rawKey.startsWith('Arrow')) baseKey = rawKey;
-  else if (rawKey.length === 1) baseKey = rawKey.toUpperCase();
+  else if (rawKey.startsWith('Numpad')) baseKey = rawKey;
+  else if (code?.startsWith('Numpad') && rawKey.length === 1 && /[0-9]/.test(rawKey)) {
+    baseKey = `Numpad${rawKey}`;
+  } else if (rawKey.length === 1) baseKey = rawKey.toUpperCase();
   else return null;
 
   const parts: string[] = [];
@@ -33,6 +60,29 @@ export function normalizeShortcutKey(
   parts.push(baseKey);
 
   return parts.join('+');
+}
+
+export function normalizeStoredShortcutKey(key?: string | null): string | null {
+  if (!key) return null;
+  if (!key.includes('+')) {
+    return normalizeShortcutKey(key) || null;
+  }
+  const parts = key.split('+').map((part) => part.trim()).filter(Boolean);
+  let baseKey = '';
+  let shiftKey = false;
+  let ctrlKey = false;
+  let altKey = false;
+  let metaKey = false;
+  parts.forEach((part) => {
+    const lower = part.toLowerCase();
+    if (lower === 'shift') shiftKey = true;
+    else if (lower === 'ctrl' || lower === 'control') ctrlKey = true;
+    else if (lower === 'alt' || lower === 'option') altKey = true;
+    else if (lower === 'meta' || lower === 'cmd' || lower === 'command' || lower === 'win') metaKey = true;
+    else baseKey = part;
+  });
+  if (!baseKey) return null;
+  return normalizeShortcutKey(baseKey, { shiftKey, ctrlKey, altKey, metaKey }) || null;
 }
 
 export function getShortcutBaseKey(key: string): string {

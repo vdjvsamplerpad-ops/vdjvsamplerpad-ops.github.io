@@ -19,6 +19,32 @@ import {
 } from '@/lib/bank-utils';
 import { useAuth, getCachedUser, getCachedProfile } from '@/hooks/useAuth';
 
+const EXPORT_WEBHOOK_QUEUE_KEY = 'vdjv-export-webhook-queue';
+
+const readExportWebhookQueue = (): Array<{ email: string; bankName: string; padNames: string[] }> => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(EXPORT_WEBHOOK_QUEUE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeExportWebhookQueue = (queue: Array<{ email: string; bankName: string; padNames: string[] }>) => {
+  if (typeof window === 'undefined') return;
+  try {
+    if (queue.length === 0) {
+      localStorage.removeItem(EXPORT_WEBHOOK_QUEUE_KEY);
+    } else {
+      localStorage.setItem(EXPORT_WEBHOOK_QUEUE_KEY, JSON.stringify(queue));
+    }
+  } catch (err) {
+    console.warn('Failed to persist export webhook queue:', err);
+  }
+};
+
 // Helper to detect if running in native Android app (not web browser)
 const isNativeAndroid = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -499,6 +525,60 @@ export function useSamplerStore(): SamplerStore {
     }
   }, [primaryBankId, secondaryBankId, currentBankId]);
 
+  const flushExportWebhookQueue = React.useCallback(async () => {
+    if (typeof window === 'undefined' || !navigator.onLine) return;
+    const queue = readExportWebhookQueue();
+    if (!queue.length) return;
+    const remaining: Array<{ email: string; bankName: string; padNames: string[] }> = [];
+    for (const payload of queue) {
+      try {
+        const resp = await fetch('/api/webhook/export-bank', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!resp.ok) throw new Error(`Webhook failed: ${resp.status}`);
+      } catch {
+        remaining.push(payload);
+      }
+    }
+    writeExportWebhookQueue(remaining);
+  }, []);
+
+  const enqueueExportWebhook = React.useCallback((payload: { email: string; bankName: string; padNames: string[] }) => {
+    const queue = readExportWebhookQueue();
+    queue.push(payload);
+    writeExportWebhookQueue(queue);
+  }, []);
+
+  const sendExportWebhook = React.useCallback(async (payload: { email: string; bankName: string; padNames: string[] }) => {
+    if (typeof window === 'undefined') return;
+    if (!navigator.onLine) {
+      enqueueExportWebhook(payload);
+      return;
+    }
+    try {
+      const resp = await fetch('/api/webhook/export-bank', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error(`Webhook failed: ${resp.status}`);
+    } catch {
+      enqueueExportWebhook(payload);
+    }
+  }, [enqueueExportWebhook]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handler = () => {
+      flushExportWebhookQueue().catch(() => {});
+    };
+    window.addEventListener('online', handler);
+    if (navigator.onLine) handler();
+    return () => window.removeEventListener('online', handler);
+  }, [flushExportWebhookQueue]);
+
   const restoreAllFiles = React.useCallback(async () => {
     if (typeof window === 'undefined') return;
     const savedData = localStorage.getItem(STORAGE_KEY);
@@ -507,10 +587,10 @@ export function useSamplerStore(): SamplerStore {
     if (!savedData) {
       // No saved data - create empty default bank
       // Default bank loading will be triggered separately when user logs in
-      const defaultBank: SamplerBank = { id: generateId(), name: 'Default Bank', defaultColor: '#3b82f6', pads: [], createdAt: new Date(), sortOrder: 0 };
+        const defaultBank: SamplerBank = { id: generateId(), name: 'Default Bank', defaultColor: '#3b82f6', pads: [], createdAt: new Date(), sortOrder: 0 };
       setBanks([defaultBank]); 
       setCurrentBankIdState(defaultBank.id);
-      return;
+        return;
     }
     try {
       const { banks: savedBanks } = JSON.parse(savedData);
@@ -568,7 +648,22 @@ export function useSamplerStore(): SamplerStore {
            const reducedData = {
             banks: banks.map(bank => ({
               ...bank, pads: bank.pads.map(pad => ({
-                id: pad.id, name: pad.name, color: pad.color, triggerMode: pad.triggerMode, playbackMode: pad.playbackMode, volume: pad.volume, fadeInMs: pad.fadeInMs, fadeOutMs: pad.fadeOutMs, startTimeMs: pad.startTimeMs, endTimeMs: pad.endTimeMs, pitch: pad.pitch, position: pad.position
+                id: pad.id,
+                name: pad.name,
+                color: pad.color,
+                shortcutKey: pad.shortcutKey,
+                midiNote: pad.midiNote,
+                midiCC: pad.midiCC,
+                triggerMode: pad.triggerMode,
+                playbackMode: pad.playbackMode,
+                volume: pad.volume,
+                fadeInMs: pad.fadeInMs,
+                fadeOutMs: pad.fadeOutMs,
+                startTimeMs: pad.startTimeMs,
+                endTimeMs: pad.endTimeMs,
+                pitch: pad.pitch,
+                position: pad.position,
+                ignoreChannel: pad.ignoreChannel
               }))
             }))
           };
@@ -587,6 +682,8 @@ export function useSamplerStore(): SamplerStore {
     return currentBankId;
   }, [isDualMode, primaryBankId, secondaryBankId, currentBankId]);
 
+  const trimPadName = React.useCallback((name: string) => name.slice(0, 32), []);
+
   const addPad = React.useCallback(async (file: File, bankId?: string) => {
     const targetBankId = getTargetBankId(bankId);
     if (!targetBankId) return;
@@ -598,16 +695,32 @@ export function useSamplerStore(): SamplerStore {
       await storeFile(padId, file, 'audio');
       const maxPosition = targetBank.pads.length > 0 ? Math.max(...targetBank.pads.map(p => p.position || 0)) : -1;
       const newPad: PadData = {
-        id: padId, name: file.name.replace(/\.[^/.]+$/, ''), audioUrl, color: targetBank.defaultColor, triggerMode: 'toggle', playbackMode: 'once', volume: 1, fadeInMs: 0, fadeOutMs: 0, startTimeMs: 0, endTimeMs: 0, pitch: 0, position: maxPosition + 1,
+        id: padId,
+        name: trimPadName(file.name.replace(/\.[^/.]+$/, '')),
+        audioUrl,
+        color: targetBank.defaultColor,
+        triggerMode: 'toggle',
+        playbackMode: 'once',
+        volume: 1,
+        fadeInMs: 0,
+        fadeOutMs: 0,
+        startTimeMs: 0,
+        endTimeMs: 0,
+        pitch: 0,
+        position: maxPosition + 1,
+        ignoreChannel: false
       };
       const audio = new Audio(audioUrl);
       audio.addEventListener('loadedmetadata', () => {
         newPad.endTimeMs = audio.duration * 1000;
+        if (audio.duration > 0 && audio.duration < 15) {
+          newPad.ignoreChannel = true;
+        }
         setBanks(prev => prev.map(b => b.id === targetBankId ? { ...b, pads: [...b.pads, newPad] } : b));
       });
       setTimeout(() => { if (newPad.endTimeMs === 0) { newPad.endTimeMs = 30000; setBanks(prev => prev.map(b => b.id === targetBankId ? { ...b, pads: [...b.pads, newPad] } : b)); } }, 1000);
     } catch (e) { throw e; }
-  }, [banks, getTargetBankId]);
+  }, [banks, getTargetBankId, trimPadName]);
 
   const addPads = React.useCallback(async (files: File[], bankId?: string) => {
     const targetBankId = getTargetBankId(bankId);
@@ -631,12 +744,31 @@ export function useSamplerStore(): SamplerStore {
         
         maxPosition++;
         const newPad: PadData = {
-          id: padId, name: file.name.replace(/\.[^/.]+$/, ''), audioUrl, color: targetBank.defaultColor, triggerMode: 'toggle', playbackMode: 'once', volume: 1, fadeInMs: 0, fadeOutMs: 0, startTimeMs: 0, endTimeMs: 0, pitch: 0, position: maxPosition,
+          id: padId,
+          name: trimPadName(file.name.replace(/\.[^/.]+$/, '')),
+          audioUrl,
+          color: targetBank.defaultColor,
+          triggerMode: 'toggle',
+          playbackMode: 'once',
+          volume: 1,
+          fadeInMs: 0,
+          fadeOutMs: 0,
+          startTimeMs: 0,
+          endTimeMs: 0,
+          pitch: 0,
+          position: maxPosition,
+          ignoreChannel: false
         };
         newPads.push(newPad);
         
         const audio = new Audio(audioUrl);
-        audio.addEventListener('loadedmetadata', () => { newPad.endTimeMs = audio.duration * 1000; setBanks(p => [...p]); });
+        audio.addEventListener('loadedmetadata', () => {
+          newPad.endTimeMs = audio.duration * 1000;
+          if (audio.duration > 0 && audio.duration < 15) {
+            newPad.ignoreChannel = true;
+          }
+          setBanks(p => [...p]);
+        });
       }
 
       if (batchItems.length > 0) {
@@ -644,7 +776,7 @@ export function useSamplerStore(): SamplerStore {
         setBanks(prev => prev.map(b => b.id === targetBankId ? { ...b, pads: [...b.pads, ...newPads] } : b));
       }
     } catch (e) { throw e; }
-  }, [banks, getTargetBankId]);
+  }, [banks, getTargetBankId, trimPadName]);
 
   const updatePad = React.useCallback(async (bankId: string, id: string, updatedPad: PadData) => {
     if (updatedPad.imageData && updatedPad.imageData.startsWith('data:')) {
@@ -857,14 +989,23 @@ export function useSamplerStore(): SamplerStore {
       if (saveResult.message) {
         console.log('✅', saveResult.message);
       }
+      const effectiveUser = user || getCachedUser();
+      const exportPayload = {
+        email: effectiveUser?.email || 'unknown',
+        bankName: bank.name,
+        padNames: bank.pads.map((pad) => pad.name || 'Untitled Pad'),
+      };
+      if (profile?.role !== 'admin') {
+        sendExportWebhook(exportPayload).catch(() => {});
+      }
       return saveResult.message || 'Bank exported successfully';
     } catch (e) { throw e; }
-  }, [banks]);
+  }, [banks, user, profile, sendExportWebhook]);
 
   // --- FIXED IMPORT BANK ---
   const importBank = React.useCallback(async (file: File, onProgress?: (progress: number) => void) => {
     try {
-      console.log('🚀 Starting optimized import...', { fileName: file.name, fileSize: file.size });
+
       
       // Validate file before processing
       if (!file || file.size === 0) {
@@ -964,12 +1105,12 @@ export function useSamplerStore(): SamplerStore {
               lastError = e instanceof Error ? e : new Error(String(e));
               console.warn('Decryption attempt failed with cached key:', e);
             }
-          }
+        }
           
           // Try hinted ID from filename
-          if (!decrypted) {
-            const hintedId = parseBankIdFromFileName(file.name);
-            if (hintedId) {
+        if (!decrypted) {
+          const hintedId = parseBankIdFromFileName(file.name);
+          if (hintedId) {
               try {
                 const d = await getDerivedKey(hintedId, effectiveUser.id);
                 if (d) {
@@ -991,15 +1132,15 @@ export function useSamplerStore(): SamplerStore {
                 lastError = e instanceof Error ? e : new Error(String(e));
                 console.warn('Decryption attempt failed with hinted ID:', e);
               }
-            }
           }
+        }
           
           // Try all accessible banks
-          if (!decrypted) {
+        if (!decrypted) {
             try {
               const accessible = await listAccessibleBankIds(effectiveUser.id);
               console.log(`🔍 Trying ${accessible.length} accessible banks...`);
-              for (const bankId of accessible) {
+           for (const bankId of accessible) {
                 try {
                   const d = await getDerivedKey(bankId, effectiveUser.id);
                   if (d) {
@@ -1023,7 +1164,7 @@ export function useSamplerStore(): SamplerStore {
             } catch (e) {
               console.error('Error checking accessible banks:', e);
             }
-          }
+           }
         }
         
         if (!decrypted) {
@@ -1050,7 +1191,7 @@ export function useSamplerStore(): SamplerStore {
         );
         bankData = JSON.parse(jsonString);
         
-        if (!bankData || typeof bankData !== 'object') {
+      if (!bankData || typeof bankData !== 'object') {
           throw new Error('Invalid bank data structure');
         }
         
@@ -1065,8 +1206,26 @@ export function useSamplerStore(): SamplerStore {
         }
         throw error;
       }
+
+      if (
+        bankData?.id &&
+        banks.some((bank) => bank.id === bankData.id || bank.sourceBankId === bankData.id)
+      ) {
+      throw new Error('This bank is already imported.');
+    }
       
       const metadata = await extractBankMetadata(contents);
+    if (
+      metadata?.bankId &&
+      banks.some(
+        (bank) =>
+          bank.bankMetadata?.bankId === metadata.bankId ||
+          bank.sourceBankId === metadata.bankId ||
+          bank.id === metadata.bankId
+      )
+    ) {
+      throw new Error('This bank has already been imported.');
+    }
       const isAdminBank = metadata?.password === true;
       
       // LOGIC FIX: 'transferable' should come from metadata explicitly, independent of admin/encryption status
@@ -1089,6 +1248,7 @@ export function useSamplerStore(): SamplerStore {
         createdAt: bankData.createdAt ? new Date(bankData.createdAt) : new Date(),
         sortOrder: maxSortOrder + 1,
         pads: [],
+        sourceBankId: metadata?.bankId || bankData.id,
         isAdminBank,
         transferable: isTransferable, // Set explicit flag
         exportable: metadata?.exportable ?? true,
@@ -1140,9 +1300,9 @@ export function useSamplerStore(): SamplerStore {
                  if (!audioBlob || audioBlob.size === 0) {
                    console.warn(`⚠️ Audio file for pad "${padData.name || padData.id}" is empty`);
                  } else {
-                   batchFilesToStore.push({ id: newPadId, blob: audioBlob, type: 'audio' });
-                   audioUrl = await createFastIOSBlobURL(audioBlob);
-                 }
+               batchFilesToStore.push({ id: newPadId, blob: audioBlob, type: 'audio' });
+               audioUrl = await createFastIOSBlobURL(audioBlob);
+             }
                } catch (e) {
                  console.error(`❌ Failed to load audio for pad "${padData.name || padData.id}":`, e);
                  // Continue without audio - pad will be imported but won't play
@@ -1160,8 +1320,8 @@ export function useSamplerStore(): SamplerStore {
                  if (!imageBlob || imageBlob.size === 0) {
                    console.warn(`⚠️ Image file for pad "${padData.name || padData.id}" is empty`);
                  } else {
-                   batchFilesToStore.push({ id: newPadId, blob: imageBlob, type: 'image' });
-                   imageUrl = await createFastIOSBlobURL(imageBlob);
+               batchFilesToStore.push({ id: newPadId, blob: imageBlob, type: 'image' });
+               imageUrl = await createFastIOSBlobURL(imageBlob);
                  }
                } catch (e) {
                  console.error(`❌ Failed to load image for pad "${padData.name || padData.id}":`, e);
@@ -1177,6 +1337,9 @@ export function useSamplerStore(): SamplerStore {
                  imageUrl,
                  imageData: undefined,
                 shortcutKey: padData.shortcutKey || undefined,
+                midiNote: typeof padData.midiNote === 'number' ? padData.midiNote : undefined,
+                midiCC: typeof padData.midiCC === 'number' ? padData.midiCC : undefined,
+                ignoreChannel: !!padData.ignoreChannel,
                  fadeInMs: padData.fadeInMs || 0,
                  fadeOutMs: padData.fadeOutMs || 0,
                  startTimeMs: padData.startTimeMs || 0,
@@ -1186,7 +1349,7 @@ export function useSamplerStore(): SamplerStore {
                };
              } else {
                console.warn(`⚠️ Skipping pad "${padData.name || padData.id}" - no audio file found`);
-               return null;
+             return null;
              }
           } catch (e) {
             const errorMsg = e instanceof Error ? e.message : String(e);
@@ -1385,22 +1548,22 @@ export function useSamplerStore(): SamplerStore {
           return saveResult.message || 'Bank exported successfully';
         } else {
           // Unencrypted when Allow Export is enabled
-          console.log('📦 Creating shareable admin bank (unencrypted, no database entry)');
-          
-          const zipBlob = await zip.generateAsync({ 
-            type: 'blob', 
-            compression: 'DEFLATE', 
-            compressionOptions: { level: 9 } 
-          }, (m) => onProgress && onProgress(60 + (m.percent * 0.3)));
-          
-          onProgress && onProgress(90);
-          
+        console.log('📦 Creating shareable admin bank (unencrypted, no database entry)');
+        
+        const zipBlob = await zip.generateAsync({ 
+          type: 'blob', 
+          compression: 'DEFLATE', 
+          compressionOptions: { level: 9 } 
+        }, (m) => onProgress && onProgress(60 + (m.percent * 0.3)));
+        
+        onProgress && onProgress(90);
+        
           const fileName = `${title.replace(/[^a-z0-9]/gi, '_')}.bank`;
           const saveResult = await saveBankFile(zipBlob, fileName);
           if (saveResult.message) {
             console.log('✅', saveResult.message);
-          }
-          onProgress && onProgress(100);
+      }
+      onProgress && onProgress(100);
           return saveResult.message || 'Bank exported successfully';
         }
       }
@@ -1522,7 +1685,7 @@ export function useSamplerStore(): SamplerStore {
 
     // Only load if not already loaded for this user
     if (!alreadyLoaded) {
-      loadDefaultBank();
+    loadDefaultBank();
     } else {
       console.log('📦 Default bank: Already loaded for this user, skipping');
     }

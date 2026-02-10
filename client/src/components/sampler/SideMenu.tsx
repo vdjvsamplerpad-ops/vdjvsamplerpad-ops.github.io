@@ -10,8 +10,9 @@ import { Plus, Settings, Upload, X, Crown, Minus, RotateCcw, Sun, Moon, ChevronU
 import { SamplerBank, StopMode, PadData } from './types/sampler';
 import { BankEditDialog } from './BankEditDialog';
 import { LoginModal } from '@/components/auth/LoginModal';
-import { useAuth } from '@/hooks/useAuth';
+import { getCachedUser, useAuth } from '@/hooks/useAuth';
 import { createPortal } from 'react-dom';
+import { normalizeStoredShortcutKey } from '@/lib/keyboard-shortcuts';
 
 type Notice = { id: string; variant: 'success' | 'error' | 'info'; message: string };
 
@@ -39,6 +40,7 @@ interface SideMenuProps {
   onSetSecondaryBank: (id: string | null) => void;
   onSetCurrentBank: (id: string | null) => void;
   onUpdateBank: (id: string, updates: Partial<SamplerBank>) => void;
+  onUpdatePad: (bankId: string, id: string, updatedPad: PadData) => void;
   onDeleteBank: (id: string) => void;
   onImportBank: (file: File, onProgress?: (progress: number) => void) => Promise<SamplerBank | null>;
   onExportBank: (id: string, onProgress?: (progress: number) => void) => Promise<string>;
@@ -51,6 +53,12 @@ interface SideMenuProps {
   onTransferPad: (padId: string, sourceBankId: string, targetBankId: string) => void;
   canTransferFromBank?: (bankId: string) => boolean;
   onExportAdmin?: (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, allowExport: boolean, onProgress?: (progress: number) => void) => Promise<string>;
+  midiEnabled?: boolean;
+  blockedShortcutKeys: Set<string>;
+  blockedMidiNotes: Set<number>;
+  blockedMidiCCs: Set<number>;
+  editBankRequest?: { bankId: string; token: number } | null;
+  hideShortcutLabels?: boolean;
 }
 
 export function SideMenu({
@@ -71,6 +79,7 @@ export function SideMenu({
   onSetSecondaryBank,
   onSetCurrentBank,
   onUpdateBank,
+  onUpdatePad,
   onDeleteBank,
   onImportBank,
   onExportBank,
@@ -82,11 +91,18 @@ export function SideMenu({
   onMoveBankDown,
   onTransferPad,
   canTransferFromBank,
-  onExportAdmin
+  onExportAdmin,
+  midiEnabled = false,
+  blockedShortcutKeys,
+  blockedMidiNotes,
+  blockedMidiCCs,
+  editBankRequest = null,
+  hideShortcutLabels = false
 }: SideMenuProps) {
   const [showCreateDialog, setShowCreateDialog] = React.useState(false);
   const [showEditDialog, setShowEditDialog] = React.useState(false);
   const [editingBank, setEditingBank] = React.useState<SamplerBank | null>(null);
+  const lastEditTokenRef = React.useRef<number | undefined>(undefined);
   const [newBankName, setNewBankName] = React.useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = React.useState(false);
   const [bankToDelete, setBankToDelete] = React.useState<SamplerBank | null>(null);
@@ -103,6 +119,26 @@ export function SideMenu({
   const [exportError, setExportError] = React.useState<string>('');
   const [importError, setImportError] = React.useState<string>('');
   const [dragOverBankId, setDragOverBankId] = React.useState<string | null>(null);
+  const [renderContent, setRenderContent] = React.useState(open);
+
+  const handleClearPadShortcuts = React.useCallback(() => {
+    if (!editingBank) return;
+    editingBank.pads.forEach((pad) => {
+      if (pad.shortcutKey) {
+        onUpdatePad(editingBank.id, pad.id, { ...pad, shortcutKey: undefined });
+      }
+    });
+  }, [editingBank, onUpdatePad]);
+
+  const handleClearPadMidi = React.useCallback(() => {
+    if (!editingBank) return;
+    editingBank.pads.forEach((pad) => {
+      if (typeof pad.midiNote === 'number' || typeof pad.midiCC === 'number') {
+        onUpdatePad(editingBank.id, pad.id, { ...pad, midiNote: undefined, midiCC: undefined });
+      }
+    });
+  }, [editingBank, onUpdatePad]);
+
   
   // ETA Calculation State
   const [importStartTime, setImportStartTime] = React.useState<number>(0);
@@ -142,10 +178,20 @@ export function SideMenu({
     }
   }, [banks]);
 
+  React.useEffect(() => {
+    if (open) {
+      setRenderContent(true);
+      return;
+    }
+    const timeout = setTimeout(() => setRenderContent(false), 200);
+    return () => clearTimeout(timeout);
+  }, [open]);
+
   // Sort banks by sortOrder
   const sortedBanks = React.useMemo(() => {
     return [...banks].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
   }, [banks]);
+
 
   const handleCreateBank = () => {
     if (newBankName.trim()) {
@@ -159,6 +205,15 @@ export function SideMenu({
     setEditingBank(bank);
     setShowEditDialog(true);
   };
+
+  React.useEffect(() => {
+    if (!editMode || !editBankRequest) return;
+    if (lastEditTokenRef.current === editBankRequest.token) return;
+    const target = banks.find((bank) => bank.id === editBankRequest.bankId);
+    if (!target) return;
+    lastEditTokenRef.current = editBankRequest.token;
+    handleEditBank(target);
+  }, [banks, editBankRequest, editMode]);
 
   const handleDeleteBank = (bank: SamplerBank) => {
     setBankToDelete(bank);
@@ -217,6 +272,12 @@ export function SideMenu({
   }, []);
 
   const handleImportClick = React.useCallback(() => {
+    const effectiveUser = user || getCachedUser();
+    if (!effectiveUser) {
+      setShowLoginModal(true);
+      pushNotice({ variant: 'error', message: 'Please sign in to import a bank.' });
+      return;
+    }
     // Use enhanced file picker for Android/WebView
     if (isAndroid || isWebView) {
       console.log('📱 Android/WebView detected, using enhanced file picker...');
@@ -269,7 +330,15 @@ export function SideMenu({
       // Standard file input for other platforms
       fileInputRef.current?.click();
     }
-  }, [isAndroid, isWebView, createCompatibleFileInput, pushNotice]);
+  }, [isAndroid, isWebView, createCompatibleFileInput, pushNotice, user]);
+
+  React.useEffect(() => {
+    const handleGlobalImport = () => {
+      handleImportClick();
+    };
+    window.addEventListener('vdjv-import-bank', handleGlobalImport as EventListener);
+    return () => window.removeEventListener('vdjv-import-bank', handleGlobalImport as EventListener);
+  }, [handleImportClick]);
 
   const processFileImport = React.useCallback(async (file: File) => {
     // Validate file
@@ -300,6 +369,7 @@ export function SideMenu({
     setImportEta(null);
 
     try {
+      window.dispatchEvent(new Event('vdjv-import-start'));
       await onImportBank(file, (progress) => {
         setImportProgress(progress);
       });
@@ -325,6 +395,8 @@ export function SideMenu({
       }
       
       pushNotice({ variant: 'error', message: `Import failed: ${errorMessage}` });
+    } finally {
+      window.dispatchEvent(new Event('vdjv-import-end'));
     }
 
     if (fileInputRef.current) {
@@ -593,6 +665,7 @@ export function SideMenu({
           </Button>
         </div>
 
+        {renderContent && (
         <div className="p-2 max-h-[calc(100vh-80px)] overflow-y-auto">
           <div className="grid grid-cols-2 gap-2 mb-1">
             <div className="space-y-2">
@@ -723,6 +796,7 @@ export function SideMenu({
               const isCurrent = status === 'current';
               const isActive = isPrimary || isSecondary || isCurrent;
               const isDragOver = dragOverBankId === bank.id;
+              const bankShortcutLabel = normalizeStoredShortcutKey(bank.shortcutKey);
 
               return (
                 <div
@@ -770,8 +844,8 @@ export function SideMenu({
                     </div>
                   )}
 
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="flex-1 cursor-pointer" onClick={() => handleBankClick(bank.id)}>
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="flex-1 min-w-0 cursor-pointer" onClick={() => handleBankClick(bank.id)}>
                       <h3 className="font-medium text-sm truncate" title={bank.name} style={!isActive ? { color: getTextColorForBackground(bank.defaultColor) } : undefined}>
                         {bank.name.length > 15 ? `${bank.name.substring(0, 15)}...` : bank.name}
                       </h3>
@@ -779,7 +853,16 @@ export function SideMenu({
                         {bank.pads.length} pad{bank.pads.length !== 1 ? 's' : ''}
                       </p>
                     </div>
-                    <div className="flex items-center gap-1">
+                    {bankShortcutLabel && !hideShortcutLabels && (
+                      <span
+                        className="max-w-[64px] shrink-0 rounded bg-black/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide truncate"
+                        style={!isActive ? { color: getTextColorForBackground(bank.defaultColor) } : undefined}
+                        title={bankShortcutLabel}
+                      >
+                        {bankShortcutLabel}
+                      </span>
+                    )}
+                    <div className="flex items-center gap-1 shrink-0">
                       <div className="flex flex-col gap-0">
                         <Button
                           variant="ghost"
@@ -857,6 +940,7 @@ export function SideMenu({
             })}
           </div>
         </div>
+        )}
       </div>
 
       <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
@@ -910,13 +994,19 @@ export function SideMenu({
           }}
           onDelete={() => {
             setShowEditDialog(false);
-            handleDeleteBank(editingBank);
+            onDeleteBank(editingBank.id);
           }}
           onExport={() => {
             setShowEditDialog(false);
             handleExportBank(editingBank.id);
           }}
           onExportAdmin={onExportAdmin}
+          midiEnabled={midiEnabled}
+          blockedShortcutKeys={blockedShortcutKeys}
+          blockedMidiNotes={blockedMidiNotes}
+          blockedMidiCCs={blockedMidiCCs}
+          onClearPadShortcuts={handleClearPadShortcuts}
+          onClearPadMidi={handleClearPadMidi}
         />
       )}
 

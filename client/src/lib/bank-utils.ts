@@ -78,7 +78,7 @@ function setCachedBankKeys(userId: string, keys: Record<string, string>): void {
   try {
     const data: CachedBankKeys = { userId, keys, timestamp: Date.now() };
     localStorage.setItem(BANK_KEYS_CACHE_KEY, JSON.stringify(data));
-    console.log('✅ Cached bank keys:', Object.keys(keys).length);
+
   } catch (e) {
     console.warn('Failed to cache bank keys:', e);
   }
@@ -203,7 +203,7 @@ export async function getDerivedKey(bankId: string, userId: string): Promise<str
   if (cachedKeys && cachedKeys[bankId]) {
     const derivedKey = cachedKeys[bankId];
     keyCache.set(cacheKey, derivedKey); // Populate memory cache
-    console.log('✅ Using cached derived key for bank:', bankId);
+
     return derivedKey;
   }
 
@@ -428,7 +428,7 @@ export async function listAccessibleBankIds(userId: string): Promise<string[]> {
  */
 export async function refreshAccessibleBanksCache(userId: string): Promise<void> {
   try {
-    console.log('🔄 Refreshing accessible banks cache for user:', userId);
+
     
     // Fetch all accessible banks
     const { data: accessData, error: accessError } = await supabase
@@ -464,7 +464,7 @@ export async function refreshAccessibleBanksCache(userId: string): Promise<void>
       setCachedBankKeys(userId, keysToCache);
     }
     
-    console.log('✅ Cached', bankIds.length, 'accessible banks and', Object.keys(keysToCache).length, 'derived keys');
+
   } catch (error) {
     console.error('Error refreshing accessible banks cache:', error);
   }

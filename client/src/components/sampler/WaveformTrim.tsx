@@ -522,9 +522,18 @@ export function WaveformTrim({
            <Button variant="ghost" size="sm" onClick={() => { setZoom(1); setViewOffsetMs(0); }}>
              Reset View
            </Button>
-           <span className="text-xs text-gray-500 bg-gray-900 px-2 py-1 rounded">
-             {zoom.toFixed(1)}x
-           </span>
+          <span className="text-xs text-gray-500 bg-gray-900 px-2 py-1 rounded">
+            {zoom.toFixed(1)}x
+          </span>
+           <Button
+             onClick={handlePreview}
+             variant={isPreviewing ? 'destructive' : 'outline'}
+             size="sm"
+            className="h-6 w-6 p-0"
+             disabled={isLoading || effectiveDuration <= 0}
+           >
+            {isPreviewing ? <Square className="w-3 h-3 text-red-500" /> : <Play className="w-3 h-3 text-green-500" />}
+           </Button>
         </div>
       </div>
 
@@ -536,6 +545,7 @@ export function WaveformTrim({
         onMouseMove={handleMouseMove}
         onMouseUp={() => setIsDragging(null)}
         onMouseLeave={() => { setIsDragging(null); setHoverTime(null); }}
+        onDoubleClick={handlePreview}
       >
         {isLoading ? (
             <div className="flex items-center justify-center h-full text-gray-500">Loading...</div>
@@ -550,20 +560,7 @@ export function WaveformTrim({
         )}
       </div>
 
-      <div className="flex gap-2">
-        <Button
-          onClick={handlePreview}
-          variant={isPreviewing ? "destructive" : "default"}
-          className="flex-1"
-          disabled={isLoading || effectiveDuration <= 0}
-        >
-          {isPreviewing ? (
-            <><Square className="w-4 h-4 mr-2" /> Stop</>
-          ) : (
-            <><Play className="w-4 h-4 mr-2" /> Preview Loop</>
-          )}
-        </Button>
-      </div>
+      {/* Preview button moved to header */}
     </div>
   );
 }

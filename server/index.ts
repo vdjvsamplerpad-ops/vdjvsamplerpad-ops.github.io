@@ -13,11 +13,15 @@ const app = express();
 const SUPABASE_URL = process.env.SUPABASE_URL as string;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY as string;
+const DISCORD_WEBHOOK_AUTH = process.env.DISCORD_WEBHOOK_AUTH as string;
+const DISCORD_WEBHOOK_EXPORT = process.env.DISCORD_WEBHOOK_EXPORT as string;
 
 console.log('Environment variables loaded:');
 console.log('SUPABASE_URL:', SUPABASE_URL ? 'SET' : 'NOT SET');
 console.log('SUPABASE_SERVICE_ROLE_KEY:', SUPABASE_SERVICE_ROLE_KEY ? 'SET' : 'NOT SET');
 console.log('SUPABASE_ANON_KEY:', SUPABASE_ANON_KEY ? 'SET' : 'NOT SET');
+console.log('DISCORD_WEBHOOK_AUTH:', DISCORD_WEBHOOK_AUTH ? 'SET' : 'NOT SET');
+console.log('DISCORD_WEBHOOK_EXPORT:', DISCORD_WEBHOOK_EXPORT ? 'SET' : 'NOT SET');
 
 const adminSupabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
@@ -26,6 +30,61 @@ const adminSupabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
 // Body parsing middleware - MUST be before routes
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+const parseClientIp = (req: Request): string | null => {
+  const forwarded = req.headers['x-forwarded-for'];
+  const raw = Array.isArray(forwarded) ? forwarded[0] : (forwarded || req.socket.remoteAddress || '');
+  if (!raw) return null;
+  const first = raw.split(',')[0]?.trim() || '';
+  const normalized = first.replace('::ffff:', '');
+  return normalized || null;
+};
+
+const isPrivateIp = (ip: string): boolean => {
+  return (
+    ip === '127.0.0.1' ||
+    ip === '::1' ||
+    ip.startsWith('10.') ||
+    ip.startsWith('192.168.') ||
+    ip.startsWith('172.16.') ||
+    ip.startsWith('172.17.') ||
+    ip.startsWith('172.18.') ||
+    ip.startsWith('172.19.') ||
+    ip.startsWith('172.2') ||
+    ip.startsWith('172.3')
+  );
+};
+
+const fetchGeo = async (ip: string): Promise<Record<string, string> | null> => {
+  try {
+    if (!ip || isPrivateIp(ip)) return null;
+    const resp = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, { method: 'GET' });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (data?.error) return null;
+    return {
+      city: data?.city || '',
+      region: data?.region || '',
+      country: data?.country_name || data?.country || '',
+      timezone: data?.timezone || '',
+      org: data?.org || data?.org_name || '',
+    };
+  } catch {
+    return null;
+  }
+};
+
+const postDiscordWebhook = async (url: string, content: string) => {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`Discord webhook failed: ${resp.status} ${text}`);
+  }
+};
 
 // Admin endpoint: List users (basic pagination & search)
 app.get('/api/admin/users', async (req: any, res: any) => {
@@ -120,6 +179,57 @@ app.post('/api/admin/users/:id/reset-password', async (req: any, res: any) => {
     const anon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false } });
     const { error: resetErr } = await anon.auth.resetPasswordForEmail(email, { redirectTo: `${process.env.PUBLIC_SITE_URL || 'http://localhost:3000'}` });
     if (resetErr) return res.status(500).json({ error: resetErr.message });
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Unknown error' });
+  }
+});
+
+app.post('/api/webhook/auth-event', async (req: Request, res: Response) => {
+  try {
+    if (!DISCORD_WEBHOOK_AUTH) return res.status(500).json({ error: 'Webhook not configured' });
+    const { event, email, device } = req.body || {};
+    if (!event || !email) return res.status(400).json({ error: 'Missing event or email' });
+
+    const clientIp = parseClientIp(req) || 'unknown';
+    const geo = clientIp !== 'unknown' ? await fetchGeo(clientIp) : null;
+    const deviceInfo = device || {};
+
+    const lines = [
+      `**Auth Event:** ${String(event).toUpperCase()}`,
+      `**Email:** ${email}`,
+      `**IP:** ${clientIp}`,
+      `**Device:** ${deviceInfo?.device || deviceInfo?.platform || deviceInfo?.ua || 'unknown'}`,
+      deviceInfo?.timezone ? `**Time Zone:** ${deviceInfo.timezone}` : '',
+      geo?.city || geo?.region || geo?.country ? `**Location:** ${[geo?.city, geo?.region, geo?.country].filter(Boolean).join(', ')}` : '',
+      geo?.timezone ? `**Geo TZ:** ${geo.timezone}` : '',
+      geo?.org ? `**Org:** ${geo.org}` : '',
+    ].filter(Boolean);
+
+    await postDiscordWebhook(DISCORD_WEBHOOK_AUTH, lines.join('\n'));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Unknown error' });
+  }
+});
+
+app.post('/api/webhook/export-bank', async (req: Request, res: Response) => {
+  try {
+    if (!DISCORD_WEBHOOK_EXPORT) return res.status(500).json({ error: 'Webhook not configured' });
+    const { email, bankName, padNames } = req.body || {};
+    if (!email || !bankName || !Array.isArray(padNames)) {
+      return res.status(400).json({ error: 'Missing email, bankName, or padNames' });
+    }
+
+    const lines = [
+      '**Bank Export:**',
+      `**Email:** ${email}`,
+      `**Bank:** ${bankName}`,
+      '**Pads:**',
+      padNames.length ? padNames.map((name: string) => `- ${name}`).join('\n') : '- (no pads)',
+    ];
+
+    await postDiscordWebhook(DISCORD_WEBHOOK_EXPORT, lines.join('\n'));
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Unknown error' });

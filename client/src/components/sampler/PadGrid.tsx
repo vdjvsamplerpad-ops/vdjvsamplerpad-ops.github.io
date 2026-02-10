@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { SamplerPad } from './SamplerPad';
-import { PadData, StopMode } from './types/sampler';
+import { PadData, SamplerBank, StopMode } from './types/sampler';
 
 interface EqSettings {
   low: number;
@@ -8,10 +8,11 @@ interface EqSettings {
   high: number;
 }
 
-interface PadGridProps {
+export interface PadGridProps {
   pads: PadData[];
   bankId: string;
   bankName: string;
+  allBanks: SamplerBank[];
   allPads: PadData[];
   editMode: boolean;
   globalMuted: boolean;
@@ -29,12 +30,19 @@ interface PadGridProps {
   onTransferPad?: (padId: string, sourceBankId: string, targetBankId: string) => void;
   availableBanks?: Array<{ id: string; name: string; }>;
   canTransferFromBank?: (bankId: string) => boolean;
+  midiEnabled?: boolean;
+  blockedShortcutKeys?: Set<string>;
+  blockedMidiNotes?: Set<number>;
+  blockedMidiCCs?: Set<number>;
+  hideShortcutLabel?: boolean;
+  editRequest?: { padId: string; token: number } | null;
 }
 
 export function PadGrid({
   pads,
   bankId,
   bankName,
+  allBanks,
   allPads,
   editMode,
   globalMuted,
@@ -51,7 +59,13 @@ export function PadGrid({
   onPadDragStart,
   onTransferPad,
   availableBanks = [],
-  canTransferFromBank
+  canTransferFromBank,
+  midiEnabled = false,
+  blockedShortcutKeys,
+  blockedMidiNotes,
+  blockedMidiCCs,
+  hideShortcutLabel = false,
+  editRequest = null
 }: PadGridProps) {
   const [draggedIndex, setDraggedIndex] = React.useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = React.useState<number | null>(null);
@@ -94,7 +108,11 @@ export function PadGrid({
     const audioFiles = files.filter(file => file.type.startsWith('audio/'));
 
     audioFiles.forEach(file => {
-      onFileUpload(file);
+      try {
+        onFileUpload(file);
+      } catch (error) {
+        console.error('Failed to handle file upload:', error);
+      }
     });
   }, [onFileUpload, onTransferPad, bankId]);
 
@@ -141,7 +159,11 @@ export function PadGrid({
     if (files && files.length > 0 && onFileUpload) {
       Array.from(files).forEach(file => {
         if (file.type.startsWith('audio/')) {
-          onFileUpload(file);
+          try {
+            onFileUpload(file);
+          } catch (error) {
+            console.error('Failed to handle file upload:', error);
+          }
         }
       });
     }
@@ -162,6 +184,17 @@ export function PadGrid({
       onPadDragStart(e, pad, sourceBankId);
     }
   };
+
+  // Sort pads by position for consistent ordering
+  const sortedPads = React.useMemo(
+    () => [...pads].sort((a, b) => (a.position || 0) - (b.position || 0)),
+    [pads]
+  );
+
+  // Calculate responsive gap and sizing
+  const isMobile = windowWidth < 768;
+  const gap = isMobile ? 'gap-0' : 'gap-1';
+  const aspectRatio = 'aspect-square';
 
   if (pads.length === 0) {
     return (
@@ -208,14 +241,6 @@ export function PadGrid({
       </>
     );
   }
-
-  // Sort pads by position for consistent ordering
-  const sortedPads = [...pads].sort((a, b) => (a.position || 0) - (b.position || 0));
-
-  // Calculate responsive gap and sizing
-  const isMobile = windowWidth < 768;
-  const gap = isMobile ? 'gap-0' : 'gap-1';
-  const aspectRatio = 'aspect-square';
 
   const handlePadDragStart = (e: React.DragEvent, index: number) => {
     if (!editMode) return;
@@ -284,7 +309,9 @@ export function PadGrid({
             pad={pad}
             bankId={bankId}
             bankName={bankName}
+            allBanks={allBanks}
             allPads={allPads}
+            bankPads={pads}
             editMode={editMode}
             globalMuted={globalMuted}
             masterVolume={masterVolume}
@@ -298,6 +325,12 @@ export function PadGrid({
             onTransferPad={onTransferPad}
             availableBanks={availableBanks}
             canTransferFromBank={canTransferFromBank}
+            midiEnabled={midiEnabled}
+            blockedShortcutKeys={blockedShortcutKeys}
+            blockedMidiNotes={blockedMidiNotes}
+            blockedMidiCCs={blockedMidiCCs}
+            hideShortcutLabel={hideShortcutLabel}
+            editRequestToken={editRequest?.padId === pad.id ? editRequest.token : undefined}
           />
         </div>
       ))}

@@ -21,6 +21,9 @@ function normalizeAuthErrorMessage(msg: string): string {
   if (m.includes('invalid login') || m.includes('invalid email or password') || m.includes('invalid credentials')) {
     return 'Invalid login credentials.'
   }
+  if (m.includes('banned') || m.includes('suspended') || m.includes('disabled')) {
+    return 'Your account has been banned. Please contact support.'
+  }
   if (m.includes('email') && m.includes('invalid')) return 'Email address is invalid.'
   if (m.includes('already registered') || m.includes('already exists')) return 'This email is already registered.'
   if (m.includes('rate limit')) return 'Too many attempts. Please try again later.'
@@ -38,6 +41,7 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
   const [mode, setMode] = React.useState<Mode>('signin')
   const [loading, setLoading] = React.useState(false)
   const [resetCooldown, setResetCooldown] = React.useState<number>(0)
+  const [allowLoginWhileBanned, setAllowLoginWhileBanned] = React.useState(false)
 
   const {
     signIn,
@@ -47,10 +51,35 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
     isPasswordRecovery,
     redirectError,
     clearRedirectError,
+    banned,
+    profile,
   } = useAuth()
 
   const colorText = theme === 'dark' ? 'text-white' : 'text-gray-900'
   const panelClass = `sm:max-w-md ${theme === 'dark' ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-300'}`
+
+  const sendAuthWebhook = React.useCallback(async (event: 'login' | 'signup', emailToSend: string) => {
+    if (typeof window === 'undefined') return
+    try {
+      const ua = navigator.userAgent || ''
+      const userAgentData = (navigator as any).userAgentData
+      const deviceInfo = {
+        ua,
+        platform: navigator.platform || '',
+        language: navigator.language || '',
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        device: userAgentData?.platform || navigator.platform || 'unknown',
+        mobile: userAgentData?.mobile ?? /Mobi|Android/i.test(ua),
+      }
+      await fetch('/api/webhook/auth-event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event, email: emailToSend, device: deviceInfo }),
+      })
+    } catch (err) {
+      console.warn('Failed to send auth webhook:', err)
+    }
+  }, [])
 
   // Reset fields when modal closes
   React.useEffect(() => {
@@ -61,9 +90,10 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
       setConfirmPassword('')
       setMode('signin')
       setResetCooldown(0)
+      if (banned) setAllowLoginWhileBanned(false)
       if (redirectError) clearRedirectError()
     }
-  }, [open, redirectError, clearRedirectError])
+  }, [open, redirectError, clearRedirectError, banned])
 
   // Check for existing reset cooldown when modal opens
   React.useEffect(() => {
@@ -117,6 +147,12 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
     }
   }, [redirectError, onOpenChange, open, clearRedirectError, pushNotice])
 
+  React.useEffect(() => {
+    if (!banned) {
+      setAllowLoginWhileBanned(false)
+    }
+  }, [banned])
+
   // Helper: extra landing tab message (close/return)
   const RecoveryLandingHelper = () =>
     isPasswordRecovery ? (
@@ -164,6 +200,9 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
           return
         }
 
+        if (profile?.role !== 'admin') {
+          sendAuthWebhook('signup', email)
+        }
         // Success: tell them to check email
         pushNotice?.({ variant: 'success', message: 'Sign up successful. Check your email for a confirmation link.' })
         // Stay open so they can read? Your call. We’ll just switch to Sign In.
@@ -178,6 +217,9 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
       if (error) {
         pushNotice?.({ variant: 'error', message: normalizeAuthErrorMessage(error.message) })
       } else {
+        if (profile?.role !== 'admin') {
+          sendAuthWebhook('login', email)
+        }
         pushNotice?.({ variant: 'success', message: 'Logged in successfully.' })
         onOpenChange(false)
       }
@@ -256,8 +298,49 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
     }
   }
 
+  if (banned && !allowLoginWhileBanned) {
+    return (
+      <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 px-6">
+        <div className="w-full max-w-md rounded-lg border border-red-500/40 bg-gray-900 p-6 text-center text-white shadow-lg">
+          <div className="text-lg font-semibold">Account Banned</div>
+          <p className="mt-2 text-sm text-gray-300">
+            Your account has been banned. If you believe this is a mistake, please contact support.
+          </p>
+          <div className="mt-4">
+            <Button
+              type="button"
+              className="w-full"
+              onClick={() => {
+                setAllowLoginWhileBanned(true)
+                setMode('signin')
+                setPassword('')
+                setConfirmPassword('')
+                onOpenChange(true)
+              }}
+            >
+              Sign in to verify
+            </Button>
+          </div>
+          {appReturnUrl && (
+            <div className="mt-4">
+              <a className="underline text-sm" href={appReturnUrl}>Return to the app</a>
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && banned) {
+          setAllowLoginWhileBanned(false)
+        }
+        onOpenChange(nextOpen)
+      }}
+    >
       <DialogContent className={panelClass} aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle className={colorText}><Title /></DialogTitle>
@@ -503,6 +586,7 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
                 Forgot password?
               </Button>
 
+              {/*
               <Button
                 type="button"
                 variant="link"
@@ -515,6 +599,7 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
               >
                 {mode === 'signup' ? 'Already have an account? Sign In' : 'Need an account? Sign Up'}
               </Button>
+              */}
             </div>
 
             <div className="space-y-2">

@@ -6,10 +6,13 @@ import { getIOSAudioService } from '../../../lib/ios-audio-service';
 const MAX_AUDIO_ELEMENTS = 800;
 // iOS-specific: Limit concurrent AudioBufferSourceNodes
 const MAX_IOS_BUFFER_SOURCES = 32;
-// State change notification throttle (higher on iOS for performance - reduced re-renders)
-const NOTIFICATION_THROTTLE_MS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent) ? 100 : 16;
+const IS_IOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent);
+const IS_ANDROID = typeof navigator !== 'undefined' && /Android/.test(navigator.userAgent);
+// State change notification throttle (higher on iOS/Android for performance - reduced re-renders)
+const NOTIFICATION_THROTTLE_MS = IS_IOS ? 100 : IS_ANDROID ? 50 : 16;
 // iOS memory limit for decoded audio buffers (~50MB to stay safe on older devices)
 const IOS_MAX_BUFFER_MEMORY = 50 * 1024 * 1024;
+const MAX_PLAYBACK_CHANNELS = 8;
 
 interface AudioInstance {
   padId: string;
@@ -18,6 +21,8 @@ interface AudioInstance {
   bankName: string;
   color: string;
   volume: number;
+  channelId: number | null;
+  ignoreChannel: boolean;
   // Make audio element nullable for resource management
   audioElement: HTMLAudioElement | null;
   audioContext: AudioContext;
@@ -66,13 +71,23 @@ interface GlobalPlaybackManager {
   registerPad: (padId: string, padData: any, bankId: string, bankName: string) => Promise<void>;
   unregisterPad: (padId: string) => void;
   playPad: (padId: string) => void;
-  stopPad: (padId: string, mode?: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter') => void;
+  stopPad: (padId: string, mode?: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter', keepChannel?: boolean) => void;
   togglePad: (padId: string) => void;
+  triggerToggle: (padId: string) => void;
+  triggerHoldStart: (padId: string) => void;
+  triggerHoldStop: (padId: string) => void;
+  triggerStutter: (padId: string) => void;
+  triggerUnmuteToggle: (padId: string) => void;
   updatePadSettings: (padId: string, settings: any) => void;
   updatePadSettingsNextPlay: (padId: string, settings: any) => void;
   updatePadMetadata: (padId: string, metadata: { name?: string; color?: string; bankId?: string; bankName?: string }) => void;
   getPadState: (padId: string) => { isPlaying: boolean; progress: number } | null;
-  getAllPlayingPads: () => { padId: string; padName: string; bankId: string; bankName: string; color: string; volume: number; currentMs: number; endMs: number; playStartTime: number }[];
+  getAllPlayingPads: () => { padId: string; padName: string; bankId: string; bankName: string; color: string; volume: number; currentMs: number; endMs: number; playStartTime: number; channelId?: number | null }[];
+  getLegacyPlayingPads: () => { padId: string; padName: string; bankId: string; bankName: string; color: string; volume: number; currentMs: number; endMs: number; playStartTime: number }[];
+  getChannelStates: () => { channelId: number; channelVolume: number; pad: { padId: string; padName: string; bankId: string; bankName: string; color: string; volume: number; effectiveVolume: number; currentMs: number; endMs: number; playStartTime: number; channelId?: number | null } | null }[];
+  setChannelVolume: (channelId: number, volume: number) => void;
+  getChannelVolume: (channelId: number) => number;
+  stopChannel: (channelId: number) => void;
   stopAllPads: (mode?: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter') => void;
   setGlobalMute: (muted: boolean) => void;
   setMasterVolume: (volume: number) => void;
@@ -121,12 +136,15 @@ class GlobalPlaybackManagerClass {
   private globalEQ: EqSettings = { low: 0, mid: 0, high: 0 };
   private audioContext: AudioContext | null = null;
   private isIOS: boolean = false;
+  private isAndroid: boolean = false;
   private contextUnlocked: boolean = false;
   private silentAudio: HTMLAudioElement | null = null;
   private iosAudioService: any = null;
   private notificationTimeout: NodeJS.Timeout | null = null;
   // iOS optimization: shared gain node for all buffer sources
   private sharedIOSGainNode: GainNode | null = null;
+  private channelAssignments: Map<number, string> = new Map();
+  private channelVolumes: Map<number, number> = new Map();
   // Pre-warming state
   private isPrewarmed: boolean = false;
   // Audio buffer cache for iOS with memory tracking
@@ -136,6 +154,10 @@ class GlobalPlaybackManagerClass {
 
   constructor() {
     this.isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+    this.isAndroid = /Android/.test(navigator.userAgent);
+    for (let i = 1; i <= MAX_PLAYBACK_CHANNELS; i += 1) {
+      this.channelVolumes.set(i, 1);
+    }
 
     if (this.isIOS) {
       this.iosAudioService = getIOSAudioService();
@@ -447,6 +469,7 @@ class GlobalPlaybackManagerClass {
           instance.progress = 0;
           instance.isFading = false;
           this.stopFadeAutomation(instance);
+          this.releaseChannel(instance);
           this.notifyStateChange();
         }
       };
@@ -490,6 +513,7 @@ class GlobalPlaybackManagerClass {
       existing.bankName = bankName;
       existing.color = padData.color;
       existing.volume = padData.volume;
+      existing.ignoreChannel = !!padData.ignoreChannel;
       this.updatePadSettings(padId, {
         triggerMode: padData.triggerMode,
         playbackMode: padData.playbackMode,
@@ -497,7 +521,8 @@ class GlobalPlaybackManagerClass {
         endTimeMs: padData.endTimeMs,
         fadeInMs: padData.fadeInMs,
         fadeOutMs: padData.fadeOutMs,
-        pitch: padData.pitch
+        pitch: padData.pitch,
+        ignoreChannel: padData.ignoreChannel
       });
       existing.lastUsedTime = Date.now(); 
       
@@ -521,6 +546,8 @@ class GlobalPlaybackManagerClass {
       bankName,
       color: padData.color,
       volume: padData.volume,
+      channelId: null,
+      ignoreChannel: !!padData.ignoreChannel,
       audioElement: null,
       audioContext: this.audioContext!,
       sourceNode: null,
@@ -593,7 +620,38 @@ class GlobalPlaybackManagerClass {
   }
 
   private getBaseGain(instance: AudioInstance) {
-    return this.globalMuted || instance.softMuted ? 0 : instance.volume * this.masterVolume;
+    const channelVolume = instance.channelId ? (this.channelVolumes.get(instance.channelId) ?? 1) : 1;
+    return this.globalMuted || instance.softMuted ? 0 : instance.volume * this.masterVolume * channelVolume;
+  }
+
+  private assignChannel(instance: AudioInstance): boolean {
+    if (instance.ignoreChannel) {
+      this.releaseChannel(instance);
+      return true;
+    }
+    if (instance.channelId && this.channelAssignments.get(instance.channelId) === instance.padId) {
+      return true;
+    }
+    if (instance.channelId && !this.channelAssignments.has(instance.channelId)) {
+      this.channelAssignments.set(instance.channelId, instance.padId);
+      return true;
+    }
+    for (let i = 1; i <= MAX_PLAYBACK_CHANNELS; i += 1) {
+      if (!this.channelAssignments.has(i)) {
+        this.channelAssignments.set(i, instance.padId);
+        instance.channelId = i;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private releaseChannel(instance: AudioInstance, keepChannel?: boolean) {
+    if (keepChannel) return;
+    if (instance.channelId && this.channelAssignments.get(instance.channelId) === instance.padId) {
+      this.channelAssignments.delete(instance.channelId);
+    }
+    instance.channelId = null;
   }
 
   private stopFadeAutomation(instance: AudioInstance) {
@@ -696,7 +754,7 @@ class GlobalPlaybackManagerClass {
     let lastNotifiedProgress = 0;
     
     // Use longer interval on iOS to reduce CPU usage (5 FPS vs 20 FPS)
-    const updateInterval = this.isIOS ? 200 : 50;
+    const updateInterval = this.isIOS ? 200 : (this.isAndroid ? 100 : 50);
     
     instance.iosProgressInterval = setInterval(() => {
       if (!instance.isPlaying) {
@@ -860,6 +918,11 @@ class GlobalPlaybackManagerClass {
 
     instance.lastUsedTime = Date.now();
 
+    if (!this.assignChannel(instance)) {
+      console.warn('No available playback channels. Playback blocked for:', padId);
+      return;
+    }
+
     // iOS: Use buffer-based playback for instant response
     if (this.isIOS) {
       this.playPadIOS(instance);
@@ -869,6 +932,7 @@ class GlobalPlaybackManagerClass {
     const isReady = this.ensureAudioResources(instance);
     if (!isReady) {
       console.error('Could not allocate audio resource for pad:', padId);
+      this.releaseChannel(instance);
       return;
     }
 
@@ -992,6 +1056,7 @@ class GlobalPlaybackManagerClass {
           clearInterval(instance.iosProgressInterval);
           instance.iosProgressInterval = null;
         }
+        this.releaseChannel(instance);
         this.notifyStateChange();
       }
     };
@@ -1099,7 +1164,7 @@ class GlobalPlaybackManagerClass {
     }
   }
 
-  private stopPadInstant(instance: AudioInstance): void {
+  private stopPadInstant(instance: AudioInstance, keepChannel?: boolean): void {
     // Stop buffer source for iOS
     if (instance.bufferSourceNode) {
       try {
@@ -1125,6 +1190,7 @@ class GlobalPlaybackManagerClass {
     instance.fadeInStartTime = null;
     instance.fadeOutStartTime = null;
     instance.playStartTime = null;
+    this.releaseChannel(instance, keepChannel);
 
     if (!this.isIOS) this.disconnectAudioNodes(instance);
     this.stopFadeAutomation(instance);
@@ -1289,9 +1355,18 @@ class GlobalPlaybackManagerClass {
   }
 
   private updateInstanceVolume(instance: AudioInstance): void {
-    if (instance.isFading || !instance.isConnected || !instance.gainNode || !this.audioContext) return;
-    if (instance.fadeInStartTime || instance.fadeOutStartTime) return;
-    const targetVolume = this.globalMuted ? 0 : instance.volume * this.masterVolume;
+    if (!instance.isConnected || !instance.gainNode || !this.audioContext) return;
+    if (instance.isFading || instance.fadeInStartTime || instance.fadeOutStartTime) return;
+    const targetVolume = this.getBaseGain(instance);
+    if (instance.audioElement) instance.audioElement.volume = 1.0;
+    instance.gainNode.gain.setValueAtTime(targetVolume, this.audioContext.currentTime);
+  }
+
+  private applySoftMute(instance: AudioInstance): void {
+    if (!instance.gainNode || !this.audioContext) return;
+    // Cancel fades so soft-mute takes immediate effect
+    this.stopFadeAutomation(instance);
+    const targetVolume = this.getBaseGain(instance);
     if (instance.audioElement) instance.audioElement.volume = 1.0;
     instance.gainNode.gain.setValueAtTime(targetVolume, this.audioContext.currentTime);
   }
@@ -1353,12 +1428,12 @@ class GlobalPlaybackManagerClass {
     instance.nextPlayOverrides = undefined;
   }
 
-  stopPad(padId: string, mode: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter' = 'instant'): void {
+  stopPad(padId: string, mode: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter' = 'instant', keepChannel?: boolean): void {
     const instance = this.audioInstances.get(padId);
     if (!instance) return;
     if (instance.fadeIntervalId) { clearInterval(instance.fadeIntervalId); instance.fadeIntervalId = null; }
     switch (mode) {
-      case 'instant': this.stopPadInstant(instance); break;
+      case 'instant': this.stopPadInstant(instance, keepChannel); break;
       case 'fadeout': this.stopPadFadeout(instance); break;
       case 'brake': this.stopPadBrake(instance); break;
       case 'backspin': this.stopPadBackspin(instance); break;
@@ -1369,6 +1444,7 @@ class GlobalPlaybackManagerClass {
   unregisterPad(padId: string): void {
     const instance = this.audioInstances.get(padId);
     if (!instance) return;
+    this.releaseChannel(instance);
     this.cleanupInstance(instance);
     this.audioInstances.delete(padId);
     this.notifyStateChange();
@@ -1410,6 +1486,18 @@ class GlobalPlaybackManagerClass {
     if (settings.volume !== undefined) {
       instance.volume = settings.volume;
       this.updateInstanceVolume(instance);
+    }
+    if (settings.ignoreChannel !== undefined) {
+      instance.ignoreChannel = settings.ignoreChannel;
+      if (settings.ignoreChannel) {
+        this.releaseChannel(instance);
+        this.updateInstanceVolume(instance);
+        this.notifyStateChange();
+      } else if (instance.isPlaying && !instance.channelId) {
+        this.assignChannel(instance);
+        this.updateInstanceVolume(instance);
+        this.notifyStateChange();
+      }
     }
     
     if (fadeSettingsChanged && instance.isPlaying && !instance.isFading) {
@@ -1485,11 +1573,121 @@ class GlobalPlaybackManagerClass {
                   effectiveVolume: instance.volume * factor,
                   currentMs: currentRelMs,
                   endMs: endRelMs,
+                  playStartTime: instance.playStartTime || 0,
+                  channelId: instance.channelId ?? null
+              });
+          }
+      });
+      return playing.sort((a, b) => (a.playStartTime || 0) - (b.playStartTime || 0));
+  }
+
+  getLegacyPlayingPads() {
+      const playing: any[] = [];
+      this.audioInstances.forEach(instance => {
+          if (instance.isPlaying && instance.ignoreChannel) {
+              let currentRelMs = 0;
+              let endRelMs = 0;
+
+              if (instance.audioElement) {
+                  const nowAbsMs = instance.audioElement.currentTime * 1000;
+                  const regionStart = instance.startTimeMs || 0;
+                  const regionEnd = instance.endTimeMs > 0 ? instance.endTimeMs : instance.audioElement.duration * 1000;
+                  currentRelMs = Math.max(0, Math.min(regionEnd - regionStart, nowAbsMs - regionStart));
+                  endRelMs = Math.max(0, regionEnd - regionStart);
+              } else if (instance.bufferSourceNode && instance.playStartTime) {
+                  const elapsed = (Date.now() - instance.playStartTime) * Math.pow(2, (instance.pitch || 0) / 12);
+                  const regionStart = instance.startTimeMs || 0;
+                  const regionEnd = instance.endTimeMs || instance.bufferDuration;
+                  currentRelMs = Math.min(elapsed, regionEnd - regionStart);
+                  endRelMs = regionEnd - regionStart;
+              }
+
+              playing.push({
+                  padId: instance.padId,
+                  padName: instance.padName,
+                  bankId: instance.bankId,
+                  bankName: instance.bankName,
+                  color: instance.color,
+                  volume: instance.volume,
+                  currentMs: currentRelMs,
+                  endMs: endRelMs,
                   playStartTime: instance.playStartTime || 0
               });
           }
       });
       return playing.sort((a, b) => (a.playStartTime || 0) - (b.playStartTime || 0));
+  }
+
+  getChannelStates() {
+    const channels: any[] = [];
+    for (let i = 1; i <= MAX_PLAYBACK_CHANNELS; i += 1) {
+      const padId = this.channelAssignments.get(i);
+      let pad = null;
+      if (padId) {
+        const instance = this.audioInstances.get(padId);
+        if (instance && instance.isPlaying) {
+          let currentRelMs = 0;
+          let endRelMs = 0;
+          if (instance.audioElement) {
+            const nowAbsMs = instance.audioElement.currentTime * 1000;
+            const regionStart = instance.startTimeMs || 0;
+            const regionEnd = instance.endTimeMs > 0 ? instance.endTimeMs : instance.audioElement.duration * 1000;
+            currentRelMs = Math.max(0, Math.min(regionEnd - regionStart, nowAbsMs - regionStart));
+            endRelMs = Math.max(0, regionEnd - regionStart);
+          } else if (instance.bufferSourceNode && instance.playStartTime) {
+            const elapsed = (Date.now() - instance.playStartTime) * Math.pow(2, (instance.pitch || 0) / 12);
+            const regionStart = instance.startTimeMs || 0;
+            const regionEnd = instance.endTimeMs || instance.bufferDuration;
+            currentRelMs = Math.min(elapsed, regionEnd - regionStart);
+            endRelMs = regionEnd - regionStart;
+          }
+          const factor = this.computeEffectiveVolumeFactor(instance);
+          pad = {
+            padId: instance.padId,
+            padName: instance.padName,
+            bankId: instance.bankId,
+            bankName: instance.bankName,
+            color: instance.color,
+            volume: instance.volume,
+            effectiveVolume: instance.volume * factor,
+            currentMs: currentRelMs,
+            endMs: endRelMs,
+            playStartTime: instance.playStartTime || 0,
+            channelId: instance.channelId ?? null
+          };
+        }
+      }
+      channels.push({
+        channelId: i,
+        channelVolume: this.channelVolumes.get(i) ?? 1,
+        pad
+      });
+    }
+    return channels;
+  }
+
+  setChannelVolume(channelId: number, volume: number) {
+    const safe = Math.max(0, Math.min(1, volume));
+    this.channelVolumes.set(channelId, safe);
+    const padId = this.channelAssignments.get(channelId);
+    if (padId) {
+      const instance = this.audioInstances.get(padId);
+      if (instance) {
+        this.updateInstanceVolume(instance);
+      }
+    }
+    this.notifyStateChange();
+  }
+
+  getChannelVolume(channelId: number) {
+    return this.channelVolumes.get(channelId) ?? 1;
+  }
+
+  stopChannel(channelId: number) {
+    const padId = this.channelAssignments.get(channelId);
+    if (padId) {
+      this.stopPad(padId, 'instant');
+    }
   }
 
   stopAllPads(mode: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter' = 'instant'): void {
@@ -1537,15 +1735,65 @@ class GlobalPlaybackManagerClass {
     setTimeout(() => { this.playPad(padId); }, 5);
   }
   
+  triggerToggle(padId: string): void {
+    const instance = this.audioInstances.get(padId);
+    if (!instance) return;
+    if (instance.isPlaying) {
+      this.stopPad(padId, 'instant');
+    } else {
+      instance.softMuted = false;
+      this.playPad(padId);
+    }
+  }
+
+  triggerHoldStart(padId: string): void {
+    const instance = this.audioInstances.get(padId);
+    if (!instance) return;
+    if (!instance.isPlaying) {
+      instance.softMuted = false;
+      this.playPad(padId);
+    }
+  }
+
+  triggerHoldStop(padId: string): void {
+    const instance = this.audioInstances.get(padId);
+    if (!instance) return;
+    if (instance.isPlaying) {
+      this.stopPad(padId, 'instant');
+    }
+  }
+
+  triggerStutter(padId: string): void {
+    const instance = this.audioInstances.get(padId);
+    if (!instance) return;
+    if (!instance.isPlaying) {
+      instance.softMuted = false;
+      this.playPad(padId);
+      return;
+    }
+    this.stopPad(padId, 'instant', true);
+    setTimeout(() => { this.playPad(padId); }, 5);
+  }
+
+  triggerUnmuteToggle(padId: string): void {
+    const instance = this.audioInstances.get(padId);
+    if (!instance) return;
+    if (!instance.isPlaying) {
+      instance.softMuted = false;
+      this.playPad(padId);
+      return;
+    }
+    instance.softMuted = !instance.softMuted;
+    this.applySoftMute(instance);
+    this.notifyStateChange();
+  }
+
   toggleMutePad(padId: string): void {
     const instance = this.audioInstances.get(padId);
     if (!instance) return;
-    if (instance.audioElement) {
-      instance.audioElement.muted = !instance.audioElement.muted;
-    }
     // For buffer-based, toggle soft mute
     instance.softMuted = !instance.softMuted;
-    this.updateInstanceVolume(instance);
+    this.applySoftMute(instance);
     this.notifyStateChange();
   }
   
@@ -1705,10 +1953,20 @@ export function useGlobalPlaybackManager(): GlobalPlaybackManager {
       globalPlaybackManager.unregisterPad(padId),
     playPad: (padId: string) =>
       globalPlaybackManager.playPad(padId),
-    stopPad: (padId: string, mode?: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter') =>
-      globalPlaybackManager.stopPad(padId, mode),
+    stopPad: (padId: string, mode?: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter', keepChannel?: boolean) =>
+      globalPlaybackManager.stopPad(padId, mode, keepChannel),
     togglePad: (padId: string) =>
       globalPlaybackManager.togglePad(padId),
+    triggerToggle: (padId: string) =>
+      globalPlaybackManager.triggerToggle(padId),
+    triggerHoldStart: (padId: string) =>
+      globalPlaybackManager.triggerHoldStart(padId),
+    triggerHoldStop: (padId: string) =>
+      globalPlaybackManager.triggerHoldStop(padId),
+    triggerStutter: (padId: string) =>
+      globalPlaybackManager.triggerStutter(padId),
+    triggerUnmuteToggle: (padId: string) =>
+      globalPlaybackManager.triggerUnmuteToggle(padId),
     updatePadSettings: (padId: string, settings: any) =>
       globalPlaybackManager.updatePadSettings(padId, settings),
     updatePadSettingsNextPlay: (padId: string, settings: any) =>
@@ -1719,6 +1977,16 @@ export function useGlobalPlaybackManager(): GlobalPlaybackManager {
       globalPlaybackManager.getPadState(padId),
     getAllPlayingPads: () =>
       globalPlaybackManager.getAllPlayingPads(),
+    getLegacyPlayingPads: () =>
+      globalPlaybackManager.getLegacyPlayingPads(),
+    getChannelStates: () =>
+      globalPlaybackManager.getChannelStates(),
+    setChannelVolume: (channelId: number, volume: number) =>
+      globalPlaybackManager.setChannelVolume(channelId, volume),
+    getChannelVolume: (channelId: number) =>
+      globalPlaybackManager.getChannelVolume(channelId),
+    stopChannel: (channelId: number) =>
+      globalPlaybackManager.stopChannel(channelId),
     stopAllPads: (mode?: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter') =>
       globalPlaybackManager.stopAllPads(mode),
     setGlobalMute: (muted: boolean) =>

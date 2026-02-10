@@ -6,6 +6,7 @@ import { refreshAccessibleBanksCache } from '@/lib/bank-utils'
 // Keys for localStorage caching
 const USER_CACHE_KEY = 'vdjv-cached-user';
 const PROFILE_CACHE_KEY = 'vdjv-cached-profile';
+const BAN_CACHE_KEY = 'vdjv-cached-ban';
 
 export interface Profile {
   id: string
@@ -19,6 +20,7 @@ interface AuthState {
   loading: boolean
   isPasswordRecovery: boolean
   redirectError: { code: string; description: string } | null
+  banned: boolean
 }
 
 // Helper to get cached user from localStorage (for offline/sync issues)
@@ -43,6 +45,17 @@ export function getCachedProfile(): Profile | null {
   }
 }
 
+// Helper to get cached ban flag from localStorage
+export function getCachedBan(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const cached = localStorage.getItem(BAN_CACHE_KEY);
+    return cached === '1' || cached === 'true';
+  } catch {
+    return false;
+  }
+}
+
 // Helper to cache user data
 function cacheUserData(user: User | null, profile: Profile | null): void {
   if (typeof window === 'undefined') return;
@@ -59,6 +72,19 @@ function cacheUserData(user: User | null, profile: Profile | null): void {
     }
   } catch (e) {
     console.warn('Failed to cache user data:', e);
+  }
+}
+
+function cacheBanState(banned: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (banned) {
+      localStorage.setItem(BAN_CACHE_KEY, '1');
+    } else {
+      localStorage.removeItem(BAN_CACHE_KEY);
+    }
+  } catch (e) {
+    console.warn('Failed to cache ban state:', e);
   }
 }
 
@@ -79,6 +105,32 @@ function parseHashParams(hash: string): Record<string, string> {
   return out
 }
 
+function isBanError(error: { message?: string | null; status?: number; code?: string | null } | null | undefined): boolean {
+  if (!error) return false
+  const message = (error.message || '').toLowerCase()
+  const code = (error.code || '').toLowerCase()
+  const status = error.status
+  return (
+    message.includes('banned') ||
+    message.includes('ban') ||
+    message.includes('suspended') ||
+    code.includes('banned') ||
+    code.includes('suspended') ||
+    status === 403
+  )
+}
+
+function isUserBanned(user: User | null): boolean {
+  if (!user) return false
+  const bannedUntil =
+    (user as any).banned_until ||
+    (user as any).app_metadata?.banned_until ||
+    (user as any).user_metadata?.banned_until
+  if (!bannedUntil) return false
+  const banDate = new Date(bannedUntil)
+  return !Number.isNaN(banDate.getTime()) && banDate > new Date()
+}
+
 export function useAuth(): AuthState & AuthActions {
   const [state, setState] = React.useState<AuthState>({
     user: null,
@@ -86,10 +138,35 @@ export function useAuth(): AuthState & AuthActions {
     loading: true,
     isPasswordRecovery: false,
     redirectError: null,
+    banned: getCachedBan(),
   })
   
   // Track which user we've already refreshed cache for
   const cacheRefreshedForUserIdRef = React.useRef<string | null>(null)
+
+  const setBannedState = React.useCallback((banned: boolean) => {
+    cacheBanState(banned)
+    setState((s) => (s.banned === banned ? s : { ...s, banned }))
+  }, [])
+
+  const enforceBan = React.useCallback(async () => {
+    cacheBanState(true)
+    cacheUserData(null, null)
+    cacheRefreshedForUserIdRef.current = null
+    setState((s) => ({
+      ...s,
+      user: null,
+      profile: null,
+      loading: false,
+      isPasswordRecovery: false,
+      banned: true,
+    }))
+    try {
+      await supabase.auth.signOut({ scope: 'global' })
+    } catch (err) {
+      console.warn('Failed to sign out banned user:', err)
+    }
+  }, [])
 
   const ensureProfile = React.useCallback(async (user: User) => {
     const { data: existing, error: selectErr } = await supabase
@@ -123,6 +200,12 @@ export function useAuth(): AuthState & AuthActions {
   }, [])
 
   React.useEffect(() => {
+    if (getCachedBan()) {
+      supabase.auth.signOut({ scope: 'global' }).catch((err) => {
+        console.warn('Failed to sign out banned user:', err)
+      })
+    }
+
     // 1) Parse URL hash for redirect errors (e.g., otp_expired)
     if (typeof window !== 'undefined' && window.location.hash) {
       const params = parseHashParams(window.location.hash)
@@ -144,6 +227,22 @@ export function useAuth(): AuthState & AuthActions {
     // 2) Session/profile
     const fetchSessionAndProfile = async (session: Session | null) => {
       if (session?.user) {
+        const { data: authData, error: authError } = await supabase.auth.getUser()
+        const authUser = authData?.user || session.user
+        if (isUserBanned(authUser)) {
+          await enforceBan()
+          return
+        }
+        if (isBanError(authError)) {
+          await enforceBan()
+          return
+        }
+        if (authError) {
+          console.warn('Failed to validate auth user:', authError)
+        } else {
+          setBannedState(false)
+        }
+
         const { data: profile, error } = await supabase
           .from('profiles')
           .select('*')
@@ -182,12 +281,15 @@ export function useAuth(): AuthState & AuthActions {
     })
 
     return () => subscription.unsubscribe()
-  }, [ensureProfile])
+  }, [ensureProfile, enforceBan, setBannedState])
 
   const signIn = React.useCallback(async (email: string, password: string) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password })
+    if (isBanError(error)) {
+      await enforceBan()
+    }
     return { error }
-  }, [])
+  }, [enforceBan])
 
   const signUp = React.useCallback(async (email: string, password: string, displayName: string) => {
     const { data, error } = await supabase.auth.signUp({

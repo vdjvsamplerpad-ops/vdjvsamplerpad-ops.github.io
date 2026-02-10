@@ -7,6 +7,8 @@ import { createPortal } from 'react-dom'
 import { useAuth } from '@/hooks/useAuth';
 import { LoginModal } from '@/components/auth/LoginModal';
 import { AboutDialog } from '@/components/ui/about-dialog';
+import { SystemAction, SystemMappings } from '@/lib/system-mappings';
+import { MidiDeviceProfile } from '@/lib/midi/device-profiles';
 
 
 interface HeaderControlsProps {
@@ -28,6 +30,39 @@ interface HeaderControlsProps {
   onToggleMixer: () => void;
   onToggleTheme: () => void;
   onExitDualMode: () => void;
+  midiSupported: boolean;
+  midiEnabled: boolean;
+  midiAccessGranted: boolean;
+  midiBackend: 'web' | 'native';
+  midiOutputSupported: boolean;
+  midiInputs: import('@/lib/midi').MidiInputInfo[];
+  midiSelectedInputId: string | null;
+  midiError: string | null;
+  onRequestMidiAccess: () => void;
+  onSelectMidiInput: (id: string | null) => void;
+  onToggleMidiEnabled: (enabled: boolean) => void;
+  systemMappings: SystemMappings;
+  onUpdateSystemKey: (action: SystemAction, key: string) => void;
+  onResetSystemKey: (action: SystemAction) => void;
+  onUpdateSystemMidi: (action: SystemAction, midiNote?: number, midiCC?: number) => void;
+  onUpdateSystemColor: (action: SystemAction, color?: string) => void;
+  onSetMasterVolumeCC: (cc?: number) => void;
+  onUpdateChannelMapping: (channelIndex: number, updates: Partial<{ keyUp?: string; keyDown?: string; keyStop?: string; midiCC?: number; midiNote?: number }>) => void;
+  padBankShortcutKeys: Set<string>;
+  padBankMidiNotes: Set<number>;
+  padBankMidiCCs: Set<number>;
+  midiNoteAssignments: Array<{ note: number; type: 'pad' | 'bank'; bankName: string; padName?: string }>;
+  hideShortcutLabels: boolean;
+  onToggleHideShortcutLabels: (hide: boolean) => void;
+  onResetAllSystemMappings: () => void;
+  onClearAllSystemMappings: () => void;
+  onResetAllChannelMappings: () => void;
+  onClearAllChannelMappings: () => void;
+  midiDeviceProfiles: MidiDeviceProfile[];
+  midiDeviceProfileId: string | null;
+  onSelectMidiDeviceProfile: (id: string | null) => void;
+  onExportMappings: () => Promise<string>;
+  onImportMappings: (file: File) => Promise<string>;
 }
 
 /** ---------- Slide-down notification system (local to header) ---------- */
@@ -123,7 +158,40 @@ export function HeaderControls({
   onToggleSideMenu,
   onToggleMixer,
   onToggleTheme,
-  onExitDualMode
+  onExitDualMode,
+  midiSupported,
+  midiEnabled,
+  midiAccessGranted,
+  midiBackend,
+  midiOutputSupported,
+  midiInputs,
+  midiSelectedInputId,
+  midiError,
+  onRequestMidiAccess,
+  onSelectMidiInput,
+  onToggleMidiEnabled,
+  systemMappings,
+  onUpdateSystemKey,
+  onResetSystemKey,
+  onUpdateSystemMidi,
+  onUpdateSystemColor,
+  onSetMasterVolumeCC,
+  onUpdateChannelMapping,
+  padBankShortcutKeys,
+  padBankMidiNotes,
+  padBankMidiCCs,
+  midiNoteAssignments,
+  hideShortcutLabels,
+  onToggleHideShortcutLabels,
+  onResetAllSystemMappings,
+  onClearAllSystemMappings,
+  onResetAllChannelMappings,
+  onClearAllChannelMappings,
+  midiDeviceProfiles,
+  midiDeviceProfileId,
+  onSelectMidiDeviceProfile,
+  onExportMappings,
+  onImportMappings
 }: HeaderControlsProps) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const { user, profile, loading } = useAuth();
@@ -149,6 +217,12 @@ export function HeaderControls({
   
   // Track previous user to detect login
   const prevUserIdRef = React.useRef<string | null>(null);
+
+  React.useEffect(() => {
+    const handleLoginRequest = () => setShowLoginModal(true);
+    window.addEventListener('vdjv-login-request', handleLoginRequest as EventListener);
+    return () => window.removeEventListener('vdjv-login-request', handleLoginRequest as EventListener);
+  }, []);
   
   // Show greeting notification when user logs in
   React.useEffect(() => {
@@ -262,7 +336,7 @@ export function HeaderControls({
               <span className="text-blue-600 font-medium">Primary:</span>
               <span>{primaryBank?.name || 'None'}</span>
               <span className="text-gray-400">|</span>
-              <span className="text-purple-600 font-medium">Secondary:</span>
+              <span className="text-purple-600 font-medium">Secondary (SHIFT):</span>
               <span>{secondaryBank?.name || 'None'}</span>
             </div>
           ) : (
@@ -382,14 +456,14 @@ export function HeaderControls({
               variant="outline"
               size={isMobileScreen ? "sm" : "default"}
               disabled={loading}
-              className={`${isMobileScreen ? 'w-10' : 'w-24'} transition-all duration-200 ${theme === 'dark'
+              className={`w-24 transition-all duration-200 ${theme === 'dark'
                 ? 'bg-blue-600/20 border-blue-500 text-blue-300 hover:bg-blue-500 hover:border-blue-400 hover:text-blue-200'
                 : 'bg-blue-50 border-blue-300 text-blue-600 hover:bg-blue-100 hover:border-blue-400 hover:text-blue-700'
                 }`}
               title="Sign in to your account"
             >
               <LogIn className="w-4 h-4" />
-              {!isMobileScreen && 'Login'}
+              <span className="ml-1">Login</span>
             </Button>
           )}
 
@@ -421,6 +495,39 @@ export function HeaderControls({
         onOpenChange={setAboutOpen}
         displayName={displayName}
         version={appVersion}
+        midiSupported={midiSupported}
+        midiEnabled={midiEnabled}
+        midiAccessGranted={midiAccessGranted}
+        midiBackend={midiBackend}
+        midiOutputSupported={midiOutputSupported}
+        midiInputs={midiInputs}
+        midiSelectedInputId={midiSelectedInputId}
+        midiError={midiError}
+        onRequestMidiAccess={onRequestMidiAccess}
+        onSelectMidiInput={onSelectMidiInput}
+        onToggleMidiEnabled={onToggleMidiEnabled}
+        systemMappings={systemMappings}
+        onUpdateSystemKey={onUpdateSystemKey}
+        onResetSystemKey={onResetSystemKey}
+        onUpdateSystemMidi={onUpdateSystemMidi}
+        onUpdateSystemColor={onUpdateSystemColor}
+        onSetMasterVolumeCC={onSetMasterVolumeCC}
+        onUpdateChannelMapping={onUpdateChannelMapping}
+        padBankShortcutKeys={padBankShortcutKeys}
+        padBankMidiNotes={padBankMidiNotes}
+        padBankMidiCCs={padBankMidiCCs}
+        midiNoteAssignments={midiNoteAssignments}
+        hideShortcutLabels={hideShortcutLabels}
+        onToggleHideShortcutLabels={onToggleHideShortcutLabels}
+        onResetAllSystemMappings={onResetAllSystemMappings}
+        onClearAllSystemMappings={onClearAllSystemMappings}
+        onResetAllChannelMappings={onResetAllChannelMappings}
+        onClearAllChannelMappings={onClearAllChannelMappings}
+        midiDeviceProfiles={midiDeviceProfiles}
+        midiDeviceProfileId={midiDeviceProfileId}
+        onSelectMidiDeviceProfile={onSelectMidiDeviceProfile}
+        onExportMappings={onExportMappings}
+        onImportMappings={onImportMappings}
       />
 
       {/* Login Modal */}

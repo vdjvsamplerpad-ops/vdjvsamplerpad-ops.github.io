@@ -64,10 +64,19 @@ export function useAudioPlayer(
         startTimeMs: pad.startTimeMs,
         endTimeMs: pad.endTimeMs,
         pitch: pad.pitch,
-        volume: pad.volume
+        volume: pad.volume,
+        ignoreChannel: pad.ignoreChannel
       });
     }
-  }, [pad.triggerMode, pad.playbackMode, pad.startTimeMs, pad.endTimeMs, pad.pitch, pad.volume]);
+  }, [
+    pad.triggerMode,
+    pad.playbackMode,
+    pad.startTimeMs,
+    pad.endTimeMs,
+    pad.pitch,
+    pad.volume,
+    pad.ignoreChannel
+  ]);
 
   // Update pad metadata when it changes
   React.useEffect(() => {
@@ -87,6 +96,12 @@ export function useAudioPlayer(
   const progress = padState?.progress || 0;
   const effectiveVolume = padState?.effectiveVolume ?? pad.volume;
 
+  React.useEffect(() => {
+    if (pad.triggerMode === 'hold' && isHolding && !isPlaying) {
+      setIsHolding(false);
+    }
+  }, [pad.triggerMode, isHolding, isPlaying]);
+
   const playAudio = React.useCallback(() => {
     if (!registeredRef.current) {
       console.warn('Trying to play unregistered pad:', pad.id);
@@ -95,31 +110,19 @@ export function useAudioPlayer(
 
     switch (pad.triggerMode) {
       case 'toggle':
-        playbackManager.togglePad(pad.id);
+        playbackManager.triggerToggle(pad.id);
         break;
       case 'stutter':
-        // Stop instantly and restart immediately
-        playbackManager.stopPad(pad.id, 'instant');
-        setTimeout(() => {
-          playbackManager.playPad(pad.id);
-        }, 5); // short delay ensures audioContext restart
+        playbackManager.triggerStutter(pad.id);
         break;
-
       case 'hold':
         if (!isHolding) {
           setIsHolding(true);
-          playbackManager.playPad(pad.id);
+          playbackManager.triggerHoldStart(pad.id);
         }
         break;
-
       case 'unmute':
-        if (!isPlaying) {
-          playbackManager.playPad(pad.id);
-        } else {
-          // Instead of stopping, toggle mute state
-          playbackManager.toggleMutePad?.(pad.id);
-          // You need to implement toggleMutePad in your manager
-        }
+        playbackManager.triggerUnmuteToggle(pad.id);
         break;
     }
   }, [pad.id, pad.triggerMode, isHolding, isPlaying, playbackManager]);
@@ -157,7 +160,7 @@ export function useAudioPlayer(
   const releaseAudio = React.useCallback(() => {
     if (pad.triggerMode === 'hold' && isHolding) {
       setIsHolding(false);
-      playbackManager.stopPad(pad.id, 'instant');
+      playbackManager.triggerHoldStop(pad.id);
     }
   }, [pad.id, pad.triggerMode, isHolding, playbackManager]);
 

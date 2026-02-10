@@ -9,7 +9,9 @@ import { ProgressDialog } from '@/components/ui/progress-dialog';
 import { Trash2, Download, Crown } from 'lucide-react';
 import { SamplerBank, PadData } from './types/sampler';
 import { useAuth } from '@/hooks/useAuth';
-import { isReservedShortcutCombo, normalizeShortcutKey, RESERVED_SHORTCUT_KEYS } from '@/lib/keyboard-shortcuts';
+import { isReservedShortcutCombo, normalizeShortcutKey, normalizeStoredShortcutKey, RESERVED_SHORTCUT_KEYS } from '@/lib/keyboard-shortcuts';
+import { MidiMessage } from '@/lib/midi';
+import { LED_COLOR_PALETTE } from '@/lib/led-colors';
 
 interface BankEditDialogProps {
   bank: SamplerBank;
@@ -21,47 +23,84 @@ interface BankEditDialogProps {
   onSave: (updates: Partial<SamplerBank>) => void;
   onDelete: () => void;
   onExport: () => void;
+  onClearPadShortcuts?: () => void;
+  onClearPadMidi?: () => void;
   onExportAdmin?: (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, allowExport: boolean, onProgress?: (progress: number) => void) => Promise<string>;
+  midiEnabled?: boolean;
+  blockedShortcutKeys?: Set<string>;
+  blockedMidiNotes?: Set<number>;
+  blockedMidiCCs?: Set<number>;
 }
 
-const colorOptions = [
-  { label: 'Red', value: '#ef4444', textColor: '#ffffff' },
-  { label: 'Orange', value: '#f97316', textColor: '#ffffff' },
-  { label: 'Amber', value: '#f59e0b', textColor: '#ffffff' },
-  { label: 'Yellow', value: '#eab308', textColor: '#000000' },
-  { label: 'Lime', value: '#84cc16', textColor: '#000000' },
-  { label: 'Green', value: '#22c55e', textColor: '#ffffff' },
-  { label: 'Emerald', value: '#10b981', textColor: '#ffffff' },
-  { label: 'Teal', value: '#14b8a6', textColor: '#ffffff' },
-  { label: 'Cyan', value: '#06b6d4', textColor: '#ffffff' },
-  { label: 'Sky', value: '#0ea5e9', textColor: '#ffffff' },
-  { label: 'Blue', value: '#3b82f6', textColor: '#ffffff' },
-  { label: 'Indigo', value: '#6366f1', textColor: '#ffffff' },
-  { label: 'Violet', value: '#8b5cf6', textColor: '#ffffff' },
-  { label: 'Purple', value: '#a855f7', textColor: '#ffffff' },
-  { label: 'Fuchsia', value: '#d946ef', textColor: '#ffffff' },
-  { label: 'Pink', value: '#ec4899', textColor: '#ffffff' },
-  { label: 'Rose', value: '#f43f5e', textColor: '#ffffff' },
-  { label: 'Gray', value: '#6b7280', textColor: '#ffffff' },
-  { label: 'Black', value: '#1f2937', textColor: '#ffffff' },
-  { label: 'White', value: '#f9fafb', textColor: '#000000' },
-  // New colors
-  { label: 'Brown', value: '#92400e', textColor: '#ffffff' },
-  { label: 'Neon Green', value: '#39ff14', textColor: '#000000' },
-  { label: 'Neon Yellow', value: '#ffff00', textColor: '#000000' },
-  { label: 'Hot Pink', value: '#ff0095', textColor: '#ffffff' },
-  { label: 'Gold', value: '#ffd700', textColor: '#000000' },
-  { label: 'Maroon', value: '#800000', textColor: '#ffffff' },
-  { label: 'Turquoise', value: '#40e0d0', textColor: '#000000' },
-  { label: 'Coral', value: '#ff6600', textColor: '#ffffff' },
+const BANK_COLOR_NAMES = [
+  'Dim Gray',
+  'Gray',
+  'White',
+  'Red',
+  'Amber',
+  'Orange',
+  'Light Yellow',
+  'Yellow',
+  'Green',
+  'Aqua',
+  'Blue',
+  'Pure Blue',
+  'Violet',
+  'Purple',
+  'Hot Pink',
+  'Hot Pink 2',
+  'Deep Magenta',
+  'Deep Brown 2'
 ];
 
-export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, theme, onSave, onDelete, onExport, onExportAdmin }: BankEditDialogProps) {
+const getContrastText = (hex: string) => {
+  const clean = hex.replace('#', '');
+  if (clean.length !== 6) return '#ffffff';
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.6 ? '#000000' : '#ffffff';
+};
+
+const colorOptions = BANK_COLOR_NAMES
+  .map((name) => LED_COLOR_PALETTE.find((entry) => entry.name === name))
+  .filter(Boolean)
+  .map((entry) => ({
+    label: entry!.name,
+    value: entry!.hex,
+    textColor: getContrastText(entry!.hex)
+  }));
+
+export function BankEditDialog({
+  bank,
+  allBanks,
+  allPads,
+  open,
+  onOpenChange,
+  theme,
+  onSave,
+  onDelete,
+  onExport,
+  onClearPadShortcuts,
+  onClearPadMidi,
+  onExportAdmin,
+  midiEnabled = false,
+  blockedShortcutKeys,
+  blockedMidiNotes,
+  blockedMidiCCs
+}: BankEditDialogProps) {
+  type BankWithMidi = SamplerBank & { midiNote?: number; midiCC?: number };
+  const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
   const { profile } = useAuth();
   const [name, setName] = React.useState(bank.name);
   const [defaultColor, setDefaultColor] = React.useState(bank.defaultColor);
   const [shortcutKey, setShortcutKey] = React.useState(bank.shortcutKey || '');
   const [shortcutError, setShortcutError] = React.useState<string | null>(null);
+  const [midiError, setMidiError] = React.useState<string | null>(null);
+  const [midiNote, setMidiNote] = React.useState<number | undefined>((bank as BankWithMidi).midiNote);
+  const [midiCC, setMidiCC] = React.useState<number | undefined>((bank as BankWithMidi).midiCC);
+  const [midiLearnActive, setMidiLearnActive] = React.useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = React.useState(false);
   const [showAdminExport, setShowAdminExport] = React.useState(false);
   const [adminTitle, setAdminTitle] = React.useState(bank.name);
@@ -80,6 +119,10 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
       setDefaultColor(bank.defaultColor);
       setShortcutKey(bank.shortcutKey || '');
       setShortcutError(null);
+      setMidiNote((bank as BankWithMidi).midiNote);
+      setMidiCC((bank as BankWithMidi).midiCC);
+      setMidiLearnActive(false);
+      setMidiError(null);
       setAdminTitle(bank.name);
       setAdminDescription('');
       setAdminTransferable(false);
@@ -87,6 +130,100 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
       setAdminAllowExport(true); // Default to true when Add to Database is disabled
     }
   }, [open, bank]);
+
+  const formatShortcutForDisplay = React.useCallback(
+    (storedKey?: string | null) => {
+      if (!storedKey) return null;
+      if (!storedKey.includes('+')) {
+        return normalizeShortcutKey(storedKey) || storedKey;
+      }
+      const parts = storedKey.split('+').map((part) => part.trim()).filter(Boolean);
+      const modifiers = new Set<string>();
+      let mainKey = '';
+      parts.forEach((part) => {
+        const lower = part.toLowerCase();
+        if (lower === 'shift') modifiers.add('shift');
+        else if (lower === 'ctrl' || lower === 'control') modifiers.add('ctrl');
+        else if (lower === 'alt' || lower === 'option') modifiers.add('alt');
+        else if (lower === 'meta' || lower === 'cmd' || lower === 'command' || lower === 'win') modifiers.add('meta');
+        else mainKey = part;
+      });
+      const displayKey = normalizeShortcutKey(mainKey) || mainKey;
+      if (isMac) {
+        const order = ['meta', 'ctrl', 'alt', 'shift'] as const;
+        const symbols: Record<string, string> = { meta: '⌘', ctrl: '⌃', alt: '⌥', shift: '⇧' };
+        return `${order.filter((key) => modifiers.has(key)).map((key) => symbols[key]).join('')}${displayKey}`;
+      }
+      const order = ['ctrl', 'alt', 'shift', 'meta'] as const;
+      const labels: Record<string, string> = { ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift', meta: 'Meta' };
+      const prefix = order.filter((key) => modifiers.has(key)).map((key) => labels[key]);
+      return [...prefix, displayKey].filter(Boolean).join('+');
+    },
+    [isMac]
+  );
+
+  React.useEffect(() => {
+    if (!midiLearnActive) return;
+
+    const handleMidiEvent = (event: Event) => {
+      const detail = (event as CustomEvent<MidiMessage>).detail;
+      if (!detail) return;
+
+      if (detail.type === 'noteon') {
+        if (blockedMidiNotes?.has(detail.note)) {
+          setMidiError('That MIDI note is already assigned.');
+          setMidiLearnActive(false);
+          return;
+        }
+        const duplicateBank = allBanks.find((otherBank) => {
+          if (otherBank.id === bank.id) return false;
+          const otherNote = (otherBank as BankWithMidi).midiNote;
+          return typeof otherNote === 'number' && otherNote === detail.note;
+        });
+        if (duplicateBank) {
+          setMidiError(`That MIDI note is already assigned to bank "${duplicateBank.name}".`);
+          setMidiLearnActive(false);
+          return;
+        }
+        const duplicatePad = allPads.find((pad) => typeof pad.midiNote === 'number' && pad.midiNote === detail.note);
+        if (duplicatePad) {
+          setMidiError(`That MIDI note is already assigned to pad "${duplicatePad.name}".`);
+          setMidiLearnActive(false);
+          return;
+        }
+        setMidiNote(detail.note);
+      } else if (detail.type === 'cc') {
+        if (blockedMidiCCs?.has(detail.cc)) {
+          setMidiError('That MIDI CC is already assigned.');
+          setMidiLearnActive(false);
+          return;
+        }
+        const duplicateBank = allBanks.find((otherBank) => {
+          if (otherBank.id === bank.id) return false;
+          const otherCC = (otherBank as BankWithMidi).midiCC;
+          return typeof otherCC === 'number' && otherCC === detail.cc;
+        });
+        if (duplicateBank) {
+          setMidiError(`That MIDI CC is already assigned to bank "${duplicateBank.name}".`);
+          setMidiLearnActive(false);
+          return;
+        }
+        const duplicatePad = allPads.find((pad) => typeof pad.midiCC === 'number' && pad.midiCC === detail.cc);
+        if (duplicatePad) {
+          setMidiError(`That MIDI CC is already assigned to pad "${duplicatePad.name}".`);
+          setMidiLearnActive(false);
+          return;
+        }
+        setMidiCC(detail.cc);
+      } else {
+        return;
+      }
+      setMidiLearnActive(false);
+    };
+
+    window.addEventListener('vdjv-midi', handleMidiEvent as EventListener);
+    return () => window.removeEventListener('vdjv-midi', handleMidiEvent as EventListener);
+  }, [midiLearnActive, allBanks, allPads, bank, blockedMidiNotes, blockedMidiCCs]);
 
   const handleSave = () => {
     if (shortcutError) {
@@ -97,6 +234,8 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
       name,
       defaultColor,
       shortcutKey: shortcutKey || undefined,
+      midiNote,
+      midiCC,
     });
   };
 
@@ -106,6 +245,7 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
 
   const handleConfirmDelete = () => {
     onDelete();
+    setShowDeleteConfirm(false);
   };
 
   const handleAdminExport = async () => {
@@ -154,9 +294,14 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
       return;
     }
 
+    if (blockedShortcutKeys?.has(nextKey)) {
+      setShortcutError(`"${nextKey}" is already assigned to system or channel mapping.`);
+      return;
+    }
+
     const duplicateBank = allBanks.find((otherBank) => {
       if (otherBank.id === bank.id) return false;
-      const existingKey = otherBank.shortcutKey ? normalizeShortcutKey(otherBank.shortcutKey) : '';
+      const existingKey = normalizeStoredShortcutKey(otherBank.shortcutKey);
       return existingKey === nextKey;
     });
 
@@ -166,7 +311,7 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
     }
 
     const duplicatePad = allPads.find((pad) => {
-      const existingKey = pad.shortcutKey ? normalizeShortcutKey(pad.shortcutKey) : '';
+      const existingKey = normalizeStoredShortcutKey(pad.shortcutKey);
       return existingKey === nextKey;
     });
 
@@ -174,6 +319,8 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
       setShortcutError(`"${nextKey}" is already assigned to pad "${duplicatePad.name}".`);
       return;
     }
+
+    setMidiError(null);
 
     setShortcutKey(nextKey);
     setShortcutError(null);
@@ -188,11 +335,21 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
       return;
     }
 
+    if (event.shiftKey) {
+      setShortcutError('Shift is reserved for the secondary bank.');
+      return;
+    }
+    if (event.ctrlKey) {
+      setShortcutError('Ctrl shortcuts are reserved by the browser. Use Alt or Meta instead.');
+      return;
+    }
+
     const normalized = normalizeShortcutKey(event.key, {
       shiftKey: event.shiftKey,
       ctrlKey: event.ctrlKey,
       altKey: event.altKey,
-      metaKey: event.metaKey
+      metaKey: event.metaKey,
+      code: event.code
     });
     if (!normalized) {
       setShortcutError('Please press a letter or number key.');
@@ -208,10 +365,16 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
     return bank.pads
       .map((pad) => ({
         name: pad.name,
-        key: pad.shortcutKey ? normalizeShortcutKey(pad.shortcutKey) : null
+        key: pad.shortcutKey ? formatShortcutForDisplay(pad.shortcutKey) : null,
+        midi:
+          typeof pad.midiNote === 'number'
+            ? `Note ${pad.midiNote}`
+            : typeof pad.midiCC === 'number'
+              ? `CC ${pad.midiCC}`
+              : null
       }))
-      .filter((pad) => !!pad.key) as { name: string; key: string }[];
-  }, [bank.pads]);
+      .filter((pad) => !!pad.key || !!pad.midi) as { name: string; key: string | null; midi: string | null }[];
+  }, [bank.pads, formatShortcutForDisplay]);
 
   return (
     <>
@@ -270,37 +433,97 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="bankShortcutKey">Bank Shortcut Key</Label>
-              <Input
-                id="bankShortcutKey"
-                value={shortcutKey}
-                onKeyDown={handleShortcutKeyDown}
-                placeholder="Press a key"
-                readOnly
-              />
-              {shortcutError && (
-                <p className="text-xs text-red-500">{shortcutError}</p>
-              )}
-              {!shortcutError && (
-                <p className="text-xs text-gray-500">
-                  Reserved keys: {reservedKeysText}
-                </p>
+            <div className={`grid gap-3 ${midiEnabled ? 'grid-cols-2' : 'grid-cols-1'}`}>
+              <div className="space-y-2">
+                <Label htmlFor="bankShortcutKey">Bank Shortcut Key</Label>
+                <Input
+                  id="bankShortcutKey"
+                  value={shortcutKey}
+                  onKeyDown={handleShortcutKeyDown}
+                  placeholder="Press a key"
+                  readOnly
+                />
+                {shortcutError && (
+                  <p className="text-xs text-red-500">{shortcutError}</p>
+                )}
+                {!shortcutError && (
+                  <p className="text-xs text-gray-500">
+                    Reserved keys: {reservedKeysText}
+                  </p>
+                )}
+              </div>
+
+              {midiEnabled && (
+                <div className="space-y-2">
+                  <Label>MIDI Assignment</Label>
+                  <div className="text-xs text-gray-500">
+                    Note: {midiNote ?? '—'} | CC: {midiCC ?? '—'}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setMidiLearnActive(true)}
+                      className="flex-1"
+                    >
+                      {midiLearnActive ? 'Listening…' : 'Learn MIDI'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setMidiNote(undefined);
+                        setMidiCC(undefined);
+                        setMidiLearnActive(false);
+                        setMidiError(null);
+                      }}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                  {midiError && <p className="text-xs text-red-500">{midiError}</p>}
+                </div>
               )}
             </div>
 
             <div className="space-y-2">
-              <Label>Keyboard Shortcuts (Pads)</Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label>Pad Shortcuts (Keyboard/MIDI)</Label>
+                <div className="flex items-center gap-2">
+                  {onClearPadShortcuts && (
+                    <Button type="button" variant="outline" size="sm" onClick={onClearPadShortcuts}>
+                      Clear All Keys
+                    </Button>
+                  )}
+                  {midiEnabled && onClearPadMidi && (
+                    <Button type="button" variant="outline" size="sm" onClick={onClearPadMidi}>
+                      Clear All MIDI
+                    </Button>
+                  )}
+                </div>
+              </div>
               {shortcutAssignments.length > 0 ? (
                 <div className="max-h-32 overflow-y-auto rounded border p-2 text-sm">
-                  {shortcutAssignments.map((assignment) => (
-                    <div key={`${assignment.key}-${assignment.name}`} className="flex items-center justify-between">
-                      <span className="truncate">{assignment.name}</span>
-                      <span className="ml-3 rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-800 dark:bg-gray-700 dark:text-gray-100">
-                        {assignment.key}
-                      </span>
-                    </div>
-                  ))}
+                  <div className="grid grid-cols-[1fr_auto_auto] gap-2 text-[11px] uppercase tracking-wide text-gray-500">
+                    <div>Pad</div>
+                    <div>Key</div>
+                    <div>MIDI</div>
+                  </div>
+                  <div className="mt-1 space-y-1">
+                    {shortcutAssignments.map((assignment, index) => (
+                      <div key={`${assignment.name}-${assignment.key ?? 'none'}-${assignment.midi ?? 'none'}-${index}`} className="grid grid-cols-[1fr_auto_auto] items-center gap-2">
+                        <span className="truncate">{assignment.name}</span>
+                        <span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-800 dark:bg-gray-700 dark:text-gray-100">
+                          {assignment.key ?? '—'}
+                        </span>
+                        <span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-800 dark:bg-gray-700 dark:text-gray-100">
+                          {assignment.midi ?? '—'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ) : (
                 <p className="text-xs text-gray-500">No shortcuts assigned in this bank.</p>
@@ -345,13 +568,24 @@ export function BankEditDialog({ bank, allBanks, allPads, open, onOpenChange, th
               >
                 <Download className="w-4 h-4" />
               </Button>
-              <Button onClick={onDelete} variant="destructive" className="px-3">
+              <Button onClick={handleDeleteClick} variant="destructive" className="px-3">
                 <Trash2 className="w-4 h-4" />
               </Button>
             </div>
           </div>
         </DialogContent>
       </Dialog>
+
+      <ConfirmationDialog
+        open={showDeleteConfirm}
+        onOpenChange={setShowDeleteConfirm}
+        title="Delete Bank"
+        description={`Are you sure you want to delete the bank "${bank.name}"? This will permanently delete all pads in this bank. This action cannot be undone.`}
+        confirmText="Delete Bank"
+        variant="destructive"
+        onConfirm={handleConfirmDelete}
+        theme={theme}
+      />
 
       {/* Admin Export Dialog */}
       <Dialog open={showAdminExport} onOpenChange={setShowAdminExport}>
