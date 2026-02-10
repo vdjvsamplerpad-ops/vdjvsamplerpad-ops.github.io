@@ -2146,8 +2146,8 @@ export function SamplerPadApp() {
         />
       )}
 
-      <div className={`flex-1 transition-all duration-300 ${getMainContentMargin} ${getMainContentPadding}`}>
-        <div className="max-w-full mx-auto py-2 relative z-10">
+      <div className={`flex-1 min-h-0 transition-all duration-300 ${getMainContentMargin} ${getMainContentPadding}`}>
+        <div className="max-w-full mx-auto py-2 relative z-10 h-full min-h-0 flex flex-col">
           <HeaderControls
             primaryBank={displayPrimary}
             secondaryBank={displaySecondary}
@@ -2203,48 +2203,14 @@ export function SamplerPadApp() {
           />
 
           {isDualMode ? (
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-1 min-h-0">
               {/* Primary Bank */}
-              <div className="flex-1">
-
-                <PadGrid
-                  pads={displayPrimary?.pads || []}
-                  bankId={primaryBankId || ''}
-                  bankName={displayPrimary?.name || ''}
-                  allBanks={banks}
-                  allPads={allPads}
-                  editMode={settings.editMode}
-                  globalMuted={globalMuted}
-                  masterVolume={settings.masterVolume}
-                  padSize={getGridColumns}
-                  theme={theme}
-                  stopMode={settings.stopMode}
-                  eqSettings={settings.eqSettings}
-                  windowWidth={windowWidth}
-                  onUpdatePad={handleUpdatePad}
-                  onRemovePad={(id) => handleRemovePad(primaryBankId || '', id)}
-                  onReorderPads={(fromIndex, toIndex) => reorderPads(primaryBankId || '', fromIndex, toIndex)}
-                  onFileUpload={(file) => handleFileUpload(file, primaryBankId || undefined)}
-                  onPadDragStart={handlePadDragStart}
-                  onTransferPad={handleTransferPad}
-                  availableBanks={availableBanks}
-                  canTransferFromBank={canTransferFromBank}
-                  midiEnabled={midi.enabled && midi.accessGranted}
-                  hideShortcutLabel={settings.hideShortcutLabels}
-                  editRequest={editRequest}
-                  blockedShortcutKeys={blockedShortcutKeys}
-                  blockedMidiNotes={blockedMidiNotes}
-                  blockedMidiCCs={blockedMidiCCs}
-                />
-              </div>
-
-              {/* Secondary Bank */}
-              <div className="flex-1">
-                {displaySecondary ? (
+              <div className="flex-1 min-h-0">
+                <div className="h-full overflow-y-auto pr-1">
                   <PadGrid
-                    pads={displaySecondary.pads || []}
-                    bankId={secondaryBankId || ''}
-                    bankName={displaySecondary.name || ''}
+                    pads={displayPrimary?.pads || []}
+                    bankId={primaryBankId || ''}
+                    bankName={displayPrimary?.name || ''}
                     allBanks={banks}
                     allPads={allPads}
                     editMode={settings.editMode}
@@ -2256,9 +2222,9 @@ export function SamplerPadApp() {
                     eqSettings={settings.eqSettings}
                     windowWidth={windowWidth}
                     onUpdatePad={handleUpdatePad}
-                    onRemovePad={(id) => handleRemovePad(secondaryBankId || '', id)}
-                    onReorderPads={(fromIndex, toIndex) => reorderPads(secondaryBankId || '', fromIndex, toIndex)}
-                    onFileUpload={(file) => handleFileUpload(file, secondaryBankId || undefined)}
+                    onRemovePad={(id) => handleRemovePad(primaryBankId || '', id)}
+                    onReorderPads={(fromIndex, toIndex) => reorderPads(primaryBankId || '', fromIndex, toIndex)}
+                    onFileUpload={(file) => handleFileUpload(file, primaryBankId || undefined)}
                     onPadDragStart={handlePadDragStart}
                     onTransferPad={handleTransferPad}
                     availableBanks={availableBanks}
@@ -2270,6 +2236,43 @@ export function SamplerPadApp() {
                     blockedMidiNotes={blockedMidiNotes}
                     blockedMidiCCs={blockedMidiCCs}
                   />
+                </div>
+              </div>
+
+              {/* Secondary Bank */}
+              <div className="flex-1 min-h-0">
+                {displaySecondary ? (
+                  <div className="h-full overflow-y-auto pl-1">
+                    <PadGrid
+                      pads={displaySecondary.pads || []}
+                      bankId={secondaryBankId || ''}
+                      bankName={displaySecondary.name || ''}
+                      allBanks={banks}
+                      allPads={allPads}
+                      editMode={settings.editMode}
+                      globalMuted={globalMuted}
+                      masterVolume={settings.masterVolume}
+                      padSize={getGridColumns}
+                      theme={theme}
+                      stopMode={settings.stopMode}
+                      eqSettings={settings.eqSettings}
+                      windowWidth={windowWidth}
+                      onUpdatePad={handleUpdatePad}
+                      onRemovePad={(id) => handleRemovePad(secondaryBankId || '', id)}
+                      onReorderPads={(fromIndex, toIndex) => reorderPads(secondaryBankId || '', fromIndex, toIndex)}
+                      onFileUpload={(file) => handleFileUpload(file, secondaryBankId || undefined)}
+                      onPadDragStart={handlePadDragStart}
+                      onTransferPad={handleTransferPad}
+                      availableBanks={availableBanks}
+                      canTransferFromBank={canTransferFromBank}
+                      midiEnabled={midi.enabled && midi.accessGranted}
+                      hideShortcutLabel={settings.hideShortcutLabels}
+                      editRequest={editRequest}
+                      blockedShortcutKeys={blockedShortcutKeys}
+                      blockedMidiNotes={blockedMidiNotes}
+                      blockedMidiCCs={blockedMidiCCs}
+                    />
+                  </div>
                 ) : (
                   <div className={`flex items-center justify-center h-64 rounded-2xl border-2 border-dashed transition-all duration-300 ${theme === 'dark'
                     ? 'bg-gray-800 border-gray-600'
