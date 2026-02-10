@@ -1028,6 +1028,15 @@ export function useSamplerStore(): SamplerStore {
         }
       };
 
+      const loadZipFromBlob = async (blob: Blob, label: string): Promise<JSZip> => {
+        try {
+          return await withTimeout(new JSZip().loadAsync(blob), adaptiveTimeoutMs, label);
+        } catch (err) {
+          const buffer = await blob.arrayBuffer();
+          return await withTimeout(new JSZip().loadAsync(buffer), adaptiveTimeoutMs, label);
+        }
+      };
+
       const baseTimeoutMs = 60_000;
       const per100MbMs = 60_000;
       const maxTimeoutMs = 10 * 60_000;
@@ -1036,14 +1045,11 @@ export function useSamplerStore(): SamplerStore {
       
       onProgress && onProgress(10);
       
-      const zip = new JSZip();
       let contents: JSZip;
 
       try {
         // Try to load as regular zip with timeout
-        contents = await Promise.race([
-          withTimeout(zip.loadAsync(file), adaptiveTimeoutMs, 'Zip load')
-        ]);
+        contents = await loadZipFromBlob(file, 'Zip load');
         console.log('✅ Bank file loaded successfully (unencrypted)');
       } catch (error) {
         console.log('🔒 Attempting to decrypt bank file...');
@@ -1065,7 +1071,7 @@ export function useSamplerStore(): SamplerStore {
               adaptiveTimeoutMs,
               'Decrypt'
             );
-            contents = await withTimeout(zip.loadAsync(decryptedBlob), adaptiveTimeoutMs, 'Zip load');
+            contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
             decrypted = true;
             console.log('✅ Decrypted using shared password (export disabled encryption)');
           } else {
@@ -1096,7 +1102,7 @@ export function useSamplerStore(): SamplerStore {
               );
               if (headerMatch) {
                 const decryptedBlob = await withTimeout(decryptZip(file, derivedKey), adaptiveTimeoutMs, 'Decrypt');
-                contents = await withTimeout(zip.loadAsync(decryptedBlob), adaptiveTimeoutMs, 'Zip load');
+                contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
                 decrypted = true;
                 console.log('✅ Decrypted using cached key');
                 break;
@@ -1121,7 +1127,7 @@ export function useSamplerStore(): SamplerStore {
                   );
                   if (headerMatch) {
                     const decryptedBlob = await withTimeout(decryptZip(file, d), adaptiveTimeoutMs, 'Decrypt');
-                    contents = await withTimeout(zip.loadAsync(decryptedBlob), adaptiveTimeoutMs, 'Zip load');
+                    contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
                     decrypted = true;
                     console.log('✅ Decrypted using hinted bank ID');
                   } else {
@@ -1151,7 +1157,7 @@ export function useSamplerStore(): SamplerStore {
                     );
                     if (headerMatch) {
                       const decryptedBlob = await withTimeout(decryptZip(file, d), adaptiveTimeoutMs, 'Decrypt');
-                      contents = await withTimeout(zip.loadAsync(decryptedBlob), adaptiveTimeoutMs, 'Zip load');
+                      contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
                       decrypted = true;
                       console.log('✅ Decrypted using accessible bank ID:', bankId);
                       break;
