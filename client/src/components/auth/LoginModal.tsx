@@ -15,6 +15,44 @@ interface LoginModalProps {
 }
 
 type Mode = 'signin' | 'signup' | 'forgot' | 'reset'
+const AUTH_WEBHOOK_QUEUE_KEY = 'vdjv-auth-webhook-queue'
+
+type AuthWebhookPayload = {
+  event: 'login' | 'signup'
+  email: string
+  device: {
+    ua: string
+    platform: string
+    language: string
+    timezone: string
+    device: string
+    mobile: boolean
+  }
+}
+
+const readAuthWebhookQueue = (): AuthWebhookPayload[] => {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(AUTH_WEBHOOK_QUEUE_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+const writeAuthWebhookQueue = (queue: AuthWebhookPayload[]) => {
+  if (typeof window === 'undefined') return
+  try {
+    if (queue.length === 0) {
+      localStorage.removeItem(AUTH_WEBHOOK_QUEUE_KEY)
+    } else {
+      localStorage.setItem(AUTH_WEBHOOK_QUEUE_KEY, JSON.stringify(queue))
+    }
+  } catch (err) {
+    console.warn('Failed to persist auth webhook queue:', err)
+  }
+}
 
 function normalizeAuthErrorMessage(msg: string): string {
   const m = (msg || '').toLowerCase()
@@ -58,6 +96,42 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
   const colorText = theme === 'dark' ? 'text-white' : 'text-gray-900'
   const panelClass = `sm:max-w-md ${theme === 'dark' ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-300'}`
 
+  const enqueueAuthWebhook = React.useCallback((payload: AuthWebhookPayload) => {
+    const queue = readAuthWebhookQueue()
+    queue.push(payload)
+    writeAuthWebhookQueue(queue)
+  }, [])
+
+  const flushAuthWebhookQueue = React.useCallback(async () => {
+    if (typeof window === 'undefined' || !navigator.onLine) return
+    const queue = readAuthWebhookQueue()
+    if (!queue.length) return
+    const remaining: AuthWebhookPayload[] = []
+    for (const payload of queue) {
+      try {
+        const resp = await fetch('/api/webhook/auth-event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        if (!resp.ok) throw new Error(`Webhook failed: ${resp.status}`)
+      } catch {
+        remaining.push(payload)
+      }
+    }
+    writeAuthWebhookQueue(remaining)
+  }, [])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const handler = () => {
+      flushAuthWebhookQueue().catch(() => {})
+    }
+    window.addEventListener('online', handler)
+    if (navigator.onLine) handler()
+    return () => window.removeEventListener('online', handler)
+  }, [flushAuthWebhookQueue])
+
   const sendAuthWebhook = React.useCallback(async (event: 'login' | 'signup', emailToSend: string) => {
     if (typeof window === 'undefined') return
     try {
@@ -71,15 +145,37 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
         device: userAgentData?.platform || navigator.platform || 'unknown',
         mobile: userAgentData?.mobile ?? /Mobi|Android/i.test(ua),
       }
-      await fetch('/api/webhook/auth-event', {
+      const payload: AuthWebhookPayload = { event, email: emailToSend, device: deviceInfo }
+      if (!navigator.onLine) {
+        enqueueAuthWebhook(payload)
+        return
+      }
+      const resp = await fetch('/api/webhook/auth-event', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event, email: emailToSend, device: deviceInfo }),
+        body: JSON.stringify(payload),
       })
+      if (!resp.ok) {
+        enqueueAuthWebhook(payload)
+      }
     } catch (err) {
+      const ua = navigator.userAgent || ''
+      const userAgentData = (navigator as any).userAgentData
+      enqueueAuthWebhook({
+        event,
+        email: emailToSend,
+        device: {
+          ua,
+          platform: navigator.platform || '',
+          language: navigator.language || '',
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          device: userAgentData?.platform || navigator.platform || 'unknown',
+          mobile: userAgentData?.mobile ?? /Mobi|Android/i.test(ua),
+        }
+      })
       console.warn('Failed to send auth webhook:', err)
     }
-  }, [])
+  }, [enqueueAuthWebhook])
 
   // Reset fields when modal closes
   React.useEffect(() => {

@@ -15,6 +15,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as strin
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY as string;
 const DISCORD_WEBHOOK_AUTH = process.env.DISCORD_WEBHOOK_AUTH as string;
 const DISCORD_WEBHOOK_EXPORT = process.env.DISCORD_WEBHOOK_EXPORT as string;
+const DISCORD_WEBHOOK_IMPORT = process.env.DISCORD_WEBHOOK_IMPORT as string;
 
 console.log('Environment variables loaded:');
 console.log('SUPABASE_URL:', SUPABASE_URL ? 'SET' : 'NOT SET');
@@ -22,6 +23,7 @@ console.log('SUPABASE_SERVICE_ROLE_KEY:', SUPABASE_SERVICE_ROLE_KEY ? 'SET' : 'N
 console.log('SUPABASE_ANON_KEY:', SUPABASE_ANON_KEY ? 'SET' : 'NOT SET');
 console.log('DISCORD_WEBHOOK_AUTH:', DISCORD_WEBHOOK_AUTH ? 'SET' : 'NOT SET');
 console.log('DISCORD_WEBHOOK_EXPORT:', DISCORD_WEBHOOK_EXPORT ? 'SET' : 'NOT SET');
+console.log('DISCORD_WEBHOOK_IMPORT:', DISCORD_WEBHOOK_IMPORT ? 'SET' : 'NOT SET');
 
 const adminSupabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
@@ -230,6 +232,39 @@ app.post('/api/webhook/export-bank', async (req: Request, res: Response) => {
     ];
 
     await postDiscordWebhook(DISCORD_WEBHOOK_EXPORT, lines.join('\n'));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Unknown error' });
+  }
+});
+
+app.post('/api/webhook/import-bank', async (req: Request, res: Response) => {
+  try {
+    if (!DISCORD_WEBHOOK_IMPORT) return res.status(500).json({ error: 'Webhook not configured' });
+    const { status, email, bankName, padNames, includePadList, errorMessage } = req.body || {};
+    if (!status || !email || !bankName) {
+      return res.status(400).json({ error: 'Missing status, email, or bankName' });
+    }
+
+    const normalizedStatus = String(status).toUpperCase();
+    const shouldShowPads = !!includePadList && Array.isArray(padNames);
+    const lines = [
+      '**Bank Import:**',
+      `**Status:** ${normalizedStatus}`,
+      `**Email:** ${email}`,
+      `**Bank:** ${bankName}`,
+      normalizedStatus === 'FAILED' && errorMessage ? `**Failed Message:** ${errorMessage}` : '',
+      shouldShowPads
+        ? [
+            '**Pads:**',
+            (padNames as string[]).length
+              ? (padNames as string[]).map((name: string) => `- ${name}`).join('\n')
+              : '- (no pads)',
+          ].join('\n')
+        : '',
+    ].filter(Boolean);
+
+    await postDiscordWebhook(DISCORD_WEBHOOK_IMPORT, lines.join('\n'));
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Unknown error' });
