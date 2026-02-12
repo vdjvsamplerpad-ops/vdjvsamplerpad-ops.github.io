@@ -214,7 +214,7 @@ export async function getDerivedKey(bankId: string, userId: string): Promise<str
       .select('*')
       .eq('user_id', userId)
       .eq('bank_id', bankId)
-      .single();
+      .maybeSingle();
 
     if (error || !access) {
       return null;
@@ -225,7 +225,7 @@ export async function getDerivedKey(bankId: string, userId: string): Promise<str
       .from('banks')
       .select('derived_key')
       .eq('id', bankId)
-      .single();
+      .maybeSingle();
 
     if (bankError || !bank) {
       return null;
@@ -329,7 +329,7 @@ export async function hasBankAccess(userId: string, bankId: string): Promise<boo
       .select('id')
       .eq('user_id', userId)
       .eq('bank_id', bankId)
-      .single();
+      .maybeSingle();
 
     if (error) {
       return false;
@@ -451,7 +451,7 @@ export async function refreshAccessibleBanksCache(userId: string): Promise<void>
         .from('banks')
         .select('derived_key')
         .eq('id', bankId)
-        .single();
+        .maybeSingle();
       
       if (!bankError && bankData?.derived_key) {
         keysToCache[bankId] = bankData.derived_key;

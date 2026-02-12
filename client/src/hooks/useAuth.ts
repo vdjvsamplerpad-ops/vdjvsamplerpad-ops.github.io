@@ -2,6 +2,12 @@ import * as React from 'react'
 import { supabase } from '@/lib/supabase'
 import type { User, AuthError, Session } from '@supabase/supabase-js'
 import { refreshAccessibleBanksCache } from '@/lib/bank-utils'
+import {
+  ensureActivityRuntime,
+  logSignoutActivity,
+  sendActivityHeartbeat,
+  sendHeartbeatBeacon,
+} from '@/lib/activityLogger'
 
 // Keys for localStorage caching
 const USER_CACHE_KEY = 'vdjv-cached-user';
@@ -89,7 +95,7 @@ function cacheBanState(banned: boolean): void {
 }
 
 interface AuthActions {
-  signIn: (email: string, password: string) => Promise<{ error?: AuthError | null }>
+  signIn: (email: string, password: string) => Promise<{ error?: AuthError | null; data?: { user: User | null } }>
   signUp: (email: string, password: string, displayName: string) => Promise<{ error?: AuthError | null; data?: any }>
   signOut: () => Promise<{ error?: AuthError | null }>
   requestPasswordReset: (email: string) => Promise<{ error?: AuthError | null }>
@@ -143,6 +149,10 @@ export function useAuth(): AuthState & AuthActions {
   
   // Track which user we've already refreshed cache for
   const cacheRefreshedForUserIdRef = React.useRef<string | null>(null)
+
+  React.useEffect(() => {
+    ensureActivityRuntime()
+  }, [])
 
   const setBannedState = React.useCallback((banned: boolean) => {
     cacheBanState(banned)
@@ -283,12 +293,51 @@ export function useAuth(): AuthState & AuthActions {
     return () => subscription.unsubscribe()
   }, [ensureProfile, enforceBan, setBannedState])
 
+  React.useEffect(() => {
+    if (!state.user || state.banned) return
+
+    const heartbeat = () => {
+      void sendActivityHeartbeat({
+        userId: state.user!.id,
+        email: state.user!.email || null,
+        lastEvent: 'heartbeat',
+        meta: {
+          visibility: typeof document !== 'undefined' ? document.visibilityState : 'unknown',
+        },
+      })
+    }
+
+    heartbeat()
+    const interval = window.setInterval(heartbeat, 60_000)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') heartbeat()
+    }
+    const onPageHide = () => {
+      sendHeartbeatBeacon({
+        userId: state.user?.id,
+        email: state.user?.email || null,
+        lastEvent: 'pagehide',
+        meta: { visibility: document.visibilityState },
+      })
+    }
+
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('pagehide', onPageHide)
+    window.addEventListener('beforeunload', onPageHide)
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('pagehide', onPageHide)
+      window.removeEventListener('beforeunload', onPageHide)
+    }
+  }, [state.user?.id, state.user?.email, state.banned])
+
   const signIn = React.useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
     if (isBanError(error)) {
       await enforceBan()
     }
-    return { error }
+    return { error, data: { user: data.user } }
   }, [enforceBan])
 
   const signUp = React.useCallback(async (email: string, password: string, displayName: string) => {
@@ -304,11 +353,23 @@ export function useAuth(): AuthState & AuthActions {
   }, [])
 
   const signOut = React.useCallback(async () => {
+    const activeUser = state.user || getCachedUser()
     const { error } = await supabase.auth.signOut()
     // Clear cached user data on sign out
     cacheUserData(null, null)
+    void logSignoutActivity({
+      status: error ? 'failed' : 'success',
+      userId: activeUser?.id || null,
+      email: activeUser?.email || null,
+      errorMessage: error?.message || null,
+      meta: {
+        source: 'useAuth.signOut',
+      },
+    }).catch((err) => {
+      console.warn('Failed to log signout activity:', err)
+    })
     return { error }
-  }, [])
+  }, [state.user])
 
   const requestPasswordReset = React.useCallback(async (email: string) => {
     try {

@@ -8,7 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { supabase } from '@/lib/supabase';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
-import { Trash2, Plus, Shield, UserPlus } from 'lucide-react';
+import { Plus, RefreshCw, Shield, Trash2, UserPlus } from 'lucide-react';
 
 interface AdminAccessDialogProps {
   open: boolean;
@@ -40,6 +40,23 @@ interface AccessRow {
   profile?: ProfileRow;
 }
 
+interface ActiveCounts {
+  activeUsers: number;
+  activeSessions: number;
+}
+
+interface ActiveSessionRow {
+  session_key: string;
+  user_id: string;
+  email?: string | null;
+  device_fingerprint: string;
+  device_name?: string | null;
+  platform?: string | null;
+  browser?: string | null;
+  os?: string | null;
+  last_seen_at: string;
+}
+
 export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDialogProps) {
   const [banks, setBanks] = React.useState<DbBank[]>([]);
   const [profiles, setProfiles] = React.useState<ProfileRow[]>([]);
@@ -61,6 +78,15 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
   const [resetOpen, setResetOpen] = React.useState(false);
   const [unbanUserOpen, setUnbanUserOpen] = React.useState(false);
   const [banHours, setBanHours] = React.useState(24);
+  const [createUserOpen, setCreateUserOpen] = React.useState(false);
+  const [createEmail, setCreateEmail] = React.useState('');
+  const [createPassword, setCreatePassword] = React.useState('');
+  const [createDisplayName, setCreateDisplayName] = React.useState('');
+  const [createUserLoading, setCreateUserLoading] = React.useState(false);
+  const [activeCounts, setActiveCounts] = React.useState<ActiveCounts>({ activeUsers: 0, activeSessions: 0 });
+  const [activeSessions, setActiveSessions] = React.useState<ActiveSessionRow[]>([]);
+  const [activeLoading, setActiveLoading] = React.useState(false);
+  const [activeError, setActiveError] = React.useState('');
 
   const loadBanks = React.useCallback(async () => {
     const { data, error } = await supabase.from('banks').select('id, title, created_at').order('created_at', { ascending: false });
@@ -142,15 +168,43 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
     setAccess(rows);
   }, []);
 
+  const loadActiveSessions = React.useCallback(async () => {
+    setActiveLoading(true);
+    try {
+      const search = `?limit=300&t=${Date.now()}`;
+      const resp = await fetch(`/api/admin/active-sessions${search}`, { cache: 'no-store' });
+      const payload = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(payload?.error || 'Failed to load active sessions');
+      setActiveCounts({
+        activeUsers: Number(payload?.counts?.activeUsers || 0),
+        activeSessions: Number(payload?.counts?.activeSessions || 0),
+      });
+      setActiveSessions(Array.isArray(payload?.sessions) ? payload.sessions : []);
+      setActiveError('');
+    } catch (err: any) {
+      setActiveError(err?.message || 'Failed to load active sessions');
+      setActiveSessions([]);
+      setActiveCounts({ activeUsers: 0, activeSessions: 0 });
+    } finally {
+      setActiveLoading(false);
+    }
+  }, []);
+
   React.useEffect(() => {
     if (open) {
       setError('');
+      setActiveError('');
       setNewUserId('');
       setFilter('');
+      setCreateEmail('');
+      setCreatePassword('');
+      setCreateDisplayName('');
+      setCreateUserOpen(false);
       loadBanks();
       loadProfiles();
+      loadActiveSessions();
     }
-  }, [open, loadBanks, loadProfiles]);
+  }, [open, loadBanks, loadProfiles, loadActiveSessions]);
 
   React.useEffect(() => {
     if (open && selectedBankId) {
@@ -159,6 +213,14 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
       setAccess([]);
     }
   }, [open, selectedBankId, loadAccess]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const timer = window.setInterval(() => {
+      loadActiveSessions().catch(() => {});
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [open, loadActiveSessions]);
 
   const handleGrant = async () => {
     if (!selectedBankId || !newUserId) return;
@@ -242,6 +304,41 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
     }, 0);
   };
 
+  const handleCreateUser = async () => {
+    const email = createEmail.trim().toLowerCase();
+    if (!email) {
+      setError('Email is required.');
+      return;
+    }
+    if (!createPassword || createPassword.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+
+    setCreateUserLoading(true);
+    setError('');
+    try {
+      await callAdmin('/api/admin/users/create', {
+        email,
+        password: createPassword,
+        displayName: createDisplayName.trim(),
+      });
+      setCreateUserOpen(false);
+      setCreateEmail('');
+      setCreatePassword('');
+      setCreateDisplayName('');
+      setActionInfo('User created.');
+      setTimeout(() => {
+        loadProfiles();
+        if (selectedBankId) loadAccess(selectedBankId);
+      }, 0);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to create user');
+    } finally {
+      setCreateUserLoading(false);
+    }
+  };
+
   const handleRoleChange = async (userId: string, role: 'admin' | 'user') => {
     setLoading(true);
     setError('');
@@ -264,6 +361,23 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
       : (p.display_name?.toLowerCase() || '').includes(filter.toLowerCase()) || (p.email || '').toLowerCase().includes(filter.toLowerCase()) || p.id.includes(filter)
   );
 
+  const activeUsersRows = React.useMemo(() => {
+    const map = new Map<string, ActiveSessionRow>();
+    for (const row of activeSessions) {
+      const existing = map.get(row.user_id);
+      if (!existing) {
+        map.set(row.user_id, row);
+        continue;
+      }
+      const existingTime = new Date(existing.last_seen_at).getTime();
+      const currentTime = new Date(row.last_seen_at).getTime();
+      if (currentTime > existingTime) map.set(row.user_id, row);
+    }
+    return Array.from(map.values()).sort(
+      (a, b) => new Date(b.last_seen_at).getTime() - new Date(a.last_seen_at).getTime()
+    );
+  }, [activeSessions]);
+
   const pickerProfiles = profiles.filter((p) =>
     !userSearch.trim()
       ? true
@@ -280,12 +394,12 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
   return (
     <>
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className={`sm:max-w-3xl ${theme === 'dark' ? 'bg-gray-800' : 'bg-white'}`}
+      <DialogContent className={`sm:max-w-6xl ${theme === 'dark' ? 'bg-gray-800' : 'bg-white'}`}
         aria-describedby={undefined}
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Shield className="w-4 h-4" /> Admin Bank Access
+            <Shield className="w-4 h-4" /> Admin Access
           </DialogTitle>
         </DialogHeader>
 
@@ -295,6 +409,72 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
               {error}
             </div>
           )}
+
+          {/* Active sessions */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Active Sessions</Label>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => loadActiveSessions()}
+                disabled={activeLoading}
+              >
+                <RefreshCw className={`w-4 h-4 mr-1 ${activeLoading ? 'animate-spin' : ''}`} />
+                Refresh
+              </Button>
+            </div>
+            {activeError && (
+              <div className={`p-2 rounded border text-sm ${theme === 'dark' ? 'bg-red-900/20 border-red-700 text-red-200' : 'bg-red-50 border-red-300 text-red-700'}`}>
+                {activeError}
+              </div>
+            )}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div className={`border rounded p-3 ${theme === 'dark' ? 'border-gray-700 bg-gray-900/50 text-white' : 'border-gray-200 bg-gray-50 text-gray-900'}`}>
+                <div className="text-xs opacity-70">Active Users</div>
+                <div className="text-xl font-semibold">{activeCounts.activeUsers}</div>
+              </div>
+              <div className={`border rounded p-3 ${theme === 'dark' ? 'border-gray-700 bg-gray-900/50 text-white' : 'border-gray-200 bg-gray-50 text-gray-900'}`}>
+                <div className="text-xs opacity-70">Active Sessions</div>
+                <div className="text-xl font-semibold">{activeCounts.activeSessions}</div>
+              </div>
+              <div className={`border rounded p-3 md:col-span-2 ${theme === 'dark' ? 'border-gray-700 bg-gray-900/50 text-white' : 'border-gray-200 bg-gray-50 text-gray-900'}`}>
+                <div className="text-xs opacity-70">Rows In Table (Users)</div>
+                <div className="text-xl font-semibold">{activeUsersRows.length}</div>
+              </div>
+            </div>
+            <div className="border rounded max-h-64 overflow-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>User</TableHead>
+                    <TableHead>Email</TableHead>
+                    <TableHead>Device Name</TableHead>
+                    <TableHead>Platform / Browser / OS</TableHead>
+                    <TableHead>Last Seen</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {activeUsersRows.map((row) => (
+                    <TableRow key={row.user_id}>
+                      <TableCell className="font-mono text-xs" title={row.user_id}>{row.user_id.slice(0, 8)}...</TableCell>
+                      <TableCell>{row.email || '-'}</TableCell>
+                      <TableCell>{row.device_name || '-'}</TableCell>
+                      <TableCell>
+                        {[row.platform, row.browser, row.os].filter(Boolean).join(' / ') || '-'}
+                      </TableCell>
+                      <TableCell>{new Date(row.last_seen_at).toLocaleString()}</TableCell>
+                    </TableRow>
+                  ))}
+                  {activeUsersRows.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-center py-3 opacity-70">No active users</TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
 
           {/* Bank selector */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2 items-end">
@@ -401,6 +581,13 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
                 <Label>All users</Label>
                 <Input placeholder="Filter by name or id" value={filter} onChange={(e) => setFilter(e.target.value)} />
               </div>
+              <Button
+                type="button"
+                onClick={() => setCreateUserOpen(true)}
+                className="shrink-0"
+              >
+                <Plus className="w-4 h-4 mr-1" /> Add User
+              </Button>
             </div>
             <div className="border rounded max-h-60 overflow-auto">
               <Table>
@@ -431,6 +618,64 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
                 </TableBody>
               </Table>
             </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={createUserOpen} onOpenChange={setCreateUserOpen}>
+      <DialogContent className={`sm:max-w-md ${theme === 'dark' ? 'bg-gray-800' : 'bg-white'}`}>
+        <DialogHeader>
+          <DialogTitle>Create User</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <Label htmlFor="createUserEmail">Email</Label>
+            <Input
+              id="createUserEmail"
+              type="email"
+              value={createEmail}
+              onChange={(e) => setCreateEmail(e.target.value)}
+              placeholder="user@example.com"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="createUserPassword">Password</Label>
+            <Input
+              id="createUserPassword"
+              type="password"
+              value={createPassword}
+              onChange={(e) => setCreatePassword(e.target.value)}
+              placeholder="Minimum 6 characters"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="createUserDisplayName">Display Name</Label>
+            <Input
+              id="createUserDisplayName"
+              value={createDisplayName}
+              onChange={(e) => setCreateDisplayName(e.target.value)}
+              placeholder="Optional"
+            />
+          </div>
+          <div className="text-xs opacity-70">
+            User is auto-confirmed by default.
+          </div>
+          <div className="flex gap-2 pt-2">
+            <Button
+              className="flex-1"
+              onClick={handleCreateUser}
+              disabled={createUserLoading}
+            >
+              {createUserLoading ? 'Creating...' : 'Create User'}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setCreateUserOpen(false)}
+              disabled={createUserLoading}
+            >
+              Cancel
+            </Button>
           </div>
         </div>
       </DialogContent>

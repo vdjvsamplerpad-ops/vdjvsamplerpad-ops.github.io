@@ -17,68 +17,8 @@ import {
   parseBankIdFromFileName,
   listAccessibleBankIds 
 } from '@/lib/bank-utils';
-import { useAuth, getCachedUser, getCachedProfile } from '@/hooks/useAuth';
-
-const EXPORT_WEBHOOK_QUEUE_KEY = 'vdjv-export-webhook-queue';
-const IMPORT_WEBHOOK_QUEUE_KEY = 'vdjv-import-webhook-queue';
-
-type ExportWebhookPayload = { email: string; bankName: string; padNames: string[] };
-type ImportWebhookPayload = {
-  status: 'SUCCESS' | 'FAILED';
-  email: string;
-  bankName: string;
-  padNames: string[];
-  includePadList: boolean;
-  errorMessage?: string;
-};
-
-const readExportWebhookQueue = (): ExportWebhookPayload[] => {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = localStorage.getItem(EXPORT_WEBHOOK_QUEUE_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-};
-
-const writeExportWebhookQueue = (queue: ExportWebhookPayload[]) => {
-  if (typeof window === 'undefined') return;
-  try {
-    if (queue.length === 0) {
-      localStorage.removeItem(EXPORT_WEBHOOK_QUEUE_KEY);
-    } else {
-      localStorage.setItem(EXPORT_WEBHOOK_QUEUE_KEY, JSON.stringify(queue));
-    }
-  } catch (err) {
-    console.warn('Failed to persist export webhook queue:', err);
-  }
-};
-
-const readImportWebhookQueue = (): ImportWebhookPayload[] => {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = localStorage.getItem(IMPORT_WEBHOOK_QUEUE_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-};
-
-const writeImportWebhookQueue = (queue: ImportWebhookPayload[]) => {
-  if (typeof window === 'undefined') return;
-  try {
-    if (queue.length === 0) {
-      localStorage.removeItem(IMPORT_WEBHOOK_QUEUE_KEY);
-    } else {
-      localStorage.setItem(IMPORT_WEBHOOK_QUEUE_KEY, JSON.stringify(queue));
-    }
-  } catch (err) {
-    console.warn('Failed to persist import webhook queue:', err);
-  }
-};
+import { useAuth, getCachedUser } from '@/hooks/useAuth';
+import { ensureActivityRuntime, logActivityEvent } from '@/lib/activityLogger';
 
 // Helper to detect if running in native Android app (not web browser)
 const isNativeAndroid = (): boolean => {
@@ -594,104 +534,64 @@ export function useSamplerStore(): SamplerStore {
     }
   }, [primaryBankId, secondaryBankId, currentBankId]);
 
-  const flushExportWebhookQueue = React.useCallback(async () => {
-    if (typeof window === 'undefined' || !navigator.onLine) return;
-    const queue = readExportWebhookQueue();
-    if (!queue.length) return;
-    const remaining: ExportWebhookPayload[] = [];
-    for (const payload of queue) {
-      try {
-        const resp = await fetch('/api/webhook/export-bank', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (!resp.ok) throw new Error(`Webhook failed: ${resp.status}`);
-      } catch {
-        remaining.push(payload);
-      }
-    }
-    writeExportWebhookQueue(remaining);
-  }, []);
-
-  const enqueueExportWebhook = React.useCallback((payload: ExportWebhookPayload) => {
-    const queue = readExportWebhookQueue();
-    queue.push(payload);
-    writeExportWebhookQueue(queue);
-  }, []);
-
-  const sendExportWebhook = React.useCallback(async (payload: ExportWebhookPayload) => {
-    if (typeof window === 'undefined') return;
-    if (!navigator.onLine) {
-      enqueueExportWebhook(payload);
-      return;
-    }
-    try {
-      const resp = await fetch('/api/webhook/export-bank', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!resp.ok) throw new Error(`Webhook failed: ${resp.status}`);
-    } catch {
-      enqueueExportWebhook(payload);
-    }
-  }, [enqueueExportWebhook]);
-
-  const flushImportWebhookQueue = React.useCallback(async () => {
-    if (typeof window === 'undefined' || !navigator.onLine) return;
-    const queue = readImportWebhookQueue();
-    if (!queue.length) return;
-    const remaining: ImportWebhookPayload[] = [];
-    for (const payload of queue) {
-      try {
-        const resp = await fetch('/api/webhook/import-bank', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (!resp.ok) throw new Error(`Webhook failed: ${resp.status}`);
-      } catch {
-        remaining.push(payload);
-      }
-    }
-    writeImportWebhookQueue(remaining);
-  }, []);
-
-  const enqueueImportWebhook = React.useCallback((payload: ImportWebhookPayload) => {
-    const queue = readImportWebhookQueue();
-    queue.push(payload);
-    writeImportWebhookQueue(queue);
-  }, []);
-
-  const sendImportWebhook = React.useCallback(async (payload: ImportWebhookPayload) => {
-    if (typeof window === 'undefined') return;
-    if (!navigator.onLine) {
-      enqueueImportWebhook(payload);
-      return;
-    }
-    try {
-      const resp = await fetch('/api/webhook/import-bank', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!resp.ok) throw new Error(`Webhook failed: ${resp.status}`);
-    } catch {
-      enqueueImportWebhook(payload);
-    }
-  }, [enqueueImportWebhook]);
-
   React.useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const handler = () => {
-      flushExportWebhookQueue().catch(() => {});
-      flushImportWebhookQueue().catch(() => {});
-    };
-    window.addEventListener('online', handler);
-    if (navigator.onLine) handler();
-    return () => window.removeEventListener('online', handler);
-  }, [flushExportWebhookQueue, flushImportWebhookQueue]);
+    ensureActivityRuntime();
+  }, []);
+
+  const logExportActivity = React.useCallback((input: {
+    status: 'success' | 'failed';
+    bankName: string;
+    bankId?: string;
+    padNames: string[];
+    errorMessage?: string;
+  }) => {
+    const effectiveUser = user || getCachedUser();
+    void logActivityEvent({
+      eventType: 'bank.export',
+      status: input.status,
+      userId: effectiveUser?.id || null,
+      email: effectiveUser?.email || 'unknown',
+      bankId: input.bankId || null,
+      bankName: input.bankName,
+      padCount: input.padNames.length,
+      padNames: input.padNames,
+      errorMessage: input.errorMessage || null,
+      meta: {
+        source: 'useSamplerStore.exportBank',
+        includePadList: true,
+      },
+    }).catch((err) => {
+      console.warn('Failed to log export activity:', err);
+    });
+  }, [user]);
+
+  const logImportActivity = React.useCallback((input: {
+    status: 'success' | 'failed';
+    bankName: string;
+    bankId?: string;
+    padNames: string[];
+    includePadList: boolean;
+    errorMessage?: string;
+  }) => {
+    const effectiveUser = user || getCachedUser();
+    void logActivityEvent({
+      eventType: 'bank.import',
+      status: input.status,
+      userId: effectiveUser?.id || null,
+      email: effectiveUser?.email || 'unknown',
+      bankId: input.bankId || null,
+      bankName: input.bankName,
+      padCount: input.padNames.length,
+      padNames: input.includePadList ? input.padNames : [],
+      errorMessage: input.errorMessage || null,
+      meta: {
+        source: 'useSamplerStore.importBank',
+        includePadList: input.includePadList,
+      },
+    }).catch((err) => {
+      console.warn('Failed to log import activity:', err);
+    });
+  }, [user]);
 
   const restoreAllFiles = React.useCallback(async () => {
     if (typeof window === 'undefined') return;
@@ -1103,18 +1003,25 @@ export function useSamplerStore(): SamplerStore {
       if (saveResult.message) {
         console.log('✅', saveResult.message);
       }
-      const effectiveUser = user || getCachedUser();
-      const exportPayload = {
-        email: effectiveUser?.email || 'unknown',
+      logExportActivity({
+        status: 'success',
         bankName: bank.name,
+        bankId: bank.id,
         padNames: bank.pads.map((pad) => pad.name || 'Untitled Pad'),
-      };
-      if (profile?.role !== 'admin') {
-        sendExportWebhook(exportPayload).catch(() => {});
-      }
+      });
       return saveResult.message || 'Bank exported successfully';
-    } catch (e) { throw e; }
-  }, [banks, user, profile, sendExportWebhook]);
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : String(e);
+      logExportActivity({
+        status: 'failed',
+        bankName: bank.name,
+        bankId: bank.id,
+        padNames: bank.pads.map((pad) => pad.name || 'Untitled Pad'),
+        errorMessage,
+      });
+      throw e;
+    }
+  }, [banks, logExportActivity]);
 
   // --- FIXED IMPORT BANK ---
   const importBank = React.useCallback(async (file: File, onProgress?: (progress: number) => void) => {
@@ -1513,26 +1420,25 @@ export function useSamplerStore(): SamplerStore {
       setBanks(prev => [...prev, newBank]);
       onProgress && onProgress(100);
       console.log(`✅ Import complete: ${newPads.length} pads loaded from "${newBank.name}"`);
-      sendImportWebhook({
-        status: 'SUCCESS',
-        email: effectiveUser?.email || 'unknown',
+      logImportActivity({
+        status: 'success',
         bankName: importBankName,
-        padNames: includePadList ? importPadNames : [],
+        bankId: newBank.sourceBankId || newBank.id,
+        padNames: importPadNames,
         includePadList
-      }).catch(() => {});
+      });
       return newBank;
 
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : 'Unknown import error';
       console.error('❌ Import failed:', errorMessage, e);
-      sendImportWebhook({
-        status: 'FAILED',
-        email: effectiveUser?.email || 'unknown',
+      logImportActivity({
+        status: 'failed',
         bankName: importBankName,
-        padNames: includePadList ? importPadNames : [],
+        padNames: importPadNames,
         includePadList,
         errorMessage
-      }).catch(() => {});
+      });
       
       // Provide more specific error messages
       if (errorMessage.includes('timeout')) {
@@ -1547,7 +1453,7 @@ export function useSamplerStore(): SamplerStore {
       
       throw new Error(`Import failed: ${errorMessage}`);
     }
-  }, [banks, user, sendImportWebhook]);
+  }, [banks, user, logImportActivity]);
 
   // --- FIXED ADMIN EXPORT (Respects "Transferable" & Prevents Audio Bloat) ---
   const exportAdminBank = React.useCallback(async (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, allowExport: boolean, onProgress?: (progress: number) => void) => {

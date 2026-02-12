@@ -34,6 +34,7 @@ export function useAudioPlayer(
   const [isHolding, setIsHolding] = React.useState(false);
   const registeredRef = React.useRef(false);
   const padIdRef = React.useRef(pad.id);
+  const audioStateCheckTimeoutRef = React.useRef<number | null>(null);
 
   // Register/update pad with global manager
   React.useEffect(() => {
@@ -102,6 +103,35 @@ export function useAudioPlayer(
     }
   }, [pad.triggerMode, isHolding, isPlaying]);
 
+  const scheduleAudioStateCheck = React.useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (audioStateCheckTimeoutRef.current !== null) {
+      window.clearTimeout(audioStateCheckTimeoutRef.current);
+    }
+    audioStateCheckTimeoutRef.current = window.setTimeout(() => {
+      try {
+        const state = playbackManager.getAudioState();
+        if (state.contextState !== 'running') {
+          window.dispatchEvent(new CustomEvent('vdjv-audio-unlock-required', {
+            detail: { contextState: state.contextState, padId: pad.id }
+          }));
+        } else {
+          window.dispatchEvent(new Event('vdjv-audio-unlock-restored'));
+        }
+      } catch (error) {
+        console.warn('Failed to check audio state after play attempt:', error);
+      }
+    }, 250);
+  }, [playbackManager, pad.id]);
+
+  React.useEffect(() => {
+    return () => {
+      if (audioStateCheckTimeoutRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(audioStateCheckTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const playAudio = React.useCallback(() => {
     if (!registeredRef.current) {
       console.warn('Trying to play unregistered pad:', pad.id);
@@ -125,7 +155,8 @@ export function useAudioPlayer(
         playbackManager.triggerUnmuteToggle(pad.id);
         break;
     }
-  }, [pad.id, pad.triggerMode, isHolding, isPlaying, playbackManager]);
+    scheduleAudioStateCheck();
+  }, [pad.id, pad.triggerMode, isHolding, isPlaying, playbackManager, scheduleAudioStateCheck]);
 
   const stopAudio = React.useCallback(() => {
     if (!registeredRef.current) return;

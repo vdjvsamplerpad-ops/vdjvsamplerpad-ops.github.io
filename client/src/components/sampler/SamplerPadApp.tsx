@@ -176,6 +176,8 @@ export function SamplerPadApp() {
   const [globalMuted, setGlobalMuted] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [showErrorDialog, setShowErrorDialog] = React.useState(false);
+  const [showAudioUnlockDialog, setShowAudioUnlockDialog] = React.useState(false);
+  const [audioUnlockState, setAudioUnlockState] = React.useState<string>('unknown');
   const [VolumeMixer, setVolumeMixer] = React.useState<React.ComponentType<any> | null>(null);
   const [editRequest, setEditRequest] = React.useState<{ padId: string; token: number } | null>(null);
   const [editBankRequest, setEditBankRequest] = React.useState<{ bankId: string; token: number } | null>(null);
@@ -194,7 +196,11 @@ export function SamplerPadApp() {
   // Save settings to localStorage whenever they change
   React.useEffect(() => {
     if (typeof window !== 'undefined') {
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+      try {
+        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+      } catch (error) {
+        console.warn('Failed to save settings:', error);
+      }
     }
   }, [settings]);
 
@@ -203,6 +209,30 @@ export function SamplerPadApp() {
       midi.requestAccess();
     }
   }, [midi.enabled, midi.accessGranted, midi.requestAccess]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleUnlockRequired = (event: Event) => {
+      const customEvent = event as CustomEvent<{ contextState?: string }>;
+      const contextState = customEvent.detail?.contextState || 'unknown';
+      setAudioUnlockState(contextState);
+      setShowAudioUnlockDialog(true);
+    };
+
+    const handleUnlockRestored = () => {
+      setShowAudioUnlockDialog(false);
+      setAudioUnlockState('running');
+    };
+
+    window.addEventListener('vdjv-audio-unlock-required', handleUnlockRequired as EventListener);
+    window.addEventListener('vdjv-audio-unlock-restored', handleUnlockRestored);
+
+    return () => {
+      window.removeEventListener('vdjv-audio-unlock-required', handleUnlockRequired as EventListener);
+      window.removeEventListener('vdjv-audio-unlock-restored', handleUnlockRestored);
+    };
+  }, []);
 
   // Update individual settings
   const updateSetting = React.useCallback(<K extends keyof AppSettings>(
@@ -223,6 +253,19 @@ export function SamplerPadApp() {
   const handleToggleHideShortcutLabels = React.useCallback((hide: boolean) => {
     updateSetting('hideShortcutLabels', hide);
   }, [updateSetting]);
+
+  const handleAudioUnlockRetry = React.useCallback(async () => {
+    try {
+      await playbackManager.preUnlockAudio();
+      const state = playbackManager.getAudioState().contextState;
+      setAudioUnlockState(state);
+      if (state === 'running') {
+        setShowAudioUnlockDialog(false);
+      }
+    } catch (error) {
+      console.error('Manual audio unlock failed:', error);
+    }
+  }, [playbackManager]);
 
   const handleToggleMidiEnabled = React.useCallback((enabled: boolean) => {
     midi.setEnabled(enabled);
@@ -2346,6 +2389,28 @@ export function SamplerPadApp() {
             </p>
             <Button onClick={handleErrorClose} className="w-full">
               OK
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showAudioUnlockDialog} onOpenChange={setShowAudioUnlockDialog}>
+        <DialogContent
+          className={`sm:max-w-md ${theme === 'dark' ? 'bg-gray-800 border-amber-500' : 'bg-white border-amber-500'}`}
+          aria-describedby={undefined}
+        >
+          <DialogHeader>
+            <DialogTitle className="text-amber-600">Enable Audio</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className={`text-sm ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>
+              Audio is blocked by this browser context. Tap retry to unlock audio, then press a pad again.
+            </p>
+            <p className={`text-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+              Audio context state: {audioUnlockState}
+            </p>
+            <Button onClick={handleAudioUnlockRetry} className="w-full">
+              Retry Audio Unlock
             </Button>
           </div>
         </DialogContent>
