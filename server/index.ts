@@ -88,6 +88,26 @@ const postDiscordWebhook = async (url: string, content: string) => {
   }
 };
 
+const postDiscordWebhookWithTextFile = async (
+  url: string,
+  content: string,
+  fileName: string,
+  fileText: string
+) => {
+  const form = new FormData();
+  form.append('payload_json', JSON.stringify({ content }));
+  form.append('file', new Blob([fileText], { type: 'text/plain' }), fileName);
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    body: form,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`Discord webhook failed: ${resp.status} ${text}`);
+  }
+};
+
 // Admin endpoint: List users (basic pagination & search)
 app.get('/api/admin/users', async (req: any, res: any) => {
   try {
@@ -227,11 +247,23 @@ app.post('/api/webhook/export-bank', async (req: Request, res: Response) => {
       '**Bank Export:**',
       `**Email:** ${email}`,
       `**Bank:** ${bankName}`,
-      '**Pads:**',
-      padNames.length ? padNames.map((name: string) => `- ${name}`).join('\n') : '- (no pads)',
+      `**Pad Count:** ${padNames.length}`,
+      '**Pad List:** attached as file',
     ];
-
-    await postDiscordWebhook(DISCORD_WEBHOOK_EXPORT, lines.join('\n'));
+    const sanitizedBankName = String(bankName).replace(/[^a-z0-9_-]/gi, '_').slice(0, 40) || 'bank';
+    const padListText = [
+      `Bank: ${bankName}`,
+      `Email: ${email}`,
+      `Pad Count: ${padNames.length}`,
+      '',
+      ...((padNames as string[]).length ? (padNames as string[]).map((name: string) => `- ${name}`) : ['- (no pads)']),
+    ].join('\n');
+    await postDiscordWebhookWithTextFile(
+      DISCORD_WEBHOOK_EXPORT,
+      lines.join('\n'),
+      `export_${sanitizedBankName}_pads.txt`,
+      padListText
+    );
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Unknown error' });
@@ -254,17 +286,29 @@ app.post('/api/webhook/import-bank', async (req: Request, res: Response) => {
       `**Email:** ${email}`,
       `**Bank:** ${bankName}`,
       normalizedStatus === 'FAILED' && errorMessage ? `**Failed Message:** ${errorMessage}` : '',
-      shouldShowPads
-        ? [
-            '**Pads:**',
-            (padNames as string[]).length
-              ? (padNames as string[]).map((name: string) => `- ${name}`).join('\n')
-              : '- (no pads)',
-          ].join('\n')
-        : '',
+      shouldShowPads ? `**Pad Count:** ${(padNames as string[]).length}` : '',
+      shouldShowPads ? '**Pad List:** attached as file' : '',
     ].filter(Boolean);
-
-    await postDiscordWebhook(DISCORD_WEBHOOK_IMPORT, lines.join('\n'));
+    if (shouldShowPads) {
+      const sanitizedBankName = String(bankName).replace(/[^a-z0-9_-]/gi, '_').slice(0, 40) || 'bank';
+      const padListText = [
+        `Bank: ${bankName}`,
+        `Email: ${email}`,
+        `Status: ${normalizedStatus}`,
+        '',
+        (padNames as string[]).length
+          ? (padNames as string[]).map((name: string) => `- ${name}`).join('\n')
+          : '- (no pads)',
+      ].join('\n');
+      await postDiscordWebhookWithTextFile(
+        DISCORD_WEBHOOK_IMPORT,
+        lines.join('\n'),
+        `import_${sanitizedBankName}_pads.txt`,
+        padListText
+      );
+    } else {
+      await postDiscordWebhook(DISCORD_WEBHOOK_IMPORT, lines.join('\n'));
+    }
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Unknown error' });
