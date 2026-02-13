@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import { supabase } from './supabase';
 import { BankMetadata, AdminBank } from '@/components/sampler/types/sampler';
+import type { SamplerBank } from '@/components/sampler/types/sampler';
 
 // Secret key for deriving passwords (in production, this should be in environment variables)
 const SECRET_KEY = 'vdjv-sampler-secret-2024';
@@ -563,6 +564,20 @@ export function clearUserBankCache(userId?: string): void {
   } catch (e) {
     console.warn('Failed clearing user bank cache:', e);
   }
+}
+
+export function clearUserScopedAccessCaches(userId?: string): void {
+  clearUserBankCache(userId);
+}
+
+export function isProtectedImportedBank(bank: Pick<SamplerBank, 'isAdminBank' | 'sourceBankId' | 'bankMetadata'>): boolean {
+  const metadataBankId = bank.bankMetadata?.bankId;
+  return Boolean(bank.isAdminBank || metadataBankId || bank.sourceBankId);
+}
+
+export function pruneProtectedBanksFromCache(banks: SamplerBank[]): SamplerBank[] {
+  const pruned = banks.filter((bank) => !isProtectedImportedBank(bank));
+  return pruned;
 }
 
 export async function resolveAdminBankMetadata(bankId: string): Promise<ResolvedBankMetadata | null> {

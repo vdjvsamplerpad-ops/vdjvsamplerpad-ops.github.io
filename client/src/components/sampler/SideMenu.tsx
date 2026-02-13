@@ -9,7 +9,6 @@ import { ProgressDialog } from '@/components/ui/progress-dialog';
 import { Plus, Settings, Upload, X, Crown, Minus, RotateCcw, Sun, Moon, ChevronUp, ChevronDown, Loader2 } from 'lucide-react';
 import { SamplerBank, StopMode, PadData } from './types/sampler';
 import { BankEditDialog } from './BankEditDialog';
-import { LoginModal } from '@/components/auth/LoginModal';
 import { getCachedUser, useAuth } from '@/hooks/useAuth';
 import { createPortal } from 'react-dom';
 import { normalizeStoredShortcutKey } from '@/lib/keyboard-shortcuts';
@@ -106,7 +105,6 @@ export function SideMenu({
   const [newBankName, setNewBankName] = React.useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = React.useState(false);
   const [bankToDelete, setBankToDelete] = React.useState<SamplerBank | null>(null);
-  const [showLoginModal, setShowLoginModal] = React.useState(false);
   const [pendingImportFile, setPendingImportFile] = React.useState<File | null>(null);
   
   // Progress State
@@ -166,6 +164,10 @@ export function SideMenu({
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const { user } = useAuth();
   const prevUserIdRef = React.useRef<string | null>(null);
+  const requestLoginModal = React.useCallback(() => {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new Event('vdjv-login-request'));
+  }, []);
 
   const isMobile = windowWidth < 768;
   const maxPadSize = isMobile ? 6 : 14;
@@ -274,7 +276,7 @@ export function SideMenu({
   const handleImportClick = React.useCallback(() => {
     const effectiveUser = user || getCachedUser();
     if (!effectiveUser) {
-      setShowLoginModal(true);
+      requestLoginModal();
       pushNotice({ variant: 'error', message: 'Please sign in to import a bank.' });
       return;
     }
@@ -330,7 +332,7 @@ export function SideMenu({
       // Standard file input for other platforms
       fileInputRef.current?.click();
     }
-  }, [isAndroid, isWebView, createCompatibleFileInput, pushNotice, user]);
+  }, [isAndroid, isWebView, createCompatibleFileInput, pushNotice, user, requestLoginModal]);
 
   React.useEffect(() => {
     const handleGlobalImport = () => {
@@ -419,8 +421,6 @@ export function SideMenu({
     if (justLoggedIn && pendingImportFile) {
       prevUserIdRef.current = currentUserId;
       // Close login modal
-      setShowLoginModal(false);
-      
       // Small delay to ensure login state is fully propagated
       setTimeout(() => {
         // Auto-import the pending file
@@ -1056,7 +1056,7 @@ export function SideMenu({
         }}
         onLogin={() => {
           // File is already stored in pendingImportFile when error occurred
-          setShowLoginModal(true);
+          requestLoginModal();
         }}
       />
 
@@ -1072,13 +1072,6 @@ export function SideMenu({
         document.body
       )}
 
-      {/* Login Modal */}
-      <LoginModal
-        open={showLoginModal}
-        onOpenChange={setShowLoginModal}
-        theme={theme}
-        pushNotice={pushNotice}
-      />
     </>
   );
 }

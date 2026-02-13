@@ -130,6 +130,78 @@ const writeActivityLog = async (payload: {
   throw new Error(error.message);
 };
 
+const claimSingleActiveSession = async (payload: {
+  userId: string;
+  sessionKey: string;
+  deviceSessionId: string;
+  email?: string | null;
+  device: DevicePayload;
+  ip?: string | null;
+  meta?: Record<string, unknown> | null;
+}) => {
+  const admin = createServiceClient();
+  const rpc = await admin.rpc("claim_single_active_session", {
+    p_user_id: payload.userId,
+    p_device_session_id: payload.deviceSessionId,
+    p_session_key: payload.sessionKey,
+    p_email: payload.email || null,
+    p_device_fingerprint: payload.device.fingerprint || "unknown",
+    p_device_name: payload.device.name || null,
+    p_device_model: payload.device.model || null,
+    p_platform: payload.device.platform || null,
+    p_browser: payload.device.browser || null,
+    p_os: payload.device.os || null,
+    p_ip: payload.ip || null,
+    p_meta: asObject(payload.meta),
+  });
+  if (!rpc.error) return;
+
+  // Fallback for partial rollout: keep current session row up-to-date.
+  await upsertActiveSession({
+    sessionKey: payload.sessionKey,
+    userId: payload.userId,
+    email: payload.email,
+    device: payload.device,
+    ip: payload.ip,
+    lastEvent: "auth.login",
+    meta: {
+      ...(payload.meta || {}),
+      deviceSessionId: payload.deviceSessionId,
+    },
+  });
+};
+
+const validateSingleSession = async (userId: string, deviceSessionId: string) => {
+  const admin = createServiceClient();
+  const rpc = await admin.rpc("validate_single_session", {
+    p_user_id: userId,
+    p_device_session_id: deviceSessionId,
+  });
+  if (!rpc.error && rpc.data) {
+    const result = asObject(rpc.data);
+    return {
+      valid: result.valid !== false,
+      reason: asString(result.reason, 240) || "Session invalidated by a newer login.",
+    };
+  }
+
+  // Fallback for partial rollout.
+  const { data, error } = await admin
+    .from("profiles")
+    .select("current_device_session_id")
+    .eq("id", userId)
+    .maybeSingle();
+  if (error || !data) {
+    return { valid: true, reason: "" };
+  }
+  const current = asString((data as Record<string, unknown>).current_device_session_id, 80);
+  if (!current) return { valid: true, reason: "" };
+  return {
+    valid: current === deviceSessionId,
+    reason: "This account was used on another device. You were signed out on this device.",
+  };
+};
+
 const upsertActiveSession = async (payload: {
   sessionKey: string;
   userId: string;
@@ -204,6 +276,21 @@ const markSessionOffline = async (sessionKey: string, lastEvent = "auth.signout"
   if (fallback.error) throw new Error(fallback.error.message || rpc.error.message);
 };
 
+const finalizeSignoutSession = async (payload: {
+  userId: string;
+  deviceSessionId: string;
+  sessionKey: string;
+}) => {
+  const admin = createServiceClient();
+  const rpc = await admin.rpc("finalize_signout_session", {
+    p_user_id: payload.userId,
+    p_device_session_id: payload.deviceSessionId,
+    p_session_key: payload.sessionKey,
+  });
+  if (!rpc.error) return;
+  await markSessionOffline(payload.sessionKey, "auth.signout");
+};
+
 Deno.serve(async (req) => {
   const cors = handleCorsPreflight(req);
   if (cors) return cors;
@@ -225,6 +312,7 @@ Deno.serve(async (req) => {
 
       const userId = asUuid(body.userId);
       const sessionKey = asUuid(body.sessionKey);
+      const deviceSessionId = asUuid(body.deviceSessionId);
       const email = asString(body.email, 320);
       const device = normalizeDevice(body.device);
       const bankName = asString(body.bankName, 200);
@@ -259,6 +347,16 @@ Deno.serve(async (req) => {
       if (status === "success") {
         if (eventType === "auth.signout") {
           if (sessionKey) await markSessionOffline(sessionKey, "auth.signout");
+        } else if (eventType === "auth.login" && userId && sessionKey && deviceSessionId) {
+          await claimSingleActiveSession({
+            userId,
+            sessionKey,
+            deviceSessionId,
+            email,
+            device,
+            ip: parseClientIp(req),
+            meta,
+          });
         } else if (sessionKey && userId) {
           await upsertActiveSession({
             sessionKey,
@@ -312,10 +410,27 @@ Deno.serve(async (req) => {
 
     if (route === "heartbeat") {
       const sessionKey = asUuid(body.sessionKey);
+      const deviceSessionId = asUuid(body.deviceSessionId);
       const userId = asUuid(body.userId);
       if (!sessionKey) return badRequest("Missing or invalid sessionKey", req);
+      if (!deviceSessionId) return badRequest("Missing or invalid deviceSessionId", req);
       if (!userId) return badRequest("Missing or invalid userId", req);
       if (await isAdminUser(userId)) return json(200, { ok: true, skippedAdmin: true }, req);
+
+      const validation = await validateSingleSession(userId, deviceSessionId);
+      if (!validation.valid) {
+        await markSessionOffline(sessionKey, "session.conflict");
+        return json(
+          409,
+          {
+            ok: false,
+            code: "SESSION_CONFLICT",
+            invalidate: true,
+            message: validation.reason || "Session invalidated by a newer login.",
+          },
+          req,
+        );
+      }
 
       await upsertActiveSession({
         sessionKey,
@@ -326,12 +441,44 @@ Deno.serve(async (req) => {
         lastEvent: asString(body.lastEvent, 60) || "heartbeat",
         meta: asObject(body.meta),
       });
+      const admin = createServiceClient();
+      await admin
+        .from("active_sessions")
+        .update({ device_session_id: deviceSessionId, invalidated_at: null, invalidated_reason: null })
+        .eq("session_key", sessionKey);
       return json(200, { ok: true }, req);
+    }
+
+    if (route === "session-check") {
+      const sessionKey = asUuid(body.sessionKey);
+      const deviceSessionId = asUuid(body.deviceSessionId);
+      const userId = asUuid(body.userId);
+      if (!sessionKey) return badRequest("Missing or invalid sessionKey", req);
+      if (!deviceSessionId) return badRequest("Missing or invalid deviceSessionId", req);
+      if (!userId) return badRequest("Missing or invalid userId", req);
+      if (await isAdminUser(userId)) return json(200, { ok: true, valid: true, skippedAdmin: true }, req);
+
+      const validation = await validateSingleSession(userId, deviceSessionId);
+      if (!validation.valid) {
+        await markSessionOffline(sessionKey, "session.conflict");
+        return json(
+          409,
+          {
+            ok: false,
+            code: "SESSION_CONFLICT",
+            invalidate: true,
+            message: validation.reason || "Session invalidated by a newer login.",
+          },
+          req,
+        );
+      }
+      return json(200, { ok: true, valid: true }, req);
     }
 
     if (route === "signout") {
       const requestId = asUuid(body.requestId);
       const sessionKey = asUuid(body.sessionKey);
+      const deviceSessionId = asUuid(body.deviceSessionId);
       const userId = asUuid(body.userId);
       const status = isStatus(body.status) ? body.status : "success";
       if (!requestId) return badRequest("Missing or invalid requestId", req);
@@ -351,7 +498,15 @@ Deno.serve(async (req) => {
       });
 
       if (!result.deduped && status === "success") {
-        await markSessionOffline(sessionKey, "auth.signout");
+        if (userId && deviceSessionId) {
+          await finalizeSignoutSession({
+            userId,
+            deviceSessionId,
+            sessionKey,
+          });
+        } else {
+          await markSessionOffline(sessionKey, "auth.signout");
+        }
       }
       let discordError: string | null = null;
       try {

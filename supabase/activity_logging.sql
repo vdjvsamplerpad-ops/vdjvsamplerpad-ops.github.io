@@ -176,3 +176,126 @@ for all using (false) with check (false);
 drop policy if exists active_sessions_deny_all on public.active_sessions;
 create policy active_sessions_deny_all on public.active_sessions
 for all using (false) with check (false);
+
+-- Single active device-session enforcement
+alter table public.active_sessions
+  add column if not exists device_session_id uuid null,
+  add column if not exists invalidated_at timestamptz null,
+  add column if not exists invalidated_reason text null;
+
+create index if not exists idx_active_sessions_user_device
+  on public.active_sessions (user_id, device_session_id);
+
+alter table public.profiles
+  add column if not exists current_device_session_id uuid null,
+  add column if not exists current_session_set_at timestamptz null;
+
+create or replace function public.claim_single_active_session(
+  p_user_id uuid,
+  p_device_session_id uuid,
+  p_session_key uuid,
+  p_email text,
+  p_device_fingerprint text,
+  p_device_name text,
+  p_device_model text,
+  p_platform text,
+  p_browser text,
+  p_os text,
+  p_ip inet,
+  p_meta jsonb
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform public.upsert_active_session(
+    p_session_key,
+    p_user_id,
+    p_email,
+    coalesce(p_device_fingerprint, 'unknown'),
+    p_device_name,
+    p_device_model,
+    p_platform,
+    p_browser,
+    p_os,
+    p_ip,
+    'auth.login',
+    coalesce(p_meta, '{}'::jsonb)
+  );
+
+  update public.active_sessions
+  set is_online = false,
+      invalidated_at = now(),
+      invalidated_reason = 'newer_login',
+      last_event = 'session.invalidated'
+  where user_id = p_user_id
+    and is_online = true
+    and session_key <> p_session_key
+    and coalesce(device_session_id::text, '') <> p_device_session_id::text;
+
+  update public.active_sessions
+  set device_session_id = p_device_session_id,
+      invalidated_at = null,
+      invalidated_reason = null,
+      is_online = true,
+      last_seen_at = now()
+  where session_key = p_session_key;
+
+  update public.profiles
+  set current_device_session_id = p_device_session_id,
+      current_session_set_at = now()
+  where id = p_user_id;
+end;
+$$;
+
+create or replace function public.validate_single_session(
+  p_user_id uuid,
+  p_device_session_id uuid
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_current uuid;
+begin
+  select current_device_session_id
+    into v_current
+  from public.profiles
+  where id = p_user_id;
+
+  if v_current is null then
+    return jsonb_build_object('valid', true, 'reason', null);
+  end if;
+
+  if v_current = p_device_session_id then
+    return jsonb_build_object('valid', true, 'reason', null);
+  end if;
+
+  return jsonb_build_object(
+    'valid', false,
+    'reason', 'This account was used on another device. You were signed out on this device.'
+  );
+end;
+$$;
+
+create or replace function public.finalize_signout_session(
+  p_user_id uuid,
+  p_device_session_id uuid,
+  p_session_key uuid
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform public.mark_session_offline(p_session_key, 'auth.signout');
+
+  update public.profiles
+  set current_device_session_id = null,
+      current_session_set_at = now()
+  where id = p_user_id
+    and current_device_session_id = p_device_session_id;
+end;
+$$;

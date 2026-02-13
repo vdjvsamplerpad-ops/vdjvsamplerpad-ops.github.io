@@ -16,7 +16,8 @@ import {
   parseBankIdFromFileName,
   listAccessibleBankIds,
   getCachedBankKeysForUser,
-  resolveAdminBankMetadata
+  resolveAdminBankMetadata,
+  pruneProtectedBanksFromCache
 } from '@/lib/bank-utils';
 import { useAuth, getCachedUser } from '@/hooks/useAuth';
 import { ensureActivityRuntime, logActivityEvent } from '@/lib/activityLogger';
@@ -124,6 +125,8 @@ interface SamplerStore {
 const STORAGE_KEY = 'vdjv-sampler-banks';
 const STATE_STORAGE_KEY = 'vdjv-sampler-state';
 const DEFAULT_BANK_LOADED_KEY = 'vdjv-default-bank-loaded';
+const SESSION_ENFORCEMENT_EVENT_KEY = 'vdjv-session-enforcement-event';
+const HIDE_PROTECTED_BANKS_KEY = 'vdjv-hide-protected-banks';
 
 // Shared encryption password for banks with "Allow Export" disabled
 // This provides security layer without requiring Supabase or user purchase
@@ -514,7 +517,7 @@ const storeFile = async (padId: string, file: File, type: 'audio' | 'image'): Pr
 };
 
 export function useSamplerStore(): SamplerStore {
-  const { user, profile } = useAuth();
+  const { user, profile, loading, sessionConflictReason } = useAuth();
   const [banks, setBanks] = React.useState<SamplerBank[]>([]);
   const [primaryBankId, setPrimaryBankIdState] = React.useState<string | null>(null);
   const [secondaryBankId, setSecondaryBankIdState] = React.useState<string | null>(null);
@@ -525,6 +528,16 @@ export function useSamplerStore(): SamplerStore {
   const secondaryBank = React.useMemo(() => banks.find(b => b.id === secondaryBankId) || null, [banks, secondaryBankId]);
   const currentBank = React.useMemo(() => banks.find(b => b.id === currentBankId) || null, [banks, currentBankId]);
   const isDualMode = React.useMemo(() => primaryBankId !== null, [primaryBankId]);
+  const hiddenProtectedBanksRef = React.useRef<SamplerBank[]>([]);
+
+  const isProtectedBanksLockActive = React.useCallback(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return localStorage.getItem(HIDE_PROTECTED_BANKS_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }, []);
 
   React.useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -594,6 +607,38 @@ export function useSamplerStore(): SamplerStore {
     });
   }, [user]);
 
+  const hideProtectedBanks = React.useCallback(() => {
+    setBanks((prev) => {
+      const next = pruneProtectedBanksFromCache(prev);
+      if (next.length === prev.length) return prev;
+      const visibleIds = new Set(next.map((bank) => bank.id));
+      hiddenProtectedBanksRef.current = prev.filter((bank) => !visibleIds.has(bank.id));
+      const nextIds = new Set(next.map((bank) => bank.id));
+      setPrimaryBankIdState((current) => (current && nextIds.has(current) ? current : null));
+      setSecondaryBankIdState((current) => (current && nextIds.has(current) ? current : null));
+      setCurrentBankIdState((current) => {
+        if (current && nextIds.has(current)) return current;
+        return next[0]?.id || null;
+      });
+      return next;
+    });
+  }, []);
+
+  const restoreHiddenProtectedBanks = React.useCallback(() => {
+    const hidden = hiddenProtectedBanksRef.current;
+    if (!hidden.length) return;
+    setBanks((prev) => {
+      const existing = new Set(prev.map((bank) => bank.id));
+      const toRestore = hidden.filter((bank) => !existing.has(bank.id));
+      if (!toRestore.length) {
+        hiddenProtectedBanksRef.current = [];
+        return prev;
+      }
+      hiddenProtectedBanksRef.current = [];
+      return [...prev, ...toRestore].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+    });
+  }, []);
+
   const restoreAllFiles = React.useCallback(async () => {
     if (typeof window === 'undefined') return;
     const savedData = getLocalStorageItemSafe(STORAGE_KEY);
@@ -612,7 +657,7 @@ export function useSamplerStore(): SamplerStore {
       let restoredState = { primaryBankId: null, secondaryBankId: null, currentBankId: null };
       if (savedState) try { restoredState = JSON.parse(savedState); } catch (e) {}
 
-      const restoredBanks = await Promise.all(savedBanks.map(async (bank: any, index: number) => {
+      let restoredBanks = await Promise.all(savedBanks.map(async (bank: any, index: number) => {
         const restoredPads = await Promise.all(bank.pads.map(async (pad: any, index: number) => {
           const restoredPad = {
             ...pad, audioUrl: null, imageUrl: null, fadeInMs: pad.fadeInMs || 0, fadeOutMs: pad.fadeOutMs || 0,
@@ -633,6 +678,15 @@ export function useSamplerStore(): SamplerStore {
         }));
         return { ...bank, createdAt: new Date(bank.createdAt), sortOrder: bank.sortOrder ?? index, pads: restoredPads };
       }));
+      const hideProtectedLock =
+        typeof window !== 'undefined' && localStorage.getItem(HIDE_PROTECTED_BANKS_KEY) === '1';
+      if (hideProtectedLock) {
+        const visible = pruneProtectedBanksFromCache(restoredBanks);
+        hiddenProtectedBanksRef.current = restoredBanks.filter(
+          (bank) => !visible.some((visibleBank) => visibleBank.id === bank.id)
+        );
+        restoredBanks = visible;
+      }
       restoredBanks.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
       setBanks(restoredBanks);
       setPrimaryBankIdState(restoredState.primaryBankId);
@@ -648,7 +702,36 @@ export function useSamplerStore(): SamplerStore {
   React.useEffect(() => { restoreAllFiles(); }, [restoreAllFiles]);
 
   React.useEffect(() => {
+    if (loading) return;
+    if (user) return;
+    hideProtectedBanks();
+  }, [user?.id, loading, hideProtectedBanks]);
+
+  React.useEffect(() => {
+    if (loading) return;
+    if (!user) return;
+    if (isProtectedBanksLockActive()) return;
+    restoreHiddenProtectedBanks();
+  }, [user?.id, loading, isProtectedBanksLockActive, restoreHiddenProtectedBanks]);
+
+  React.useEffect(() => {
+    if (!sessionConflictReason) return;
+    hideProtectedBanks();
+  }, [sessionConflictReason, hideProtectedBanks]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== SESSION_ENFORCEMENT_EVENT_KEY || !event.newValue) return;
+      hideProtectedBanks();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [hideProtectedBanks]);
+
+  React.useEffect(() => {
     if (typeof window !== 'undefined' && banks.length > 0) {
+      if (isProtectedBanksLockActive()) return;
       try {
         const dataToSave = {
           banks: banks.map(bank => ({

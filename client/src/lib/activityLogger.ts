@@ -54,6 +54,7 @@ type HeartbeatInput = {
 
 const ACTIVITY_QUEUE_KEY = 'vdjv-activity-queue'
 const SESSION_KEY_STORAGE_KEY = 'vdjv-session-key'
+const DEVICE_SESSION_STORAGE_KEY = 'vdjv-device-session-id'
 const MAX_QUEUE_LENGTH = 1000
 
 const isBrowser = typeof window !== 'undefined'
@@ -91,6 +92,19 @@ const getSessionKey = (): string => {
     if (existing) return existing
     const created = generateUuid()
     sessionStorage.setItem(SESSION_KEY_STORAGE_KEY, created)
+    return created
+  } catch {
+    return generateUuid()
+  }
+}
+
+export const getDeviceSessionId = (): string => {
+  if (!isBrowser) return generateUuid()
+  try {
+    const existing = localStorage.getItem(DEVICE_SESSION_STORAGE_KEY)
+    if (existing) return existing
+    const created = generateUuid()
+    localStorage.setItem(DEVICE_SESSION_STORAGE_KEY, created)
     return created
   } catch {
     return generateUuid()
@@ -315,9 +329,28 @@ const postJson = async (endpoint: string, payload: Record<string, unknown>) => {
     keepalive: !isEvent,
     credentials: 'omit',
   })
+  if (resp.status === 409) {
+    let payload: any = {}
+    try {
+      payload = await resp.json()
+    } catch {
+      payload = {}
+    }
+    if (payload?.code === 'SESSION_CONFLICT' || payload?.invalidate === true) {
+      throw new SessionConflictError(payload?.message || 'Session conflict detected.')
+    }
+  }
   if (!resp.ok) {
     const text = await resp.text().catch(() => '')
     throw new Error(`HTTP ${resp.status}: ${text || 'request failed'}`)
+  }
+}
+
+export class SessionConflictError extends Error {
+  readonly code = 'SESSION_CONFLICT'
+  constructor(message = 'Session conflict detected.') {
+    super(message)
+    this.name = 'SessionConflictError'
   }
 }
 
@@ -404,6 +437,7 @@ const buildEventPayload = async (
     userId: input.userId || null,
     email: input.email || null,
     sessionKey: getSessionKey(),
+    deviceSessionId: getDeviceSessionId(),
     device,
     bankId: input.bankId || null,
     bankName: input.bankName || null,
@@ -440,25 +474,14 @@ export const sendActivityHeartbeat = async (input: HeartbeatInput) => {
   const device = await buildDevice()
   const payload = {
     sessionKey: getSessionKey(),
+    deviceSessionId: getDeviceSessionId(),
     userId: input.userId,
     email: input.email || null,
     device,
     lastEvent: input.lastEvent || 'heartbeat',
     meta: input.meta || {},
   }
-  try {
-    await postJson(edgeFunctionUrl('activity-api', 'heartbeat'), payload)
-  } catch (err) {
-    const message = String((err as any)?.message || err || '')
-    const transientNetworkError =
-      message.includes('Failed to fetch') ||
-      message.includes('NetworkError') ||
-      message.includes('Load failed') ||
-      message.includes('TypeError: Failed to fetch')
-    if (!transientNetworkError) {
-      console.warn('Heartbeat failed:', err)
-    }
-  }
+  await postJson(edgeFunctionUrl('activity-api', 'heartbeat'), payload)
 }
 
 export const sendHeartbeatBeacon = (input: {
@@ -471,6 +494,7 @@ export const sendHeartbeatBeacon = (input: {
   const device = cachedDevice || buildMinimalDevice()
   const payload = {
     sessionKey: getSessionKey(),
+    deviceSessionId: getDeviceSessionId(),
     userId: input.userId,
     email: input.email || null,
     device,
@@ -479,4 +503,23 @@ export const sendHeartbeatBeacon = (input: {
   }
   const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
   return navigator.sendBeacon(edgeFunctionUrl('activity-api', 'heartbeat'), blob)
+}
+
+export const checkSessionValidity = async (input: {
+  userId: string
+  email?: string | null
+  lastEvent?: string
+  meta?: Record<string, unknown>
+}) => {
+  if (!isBrowser || !input.userId || !navigator.onLine) return
+  const device = await buildDevice()
+  await postJson(edgeFunctionUrl('activity-api', 'session-check'), {
+    sessionKey: getSessionKey(),
+    deviceSessionId: getDeviceSessionId(),
+    userId: input.userId,
+    email: input.email || null,
+    device,
+    lastEvent: input.lastEvent || 'session-check',
+    meta: input.meta || {},
+  })
 }

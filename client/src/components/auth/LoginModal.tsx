@@ -24,7 +24,7 @@ function normalizeAuthErrorMessage(msg: string): string {
     return 'Invalid login credentials.'
   }
   if (m.includes('banned') || m.includes('suspended') || m.includes('disabled')) {
-    return 'Your account has been banned. Please contact support.'
+    return 'Your account has been banned. Please contact support in FACEBOK MESSENGER.'
   }
   if (m.includes('email') && m.includes('invalid')) return 'Email address is invalid.'
   if (m.includes('already registered') || m.includes('already exists')) return 'This email is already registered.'
@@ -57,6 +57,8 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
     isPasswordRecovery,
     redirectError,
     clearRedirectError,
+    sessionConflictReason,
+    clearSessionConflictReason,
     banned,
   } = useAuth()
 
@@ -136,6 +138,13 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
       clearRedirectError()
     }
   }, [redirectError, onOpenChange, open, clearRedirectError, pushNotice])
+
+  React.useEffect(() => {
+    if (!sessionConflictReason) return
+    if (!open) onOpenChange(true)
+    pushNotice?.({ variant: 'error', message: sessionConflictReason })
+    clearSessionConflictReason()
+  }, [sessionConflictReason, onOpenChange, open, pushNotice, clearSessionConflictReason])
 
   React.useEffect(() => {
     if (!banned) {
@@ -333,7 +342,7 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
         <div className="w-full max-w-md rounded-lg border border-red-500/40 bg-gray-900 p-6 text-center text-white shadow-lg">
           <div className="text-lg font-semibold">Account Banned</div>
           <p className="mt-2 text-sm text-gray-300">
-            Your account has been banned. If you believe this is a mistake, please contact support.
+            Your account has been banned. If you believe this is a mistake, please contact support in FACEBOK MESSENGER.
           </p>
           <div className="mt-4">
             <Button
