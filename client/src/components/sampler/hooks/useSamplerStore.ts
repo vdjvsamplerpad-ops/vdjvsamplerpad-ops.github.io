@@ -125,6 +125,7 @@ interface SamplerStore {
 const STORAGE_KEY = 'vdjv-sampler-banks';
 const STATE_STORAGE_KEY = 'vdjv-sampler-state';
 const DEFAULT_BANK_LOADED_KEY = 'vdjv-default-bank-loaded';
+const DEFAULT_BANK_LOADING_LOCK_KEY = 'vdjv-default-bank-loading-lock';
 const SESSION_ENFORCEMENT_EVENT_KEY = 'vdjv-session-enforcement-event';
 const HIDE_PROTECTED_BANKS_KEY = 'vdjv-hide-protected-banks';
 
@@ -529,6 +530,7 @@ export function useSamplerStore(): SamplerStore {
   const currentBank = React.useMemo(() => banks.find(b => b.id === currentBankId) || null, [banks, currentBankId]);
   const isDualMode = React.useMemo(() => primaryBankId !== null, [primaryBankId]);
   const hiddenProtectedBanksRef = React.useRef<SamplerBank[]>([]);
+  const attemptedDefaultLoadUserRef = React.useRef<string | null>(null);
 
   const isProtectedBanksLockActive = React.useCallback(() => {
     if (typeof window === 'undefined') return false;
@@ -1765,102 +1767,115 @@ export function useSamplerStore(): SamplerStore {
       return '/assets/DEFAULT_BANK.bank';
     }
   }, []);
-
   // Track previous user ID to detect login events
   const prevUserIdRef = React.useRef<string | null>(null);
-  
+
   // Auto-load default bank ONLY when user logs in (not on every render)
   React.useEffect(() => {
     const currentUser = user || getCachedUser();
     const currentUserId = currentUser?.id || null;
-    
-    // Only proceed if user just logged in (user ID changed from null/other to current)
+
+    if (!currentUserId) {
+      prevUserIdRef.current = null;
+      attemptedDefaultLoadUserRef.current = null;
+      return;
+    }
+
     const justLoggedIn = currentUserId && prevUserIdRef.current !== currentUserId;
-    
     if (!justLoggedIn) {
       prevUserIdRef.current = currentUserId;
       return;
     }
-    
-    // Update ref to prevent re-running
+
     prevUserIdRef.current = currentUserId;
-    
-    // Check user-specific key to prevent re-loading
+    if (attemptedDefaultLoadUserRef.current === currentUserId) return;
+    attemptedDefaultLoadUserRef.current = currentUserId;
+
     const userDefaultBankKey = `${DEFAULT_BANK_LOADED_KEY}_${currentUserId}`;
     const alreadyLoaded = getLocalStorageItemSafe(userDefaultBankKey);
-    
+
+    const lockKey = `${DEFAULT_BANK_LOADING_LOCK_KEY}_${currentUserId}`;
+    const existingLock = getLocalStorageItemSafe(lockKey);
+    const lockTs = Number(existingLock || 0);
+    if (existingLock && Number.isFinite(lockTs) && Date.now() - lockTs < 120000) {
+      console.log('Default bank load is already in progress for this user, skipping.');
+      return;
+    }
+
     const loadDefaultBank = async () => {
+      setLocalStorageItemSafe(lockKey, String(Date.now()));
       try {
-        console.log('📦 Loading default bank for user:', currentUserId);
-        
+        const hasNonEmptyDefault = banks.some(
+          (bank) => bank.name === 'Default Bank' && Array.isArray(bank.pads) && bank.pads.length > 0
+        );
+        if (hasNonEmptyDefault) {
+          setLocalStorageItemSafe(userDefaultBankKey, 'true');
+          return;
+        }
+
         // Find and delete empty "Default Bank" if it exists
-        const emptyDefaultBank = banks.find(b => 
-          b.name === 'Default Bank' && (!b.pads || b.pads.length === 0)
+        const emptyDefaultBank = banks.find(
+          (b) => b.name === 'Default Bank' && (!b.pads || b.pads.length === 0)
         );
         if (emptyDefaultBank) {
-          console.log('🗑️ Removing empty Default Bank before loading DEFAULT_BANK.bank');
-          setBanks(prev => prev.filter(b => b.id !== emptyDefaultBank.id));
+          setBanks((prev) => prev.filter((b) => b.id !== emptyDefaultBank.id));
           if (currentBankId === emptyDefaultBank.id) {
             setCurrentBankIdState(null);
           }
         }
-        
+
         const basePath = getDefaultBankPath();
-        console.log('🔍 Attempting to load from:', basePath);
-        
+
         // Try primary path
         let response = await fetch(basePath);
-        
+
         // If failed and Android, try relative path as fallback
         if (!response.ok && /Android/.test(navigator.userAgent) && basePath.startsWith('/')) {
-          console.log('⚠️ Absolute path failed, trying relative path...');
           response = await fetch('./assets/DEFAULT_BANK.bank');
         }
-        
+
         // If still failed and Electron, try absolute path as fallback
         if (!response.ok && window.navigator.userAgent.includes('Electron') && basePath.startsWith('./')) {
-          console.log('⚠️ Relative path failed, trying absolute path...');
           response = await fetch('/assets/DEFAULT_BANK.bank');
         }
-        
+
         if (!response.ok) {
           throw new Error(`Default bank file not found: ${response.status} ${response.statusText}`);
         }
-        
+
         const blob = await response.blob();
         if (blob.size === 0) {
           throw new Error('Default bank file is empty');
         }
-        
-        console.log('✅ Default bank file loaded:', blob.size, 'bytes');
+
         const file = new File([blob], 'DEFAULT_BANK.bank', { type: 'application/zip' });
-        
+
         // Import the bank
         const importedBank = await importBank(file);
         if (importedBank) {
           // Rename to "Default Bank" and set as current
           updateBank(importedBank.id, { name: 'Default Bank' });
           setCurrentBankIdState(importedBank.id);
-          // Mark as loaded for this specific user
           setLocalStorageItemSafe(userDefaultBankKey, 'true');
-          console.log('✅ Default bank loaded successfully for user:', currentUserId);
         } else {
           throw new Error('Import returned null');
         }
       } catch (error) {
-        console.warn('⚠️ Failed to load default bank:', error);
-        // Mark as loaded anyway to prevent repeated attempts
-        setLocalStorageItemSafe(userDefaultBankKey, 'true');
+        console.warn('Failed to load default bank:', error);
+      } finally {
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.removeItem(lockKey);
+          } catch {}
+        }
       }
     };
 
-    // Only load if not already loaded for this user
     if (!alreadyLoaded) {
-    loadDefaultBank();
-    } else {
-      console.log('📦 Default bank: Already loaded for this user, skipping');
+      loadDefaultBank();
     }
-  }, [user, importBank, updateBank, getDefaultBankPath, banks, currentBankId]);
+  }, [user?.id, importBank, updateBank, getDefaultBankPath, banks, currentBankId]);
+
 
   return {
     banks, primaryBankId, secondaryBankId, currentBankId, primaryBank, secondaryBank, currentBank, isDualMode,
