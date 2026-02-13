@@ -573,8 +573,8 @@ export function AboutDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="overlay">Overlay (Less lag)</SelectItem>
-                  <SelectItem value="reflow">Reflow (Resize pads)</SelectItem>
+                  <SelectItem value="overlay">Overlay</SelectItem>
+                  <SelectItem value="reflow">Reflow</SelectItem>
                 </SelectContent>
               </Select>
             </div>

@@ -442,17 +442,6 @@ export function VolumeMixer({
                   </div>
                 );
               })}
-
-              {channelStates.every((channel) => !channel.pad) && (
-                <div className="text-center py-6">
-                  <p className={theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}>
-                    No channels currently playing
-                  </p>
-                  <p className={`text-xs ${theme === 'dark' ? 'text-gray-500' : 'text-gray-500'}`}>
-                    Start playing some pads to see controls here
-                  </p>
-                </div>
-              )}
             </div>
           </div>
 
