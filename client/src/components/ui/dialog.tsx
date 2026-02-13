@@ -6,20 +6,31 @@ import { X } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 
-const Dialog = ({ open, onOpenChange, ...props }: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Root>) => {
+let historyDialogDepth = 0;
+
+type DialogProps = React.ComponentPropsWithoutRef<typeof DialogPrimitive.Root> & {
+  useHistory?: boolean;
+};
+
+const Dialog = ({ open, onOpenChange, useHistory = true, ...props }: DialogProps) => {
   const pushedStateRef = React.useRef(false);
   const closingFromAppRef = React.useRef(false);
+  const ownsHistoryRef = React.useRef(false);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (!useHistory) return;
 
     if (open) {
-      if (!pushedStateRef.current) {
+      if (!pushedStateRef.current && historyDialogDepth === 0) {
         window.history.pushState({ vdjvDialog: true }, '');
         pushedStateRef.current = true;
+        ownsHistoryRef.current = true;
       }
+      historyDialogDepth += 1;
 
       const handlePopState = () => {
+        if (!ownsHistoryRef.current) return;
         if (closingFromAppRef.current) {
           closingFromAppRef.current = false;
           return;
@@ -30,16 +41,24 @@ const Dialog = ({ open, onOpenChange, ...props }: React.ComponentPropsWithoutRef
         }
       };
 
-      window.addEventListener('popstate', handlePopState);
-      return () => window.removeEventListener('popstate', handlePopState);
+      if (ownsHistoryRef.current) {
+        window.addEventListener('popstate', handlePopState);
+      }
+      return () => {
+        historyDialogDepth = Math.max(0, historyDialogDepth - 1);
+        if (ownsHistoryRef.current) {
+          window.removeEventListener('popstate', handlePopState);
+        }
+      };
     }
 
-    if (pushedStateRef.current) {
+    if (pushedStateRef.current && ownsHistoryRef.current) {
       pushedStateRef.current = false;
       closingFromAppRef.current = true;
       window.history.back();
     }
-  }, [open, onOpenChange]);
+    ownsHistoryRef.current = false;
+  }, [open, onOpenChange, useHistory]);
 
   return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange} {...props} />;
 };

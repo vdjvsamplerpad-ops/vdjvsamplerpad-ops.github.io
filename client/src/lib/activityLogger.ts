@@ -313,6 +313,7 @@ const postJson = async (endpoint: string, payload: Record<string, unknown>) => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
     keepalive: !isEvent,
+    credentials: 'omit',
   })
   if (!resp.ok) {
     const text = await resp.text().catch(() => '')
@@ -434,6 +435,7 @@ export const logSignoutActivity = async (input: SignoutInput) => {
 
 export const sendActivityHeartbeat = async (input: HeartbeatInput) => {
   if (!isBrowser || !input.userId) return
+  if (!navigator.onLine) return
   ensureActivityRuntime()
   const device = await buildDevice()
   const payload = {
@@ -447,7 +449,15 @@ export const sendActivityHeartbeat = async (input: HeartbeatInput) => {
   try {
     await postJson(edgeFunctionUrl('activity-api', 'heartbeat'), payload)
   } catch (err) {
-    console.warn('Heartbeat failed:', err)
+    const message = String((err as any)?.message || err || '')
+    const transientNetworkError =
+      message.includes('Failed to fetch') ||
+      message.includes('NetworkError') ||
+      message.includes('Load failed') ||
+      message.includes('TypeError: Failed to fetch')
+    if (!transientNetworkError) {
+      console.warn('Heartbeat failed:', err)
+    }
   }
 }
 

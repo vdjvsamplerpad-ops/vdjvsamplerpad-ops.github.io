@@ -100,6 +100,33 @@ const writeActivityLog = async (payload: {
   if (error.code === "23505" || /duplicate key/i.test(error.message || "")) {
     return { deduped: true };
   }
+  if (error.code === "23503" || /activity_logs_user_id_fkey/i.test(error.message || "")) {
+    const retry = await admin
+      .from("activity_logs")
+      .insert({
+        request_id: payload.requestId,
+        event_type: payload.eventType,
+        status: payload.status,
+        user_id: null,
+        email: payload.email || null,
+        session_key: payload.sessionKey || null,
+        device_fingerprint: payload.device?.fingerprint || null,
+        device_name: payload.device?.name || null,
+        device_model: payload.device?.model || null,
+        platform: payload.device?.platform || null,
+        browser: payload.device?.browser || null,
+        os: payload.device?.os || null,
+        bank_id: payload.bankId || null,
+        bank_name: payload.bankName || null,
+        pad_count: payload.padCount ?? null,
+        error_message: payload.errorMessage || null,
+        meta: asObject(payload.meta),
+      })
+      .select("id")
+      .single();
+    if (!retry.error) return { deduped: false };
+    throw new Error(retry.error.message);
+  }
   throw new Error(error.message);
 };
 
@@ -153,7 +180,13 @@ const upsertActiveSession = async (payload: {
       { onConflict: "session_key" },
     );
 
-  if (fallback.error) throw new Error(fallback.error.message || rpc.error.message);
+  if (fallback.error) {
+    if (fallback.error.code === "23503" || /active_sessions_user_id_fkey/i.test(fallback.error.message || "")) {
+      console.warn("Skipping active session upsert due unknown user id");
+      return;
+    }
+    throw new Error(fallback.error.message || rpc.error.message);
+  }
 };
 
 const markSessionOffline = async (sessionKey: string, lastEvent = "auth.signout") => {
@@ -176,7 +209,7 @@ Deno.serve(async (req) => {
   if (cors) return cors;
 
   try {
-    if (req.method !== "POST") return json(405, { error: "Method not allowed" });
+    if (req.method !== "POST") return json(405, { error: "Method not allowed" }, req);
 
     const url = new URL(req.url);
     const route = url.pathname.split("/").pop() || "";
@@ -186,9 +219,9 @@ Deno.serve(async (req) => {
       const requestId = asUuid(body.requestId);
       const eventType = body.eventType;
       const status = body.status;
-      if (!requestId) return badRequest("Missing or invalid requestId");
-      if (!isEventType(eventType)) return badRequest("Invalid eventType");
-      if (!isStatus(status)) return badRequest("Invalid status");
+      if (!requestId) return badRequest("Missing or invalid requestId", req);
+      if (!isEventType(eventType)) return badRequest("Invalid eventType", req);
+      if (!isStatus(status)) return badRequest("Invalid status", req);
 
       const userId = asUuid(body.userId);
       const sessionKey = asUuid(body.sessionKey);
@@ -201,7 +234,7 @@ Deno.serve(async (req) => {
       const padNames = extractPadNames(body.padNames);
       const explicitPadCount = asNumber(body.padCount);
       const padCount = explicitPadCount ?? (padNames.length ? padNames.length : null);
-      if (userId && (await isAdminUser(userId))) return json(200, { ok: true, skippedAdmin: true });
+      if (userId && (await isAdminUser(userId))) return json(200, { ok: true, skippedAdmin: true }, req);
 
       const result = await writeActivityLog({
         requestId,
@@ -221,7 +254,7 @@ Deno.serve(async (req) => {
           includePadList: Boolean(meta.includePadList),
         },
       });
-      if (result.deduped) return json(200, { ok: true, deduped: true });
+      if (result.deduped) return json(200, { ok: true, deduped: true }, req);
 
       if (status === "success") {
         if (eventType === "auth.signout") {
@@ -274,15 +307,15 @@ Deno.serve(async (req) => {
         discordError = err instanceof Error ? err.message : "Discord fanout failed";
         console.warn("Discord fanout warning:", discordError);
       }
-      return json(200, { ok: true, discordError });
+      return json(200, { ok: true, discordError }, req);
     }
 
     if (route === "heartbeat") {
       const sessionKey = asUuid(body.sessionKey);
       const userId = asUuid(body.userId);
-      if (!sessionKey) return badRequest("Missing or invalid sessionKey");
-      if (!userId) return badRequest("Missing or invalid userId");
-      if (await isAdminUser(userId)) return json(200, { ok: true, skippedAdmin: true });
+      if (!sessionKey) return badRequest("Missing or invalid sessionKey", req);
+      if (!userId) return badRequest("Missing or invalid userId", req);
+      if (await isAdminUser(userId)) return json(200, { ok: true, skippedAdmin: true }, req);
 
       await upsertActiveSession({
         sessionKey,
@@ -293,7 +326,7 @@ Deno.serve(async (req) => {
         lastEvent: asString(body.lastEvent, 60) || "heartbeat",
         meta: asObject(body.meta),
       });
-      return json(200, { ok: true });
+      return json(200, { ok: true }, req);
     }
 
     if (route === "signout") {
@@ -301,9 +334,9 @@ Deno.serve(async (req) => {
       const sessionKey = asUuid(body.sessionKey);
       const userId = asUuid(body.userId);
       const status = isStatus(body.status) ? body.status : "success";
-      if (!requestId) return badRequest("Missing or invalid requestId");
-      if (!sessionKey) return badRequest("Missing or invalid sessionKey");
-      if (userId && (await isAdminUser(userId))) return json(200, { ok: true, skippedAdmin: true });
+      if (!requestId) return badRequest("Missing or invalid requestId", req);
+      if (!sessionKey) return badRequest("Missing or invalid sessionKey", req);
+      if (userId && (await isAdminUser(userId))) return json(200, { ok: true, skippedAdmin: true }, req);
 
       const result = await writeActivityLog({
         requestId,
@@ -337,12 +370,12 @@ Deno.serve(async (req) => {
         discordError = err instanceof Error ? err.message : "Discord fanout failed";
         console.warn("Discord fanout warning:", discordError);
       }
-      return json(200, { ok: true, deduped: result.deduped, discordError });
+      return json(200, { ok: true, deduped: result.deduped, discordError }, req);
     }
 
-    return json(404, { error: "Unknown activity route" });
+    return json(404, { error: "Unknown activity route" }, req);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    return json(500, { error: message });
+    return json(500, { error: message }, req);
   }
 });

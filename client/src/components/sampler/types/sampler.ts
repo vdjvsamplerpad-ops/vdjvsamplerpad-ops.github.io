@@ -46,12 +46,14 @@ export interface BankMetadata {
   bankId?: string; // UUID from database for admin banks
   title?: string; // Bank title from database
   description?: string; // Bank description from database
+  color?: string; // Optional bank color override
 }
 
 export interface AdminBank {
   id: string; // UUID from database
   title: string;
   description?: string;
+  color?: string;
   created_by: string;
   created_at: string;
   derived_key: string;

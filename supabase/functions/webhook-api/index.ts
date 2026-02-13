@@ -32,7 +32,7 @@ Deno.serve(async (req) => {
   const cors = handleCorsPreflight(req);
   if (cors) return cors;
 
-  if (req.method !== "POST") return json(405, { error: "Method not allowed" });
+  if (req.method !== "POST") return json(405, { error: "Method not allowed" }, req);
 
   try {
     const body = await req.json().catch(() => ({}));
@@ -41,7 +41,7 @@ Deno.serve(async (req) => {
     if (path.endsWith("/auth-event")) {
       const event = asString(body.event, 40);
       const email = asString(body.email, 320);
-      if (!event || !email) return json(400, { error: "Missing event or email" });
+      if (!event || !email) return json(400, { error: "Missing event or email" }, req);
 
       const mapped =
         event.toLowerCase() === "signup"
@@ -59,13 +59,13 @@ Deno.serve(async (req) => {
         errorMessage: asString(body.errorMessage, 2000),
         clientIp: parseClientIp(req),
       });
-      return json(200, { ok: true });
+      return json(200, { ok: true }, req);
     }
 
     if (path.endsWith("/export-bank")) {
       const parsed = parseDiscordWebhookPayload(body);
       if (!parsed.email || !parsed.bankName) {
-        return json(400, { error: "Missing email or bankName" });
+        return json(400, { error: "Missing email or bankName" }, req);
       }
       const padNames = parsed.padNames.length ? parsed.padNames : extractPadNames(body.padNames);
       await sendDiscordExportEvent({
@@ -76,13 +76,13 @@ Deno.serve(async (req) => {
         padNames,
         errorMessage: parsed.errorMessage,
       });
-      return json(200, { ok: true });
+      return json(200, { ok: true }, req);
     }
 
     if (path.endsWith("/import-bank")) {
       const parsed = parseDiscordWebhookPayload(body);
       if (!parsed.email || !parsed.bankName) {
-        return json(400, { error: "Missing email or bankName" });
+        return json(400, { error: "Missing email or bankName" }, req);
       }
       await sendDiscordImportEvent({
         webhook: Deno.env.get("DISCORD_WEBHOOK_IMPORT") || null,
@@ -93,13 +93,12 @@ Deno.serve(async (req) => {
         includePadList: parsed.includePadList,
         errorMessage: parsed.errorMessage,
       });
-      return json(200, { ok: true });
+      return json(200, { ok: true }, req);
     }
 
-    return json(404, { error: "Unknown webhook route" });
+    return json(404, { error: "Unknown webhook route" }, req);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    return json(500, { error: message });
+    return json(500, { error: message }, req);
   }
 });
-

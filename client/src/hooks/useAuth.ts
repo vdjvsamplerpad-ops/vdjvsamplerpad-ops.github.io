@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { supabase } from '@/lib/supabase'
 import type { User, AuthError, Session } from '@supabase/supabase-js'
-import { refreshAccessibleBanksCache } from '@/lib/bank-utils'
+import { clearUserBankCache, refreshAccessibleBanksCache } from '@/lib/bank-utils'
 import {
   ensureActivityRuntime,
   logSignoutActivity,
@@ -138,13 +138,17 @@ function isUserBanned(user: User | null): boolean {
 }
 
 export function useAuth(): AuthState & AuthActions {
+  const cachedBan = getCachedBan()
+  const cachedUser = cachedBan ? null : getCachedUser()
+  const cachedProfile = cachedBan ? null : getCachedProfile()
+
   const [state, setState] = React.useState<AuthState>({
-    user: null,
-    profile: null,
+    user: cachedUser,
+    profile: cachedProfile,
     loading: true,
     isPasswordRecovery: false,
     redirectError: null,
-    banned: getCachedBan(),
+    banned: cachedBan,
   })
   
   // Track which user we've already refreshed cache for
@@ -162,6 +166,7 @@ export function useAuth(): AuthState & AuthActions {
   const enforceBan = React.useCallback(async () => {
     cacheBanState(true)
     cacheUserData(null, null)
+    clearUserBankCache()
     cacheRefreshedForUserIdRef.current = null
     setState((s) => ({
       ...s,
@@ -275,6 +280,7 @@ export function useAuth(): AuthState & AuthActions {
         }
       } else {
         cacheUserData(null, null)
+        clearUserBankCache()
         cacheRefreshedForUserIdRef.current = null
         setState((s) => ({ ...s, user: null, profile: null, loading: false }))
       }
@@ -332,6 +338,15 @@ export function useAuth(): AuthState & AuthActions {
     }
   }, [state.user?.id, state.user?.email, state.banned])
 
+  React.useEffect(() => {
+    if (!state.user || state.banned) return
+    const onOnline = () => {
+      refreshAccessibleBanksCache(state.user!.id).catch(console.warn)
+    }
+    window.addEventListener('online', onOnline)
+    return () => window.removeEventListener('online', onOnline)
+  }, [state.user?.id, state.banned])
+
   const signIn = React.useCallback(async (email: string, password: string) => {
     const { data, error } = await supabase.auth.signInWithPassword({ email, password })
     if (isBanError(error)) {
@@ -357,6 +372,7 @@ export function useAuth(): AuthState & AuthActions {
     const { error } = await supabase.auth.signOut()
     // Clear cached user data on sign out
     cacheUserData(null, null)
+    clearUserBankCache(activeUser?.id)
     void logSignoutActivity({
       status: error ? 'failed' : 'success',
       userId: activeUser?.id || null,

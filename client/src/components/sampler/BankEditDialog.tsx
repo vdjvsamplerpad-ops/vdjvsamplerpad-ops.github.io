@@ -271,6 +271,7 @@ export function BankEditDialog({
   };
 
   const isAdmin = profile?.role === 'admin';
+  const showDatabaseDescription = Boolean(bank.bankMetadata?.bankId);
 
   const formatDate = (date: Date) => {
     return new Intl.DateTimeFormat('en-US', {
@@ -542,6 +543,13 @@ export function BankEditDialog({
                 ) : (
                   <span className="italic text-gray-400">Unknown</span>
                 )}</div>
+                {showDatabaseDescription && (
+                  <div>Description: {bank.bankMetadata?.description ? (
+                    <span>{bank.bankMetadata.description}</span>
+                  ) : (
+                    <span className="italic text-gray-400">No description</span>
+                  )}</div>
+                )}
               </div>
             </div>
 

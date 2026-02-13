@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
+import React from 'react';
 import { ThemeProvider } from '@/components/ui/theme-provider';
 
 // Mock global objects
@@ -127,13 +128,16 @@ Object.defineProperty(window, 'matchMedia', {
 });
 
 // Test utilities
-export const TestWrapper = ({ children }: { children: React.ReactNode }) => (
-  <BrowserRouter>
-    <ThemeProvider defaultTheme="light" storageKey="test-theme">
-      {children}
-    </ThemeProvider>
-  </BrowserRouter>
-);
+export const TestWrapper = ({ children }: { children: React.ReactNode }) =>
+  React.createElement(
+    BrowserRouter,
+    null,
+    React.createElement(
+      ThemeProvider,
+      { defaultTheme: 'light', storageKey: 'test-theme' },
+      children
+    )
+  );
 
 export const renderWithProviders = (ui: React.ReactElement) => {
   return render(ui, { wrapper: TestWrapper });

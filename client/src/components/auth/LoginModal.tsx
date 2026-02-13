@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAuth } from '@/hooks/useAuth'
 import { ensureActivityRuntime, logActivityEvent } from '@/lib/activityLogger'
+import { Eye, EyeOff } from 'lucide-react'
 
 interface LoginModalProps {
   open: boolean
@@ -43,6 +44,10 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
   const [loading, setLoading] = React.useState(false)
   const [resetCooldown, setResetCooldown] = React.useState<number>(0)
   const [allowLoginWhileBanned, setAllowLoginWhileBanned] = React.useState(false)
+  const [showPassword, setShowPassword] = React.useState(false)
+  const [showConfirmPassword, setShowConfirmPassword] = React.useState(false)
+  const [showResetPassword, setShowResetPassword] = React.useState(false)
+  const [showResetConfirmPassword, setShowResetConfirmPassword] = React.useState(false)
 
   const {
     signIn,
@@ -71,6 +76,10 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
       setConfirmPassword('')
       setMode('signin')
       setResetCooldown(0)
+      setShowPassword(false)
+      setShowConfirmPassword(false)
+      setShowResetPassword(false)
+      setShowResetConfirmPassword(false)
       if (banned) setAllowLoginWhileBanned(false)
       if (redirectError) clearRedirectError()
     }
@@ -380,49 +389,71 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
           <form onSubmit={handleResetPassword} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="newPassword" className={colorText}>New Password</Label>
-              <Input
-                id="newPassword"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter a new password"
-                required
-                disabled={loading}
-                minLength={8}
-                autoComplete="new-password"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck="false"
-                onFocus={(e) => {
-                  // Prevent immediate focus on mobile
-                  if (window.innerWidth <= 768) {
-                    setTimeout(() => e.target.focus(), 100);
-                  }
-                }}
-              />
+              <div className="relative">
+                <Input
+                  id="newPassword"
+                  type={showResetPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter a new password"
+                  required
+                  disabled={loading}
+                  minLength={8}
+                  autoComplete="new-password"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck="false"
+                  className="pr-10"
+                  onFocus={(e) => {
+                    // Prevent immediate focus on mobile
+                    if (window.innerWidth <= 768) {
+                      setTimeout(() => e.target.focus(), 100);
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-800"
+                  onClick={() => setShowResetPassword((v) => !v)}
+                  aria-label={showResetPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showResetPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="confirmNewPassword" className={colorText}>Confirm New Password</Label>
-              <Input
-                id="confirmNewPassword"
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="Confirm your new password"
-                required
-                disabled={loading}
-                minLength={8}
-                autoComplete="new-password"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck="false"
-                onFocus={(e) => {
-                  // Prevent immediate focus on mobile
-                  if (window.innerWidth <= 768) {
-                    setTimeout(() => e.target.focus(), 100);
-                  }
-                }}
-              />
+              <div className="relative">
+                <Input
+                  id="confirmNewPassword"
+                  type={showResetConfirmPassword ? 'text' : 'password'}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Confirm your new password"
+                  required
+                  disabled={loading}
+                  minLength={8}
+                  autoComplete="new-password"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck="false"
+                  className="pr-10"
+                  onFocus={(e) => {
+                    // Prevent immediate focus on mobile
+                    if (window.innerWidth <= 768) {
+                      setTimeout(() => e.target.focus(), 100);
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-800"
+                  onClick={() => setShowResetConfirmPassword((v) => !v)}
+                  aria-label={showResetConfirmPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showResetConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
             </div>
             <div className="space-y-2">
               <Button type="submit" className="w-full" disabled={loading || !password || !confirmPassword}>
@@ -547,44 +578,21 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
 
             <div className="space-y-2">
               <Label htmlFor="password" className={colorText}>Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your password"
-                required
-                disabled={loading}
-                minLength={6}
-                autoComplete="current-password"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck="false"
-                onFocus={(e) => {
-                  // Prevent immediate focus on mobile
-                  if (window.innerWidth <= 768) {
-                    setTimeout(() => e.target.focus(), 100);
-                  }
-                }}
-              />
-            </div>
-
-            {mode === 'signup' && (
-              <div className="space-y-2">
-                <Label htmlFor="confirmPassword" className={colorText}>Confirm Password</Label>
+              <div className="relative">
                 <Input
-                  id="confirmPassword"
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Confirm your password"
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter your password"
                   required
                   disabled={loading}
                   minLength={6}
-                  autoComplete="new-password"
+                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
                   autoCorrect="off"
                   autoCapitalize="off"
                   spellCheck="false"
+                  className="pr-10"
                   onFocus={(e) => {
                     // Prevent immediate focus on mobile
                     if (window.innerWidth <= 768) {
@@ -592,6 +600,51 @@ export function LoginModal({ open, onOpenChange, theme = 'light', appReturnUrl, 
                     }
                   }}
                 />
+                <button
+                  type="button"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-800"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            {mode === 'signup' && (
+              <div className="space-y-2">
+                <Label htmlFor="confirmPassword" className={colorText}>Confirm Password</Label>
+                <div className="relative">
+                  <Input
+                    id="confirmPassword"
+                    type={showConfirmPassword ? 'text' : 'password'}
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Confirm your password"
+                    required
+                    disabled={loading}
+                    minLength={6}
+                    autoComplete="new-password"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck="false"
+                    className="pr-10"
+                    onFocus={(e) => {
+                      // Prevent immediate focus on mobile
+                      if (window.innerWidth <= 768) {
+                        setTimeout(() => e.target.focus(), 100);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-800"
+                    onClick={() => setShowConfirmPassword((v) => !v)}
+                    aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
             )}
 

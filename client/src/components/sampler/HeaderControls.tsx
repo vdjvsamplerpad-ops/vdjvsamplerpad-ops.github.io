@@ -454,7 +454,7 @@ export function HeaderControls({
           </Button>
 
           {/* Login Button (only shown when not logged in) */}
-          {!user && (
+          {!loading && !user && (
             <Button
               onClick={() => setShowLoginModal(true)}
               variant="outline"

@@ -11,11 +11,12 @@ import {
   createAdminBankWithDerivedKey, 
   addBankMetadata, 
   extractBankMetadata,
-  clearKeyCache,
   hasBankAccess,
   keyCache,
   parseBankIdFromFileName,
-  listAccessibleBankIds 
+  listAccessibleBankIds,
+  getCachedBankKeysForUser,
+  resolveAdminBankMetadata
 } from '@/lib/bank-utils';
 import { useAuth, getCachedUser } from '@/hooks/useAuth';
 import { ensureActivityRuntime, logActivityEvent } from '@/lib/activityLogger';
@@ -1116,8 +1117,15 @@ export function useSamplerStore(): SamplerStore {
             throw new Error('Login required to import encrypted banks. Please sign in and try again.');
           }
           
-            // Try cached keys
-          for (const [, derivedKey] of keyCache.entries()) {
+            // Try cached keys for the current user only
+          const userKeyPrefix = `${effectiveUser.id}-`;
+          const memoryKeys = Array.from(keyCache.entries())
+            .filter(([cacheKey]) => cacheKey.startsWith(userKeyPrefix))
+            .map(([, derivedKey]) => derivedKey);
+          const localKeys = Object.values(getCachedBankKeysForUser(effectiveUser.id));
+          const candidateKeys = Array.from(new Set([...memoryKeys, ...localKeys]));
+
+          for (const derivedKey of candidateKeys) {
             try { 
               const headerMatch = await withTimeout(
                 isZipPasswordMatch(file, derivedKey),
@@ -1135,7 +1143,7 @@ export function useSamplerStore(): SamplerStore {
               lastError = e instanceof Error ? e : new Error(String(e));
               console.warn('Decryption attempt failed with cached key:', e);
             }
-        }
+          }
           
           // Try hinted ID from filename
         if (!decrypted) {
@@ -1246,15 +1254,23 @@ export function useSamplerStore(): SamplerStore {
       throw new Error('This bank is already imported.');
     }
       
-      const metadata = await extractBankMetadata(contents);
-      includePadList = !(metadata?.password === true || !!metadata?.bankId);
+      let metadata = await extractBankMetadata(contents);
+      const metadataBankId = metadata?.bankId || parseBankIdFromFileName(file.name) || undefined;
+      if (metadataBankId && !metadata?.bankId) {
+        metadata = {
+          ...(metadata || {}),
+          bankId: metadataBankId,
+        };
+      }
+
+      includePadList = !(metadata?.password === true || !!metadataBankId);
     if (
-      metadata?.bankId &&
+      metadataBankId &&
       banks.some(
         (bank) =>
-          bank.bankMetadata?.bankId === metadata.bankId ||
-          bank.sourceBankId === metadata.bankId ||
-          bank.id === metadata.bankId
+          bank.bankMetadata?.bankId === metadataBankId ||
+          bank.sourceBankId === metadataBankId ||
+          bank.id === metadataBankId
       )
     ) {
       throw new Error('This bank has already been imported.');
@@ -1264,11 +1280,35 @@ export function useSamplerStore(): SamplerStore {
       // LOGIC FIX: 'transferable' should come from metadata explicitly, independent of admin/encryption status
       const isTransferable = metadata?.transferable ?? true;
 
+      let resolvedBankName = bankData.name;
+      let resolvedBankColor = typeof bankData.defaultColor === 'string' ? bankData.defaultColor : '#3b82f6';
+      if (metadataBankId) {
+        const resolvedMetadata = await resolveAdminBankMetadata(metadataBankId);
+        if (resolvedMetadata) {
+          resolvedBankName = resolvedMetadata.title;
+          metadata = {
+            ...(metadata || {}),
+            bankId: metadataBankId,
+            title: resolvedMetadata.title,
+            description: resolvedMetadata.description,
+            color: resolvedMetadata.color || metadata?.color,
+          };
+          importBankName = resolvedMetadata.title;
+          if (resolvedMetadata.color) {
+            resolvedBankColor = resolvedMetadata.color;
+          }
+        } else if (metadata?.color) {
+          resolvedBankColor = metadata.color;
+        }
+      } else if (metadata?.color) {
+        resolvedBankColor = metadata.color;
+      }
+
       // Use cached user for admin bank access checks (same effectiveUser from above)
       const userForAccess = user || getCachedUser();
       if (isAdminBank && !userForAccess) throw new Error('Login required');
-      if (isAdminBank && userForAccess && metadata?.bankId) {
-        if (!await hasBankAccess(userForAccess.id, metadata.bankId)) throw new Error('Access denied');
+      if (isAdminBank && userForAccess && metadataBankId) {
+        if (!await hasBankAccess(userForAccess.id, metadataBankId)) throw new Error('Access denied');
       }
 
       onProgress && onProgress(30);
@@ -1277,11 +1317,12 @@ export function useSamplerStore(): SamplerStore {
       const newBank: SamplerBank = {
         ...bankData,
         id: generateId(),
-        name: bankData.name,
+        name: resolvedBankName,
+        defaultColor: resolvedBankColor,
         createdAt: bankData.createdAt ? new Date(bankData.createdAt) : new Date(),
         sortOrder: maxSortOrder + 1,
         pads: [],
-        sourceBankId: metadata?.bankId || bankData.id,
+        sourceBankId: metadataBankId || bankData.id,
         isAdminBank,
         transferable: isTransferable, // Set explicit flag
         exportable: metadata?.exportable ?? true,
@@ -1550,13 +1591,13 @@ export function useSamplerStore(): SamplerStore {
       onProgress && onProgress(50);
       
       if (addToDatabase) {
-        const adminBank = await createAdminBankWithDerivedKey(title, description, user.id);
+        const adminBank = await createAdminBankWithDerivedKey(title, description, user.id, bank.defaultColor);
         if (!adminBank) throw new Error('DB creation failed');
         const bankId = adminBank.id;
         const derivedKey = adminBank.derived_key;
         
         // When Add to Database is enabled, export is automatically blocked (exportable: false)
-        addBankMetadata(zip, { password: true, transferable, exportable: false, title, description, bankId });
+        addBankMetadata(zip, { password: true, transferable, exportable: false, title, description, color: bank.defaultColor, bankId });
         
         onProgress && onProgress(60);
         
@@ -1576,7 +1617,7 @@ export function useSamplerStore(): SamplerStore {
         return saveResult.message || 'Bank exported successfully';
       } else {
         // When Add to Database is disabled, use allowExport value to control export permission
-        addBankMetadata(zip, { password: !allowExport, transferable, exportable: allowExport, title, description });
+        addBankMetadata(zip, { password: !allowExport, transferable, exportable: allowExport, title, description, color: bank.defaultColor });
         
         onProgress && onProgress(60);
         
