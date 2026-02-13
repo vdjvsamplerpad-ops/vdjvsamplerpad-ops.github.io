@@ -1,3 +1,5 @@
+import { edgeFunctionUrl } from '@/lib/edge-api'
+
 export type ActivityEventType =
   | 'auth.login'
   | 'auth.signup'
@@ -18,7 +20,7 @@ type ActivityDevice = {
 }
 
 type ActivityQueueItem = {
-  endpoint: '/api/activity/event' | '/api/activity/signout'
+  endpoint: 'event' | 'signout'
   payload: Record<string, unknown>
 }
 
@@ -97,8 +99,24 @@ const getSessionKey = (): string => {
 
 const readQueue = (): ActivityQueueItem[] => {
   if (!isBrowser) return []
-  const parsed = safeJsonParse<ActivityQueueItem[]>(localStorage.getItem(ACTIVITY_QUEUE_KEY), [])
-  return Array.isArray(parsed) ? parsed : []
+  const parsed = safeJsonParse<any[]>(localStorage.getItem(ACTIVITY_QUEUE_KEY), [])
+  if (!Array.isArray(parsed)) return []
+  const normalized: ActivityQueueItem[] = []
+  for (const item of parsed) {
+    const endpointRaw = String(item?.endpoint || '')
+    const endpoint =
+      endpointRaw === 'event' || endpointRaw === '/api/activity/event'
+        ? 'event'
+        : endpointRaw === 'signout' || endpointRaw === '/api/activity/signout'
+          ? 'signout'
+          : null
+    if (!endpoint) continue
+    normalized.push({
+      endpoint,
+      payload: item?.payload && typeof item.payload === 'object' ? item.payload : {},
+    })
+  }
+  return normalized
 }
 
 const writeQueue = (queue: ActivityQueueItem[]) => {
@@ -289,11 +307,12 @@ const buildDevice = async (): Promise<ActivityDevice> => {
 }
 
 const postJson = async (endpoint: string, payload: Record<string, unknown>) => {
+  const isEvent = endpoint.endsWith('/event')
   const resp = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-    keepalive: endpoint !== '/api/activity/event',
+    keepalive: !isEvent,
   })
   if (!resp.ok) {
     const text = await resp.text().catch(() => '')
@@ -310,7 +329,7 @@ export const flushActivityQueue = async () => {
     const remaining: ActivityQueueItem[] = []
     for (const item of queue) {
       try {
-        await postJson(item.endpoint, item.payload)
+        await postJson(edgeFunctionUrl('activity-api', item.endpoint), item.payload)
       } catch (err: any) {
         const message = String(err?.message || '')
         const retriable =
@@ -332,7 +351,7 @@ export const flushActivityQueue = async () => {
 }
 
 const sendOrQueue = async (
-  endpoint: '/api/activity/event' | '/api/activity/signout',
+  endpoint: 'event' | 'signout',
   payload: Record<string, unknown>
 ) => {
   if (!isBrowser) return
@@ -341,7 +360,7 @@ const sendOrQueue = async (
     return
   }
   try {
-    await postJson(endpoint, payload)
+    await postJson(edgeFunctionUrl('activity-api', endpoint), payload)
   } catch (err: any) {
     const message = String(err?.message || '')
     const retriable =
@@ -397,7 +416,7 @@ const buildEventPayload = async (
 export const logActivityEvent = async (input: ActivityEventInput) => {
   ensureActivityRuntime()
   const payload = await buildEventPayload(input)
-  await sendOrQueue('/api/activity/event', payload)
+  await sendOrQueue('event', payload)
 }
 
 export const logSignoutActivity = async (input: SignoutInput) => {
@@ -410,7 +429,7 @@ export const logSignoutActivity = async (input: SignoutInput) => {
     errorMessage: input.errorMessage,
     meta: input.meta,
   })
-  await sendOrQueue('/api/activity/signout', payload)
+  await sendOrQueue('signout', payload)
 }
 
 export const sendActivityHeartbeat = async (input: HeartbeatInput) => {
@@ -426,7 +445,7 @@ export const sendActivityHeartbeat = async (input: HeartbeatInput) => {
     meta: input.meta || {},
   }
   try {
-    await postJson('/api/activity/heartbeat', payload)
+    await postJson(edgeFunctionUrl('activity-api', 'heartbeat'), payload)
   } catch (err) {
     console.warn('Heartbeat failed:', err)
   }
@@ -449,6 +468,5 @@ export const sendHeartbeatBeacon = (input: {
     meta: input.meta || {},
   }
   const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
-  return navigator.sendBeacon('/api/activity/heartbeat', blob)
+  return navigator.sendBeacon(edgeFunctionUrl('activity-api', 'heartbeat'), blob)
 }
-

@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { supabase } from '@/lib/supabase';
+import { edgeFunctionUrl, getAuthHeaders } from '@/lib/edge-api';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { Plus, RefreshCw, Shield, Trash2, UserPlus } from 'lucide-react';
 
@@ -88,6 +89,33 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
   const [activeLoading, setActiveLoading] = React.useState(false);
   const [activeError, setActiveError] = React.useState('');
 
+  const callAdminGet = React.useCallback(async (route: string) => {
+    const authHeaders = await getAuthHeaders(true);
+    const resp = await fetch(edgeFunctionUrl('admin-api', route), {
+      method: 'GET',
+      headers: authHeaders,
+      cache: 'no-store',
+    });
+    const payload = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(payload?.error || 'Request failed');
+    return payload;
+  }, []);
+
+  const callAdminPost = React.useCallback(async (route: string, body?: any) => {
+    const authHeaders = await getAuthHeaders(true);
+    const resp = await fetch(edgeFunctionUrl('admin-api', route), {
+      method: 'POST',
+      headers: {
+        ...authHeaders,
+        'Content-Type': 'application/json',
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const payload = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(payload?.error || 'Action failed');
+    return payload;
+  }, []);
+
   const loadBanks = React.useCallback(async () => {
     const { data, error } = await supabase.from('banks').select('id, title, created_at').order('created_at', { ascending: false });
     if (!error && data) setBanks(data as any);
@@ -103,8 +131,7 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
       if (baseErr || !base) { setProfiles([]); return; }
 
       // Enrich with auth-admin data via our backend
-      const resp = await fetch(`/api/admin/users?perPage=1000`);
-      const payload = await resp.json();
+      const payload = await callAdminGet('users?perPage=1000');
       const users: Array<{ id: string; email?: string; created_at?: string; last_sign_in_at?: string; display_name?: string; banned_until?: string; }> = payload?.users || [];
       const userMap = new Map(users.map((u) => [u.id, u]));
 
@@ -126,7 +153,7 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
       const { data } = await supabase.from('profiles').select('id, display_name, role').order('display_name');
       setProfiles((data as any) || []);
     }
-  }, []);
+  }, [callAdminGet]);
 
   const loadAccess = React.useCallback(async (bankId: string) => {
     if (!bankId) { setAccess([]); return; }
@@ -139,8 +166,7 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
     if (error || !data) { setAccess([]); return; }
 
     // Enrich with user meta from admin API
-    const resp = await fetch(`/api/admin/users?perPage=1000`);
-    const payload = await resp.json();
+    const payload = await callAdminGet('users?perPage=1000');
     const users: Array<{ id: string; email?: string; created_at?: string; last_sign_in_at?: string; display_name?: string; banned_until?: string; }> = payload?.users || [];
     const userMap = new Map(users.map((u) => [u.id, u]));
 
@@ -166,15 +192,13 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
       return { ...r, profile } as AccessRow;
     });
     setAccess(rows);
-  }, []);
+  }, [callAdminGet]);
 
   const loadActiveSessions = React.useCallback(async () => {
     setActiveLoading(true);
     try {
       const search = `?limit=300&t=${Date.now()}`;
-      const resp = await fetch(`/api/admin/active-sessions${search}`, { cache: 'no-store' });
-      const payload = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(payload?.error || 'Failed to load active sessions');
+      const payload = await callAdminGet(`active-sessions${search}`);
       setActiveCounts({
         activeUsers: Number(payload?.counts?.activeUsers || 0),
         activeSessions: Number(payload?.counts?.activeSessions || 0),
@@ -188,7 +212,7 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
     } finally {
       setActiveLoading(false);
     }
-  }, []);
+  }, [callAdminGet]);
 
   React.useEffect(() => {
     if (open) {
@@ -251,22 +275,9 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
   };
 
   // Admin actions via server
-  const callAdmin = async (path: string, body?: any) => {
-    const res = await fetch(path, { 
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: body ? JSON.stringify(body) : undefined
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(json?.error || 'Action failed');
-    return json;
-  };
-
   const handleDeleteUser = async () => {
     if (!detailsUser) return;
-    await callAdmin(`/api/admin/users/${detailsUser.id}/delete`);
+    await callAdminPost(`users/${detailsUser.id}/delete`);
     setActionInfo('User deleted.');
     setDetailsOpen(false);
     // Use setTimeout to avoid setState during render
@@ -278,7 +289,7 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
 
   const handleBanUser = async () => {
     if (!detailsUser) return;
-    await callAdmin(`/api/admin/users/${detailsUser.id}/ban`, { hours: banHours });
+    await callAdminPost(`users/${detailsUser.id}/ban`, { hours: banHours });
     setActionInfo(`User banned for ${banHours} hours.`);
     // Refresh the user data to update ban status
     setTimeout(() => {
@@ -289,13 +300,13 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
 
   const handleResetPassword = async () => {
     if (!detailsUser) return;
-    await callAdmin(`/api/admin/users/${detailsUser.id}/reset-password`);
+    await callAdminPost(`users/${detailsUser.id}/reset-password`);
     setActionInfo('Password reset email sent.');
   };
 
   const handleUnbanUser = async () => {
     if (!detailsUser) return;
-    await callAdmin(`/api/admin/users/${detailsUser.id}/unban`);
+    await callAdminPost(`users/${detailsUser.id}/unban`);
     setActionInfo('User unbanned.');
     // Refresh the user data to update ban status
     setTimeout(() => {
@@ -318,7 +329,7 @@ export function AdminAccessDialog({ open, onOpenChange, theme }: AdminAccessDial
     setCreateUserLoading(true);
     setError('');
     try {
-      await callAdmin('/api/admin/users/create', {
+      await callAdminPost('users/create', {
         email,
         password: createPassword,
         displayName: createDisplayName.trim(),

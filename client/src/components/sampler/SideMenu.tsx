@@ -621,7 +621,7 @@ export function SideMenu({
   return (
     <>
       <div
-        className={`fixed inset-y-0 left-0 z-50 w-64 border-r transition-all duration-200 ${theme === 'dark'
+        className={`fixed inset-y-0 left-0 z-50 w-64 border-r transition-transform duration-200 will-change-transform ${theme === 'dark'
           ? 'bg-gray-800 border-gray-700'
           : 'bg-white border-gray-200'
           } ${open ? 'translate-x-0' : '-translate-x-full'}`}

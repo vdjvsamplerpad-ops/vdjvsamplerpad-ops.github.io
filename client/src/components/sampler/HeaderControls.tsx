@@ -54,6 +54,8 @@ interface HeaderControlsProps {
   midiNoteAssignments: Array<{ note: number; type: 'pad' | 'bank'; bankName: string; padName?: string }>;
   hideShortcutLabels: boolean;
   onToggleHideShortcutLabels: (hide: boolean) => void;
+  sidePanelMode: 'overlay' | 'reflow';
+  onChangeSidePanelMode: (mode: 'overlay' | 'reflow') => void;
   onResetAllSystemMappings: () => void;
   onClearAllSystemMappings: () => void;
   onResetAllChannelMappings: () => void;
@@ -183,6 +185,8 @@ export function HeaderControls({
   midiNoteAssignments,
   hideShortcutLabels,
   onToggleHideShortcutLabels,
+  sidePanelMode,
+  onChangeSidePanelMode,
   onResetAllSystemMappings,
   onClearAllSystemMappings,
   onResetAllChannelMappings,
@@ -519,6 +523,8 @@ export function HeaderControls({
         midiNoteAssignments={midiNoteAssignments}
         hideShortcutLabels={hideShortcutLabels}
         onToggleHideShortcutLabels={onToggleHideShortcutLabels}
+        sidePanelMode={sidePanelMode}
+        onChangeSidePanelMode={onChangeSidePanelMode}
         onResetAllSystemMappings={onResetAllSystemMappings}
         onClearAllSystemMappings={onClearAllSystemMappings}
         onResetAllChannelMappings={onResetAllChannelMappings}

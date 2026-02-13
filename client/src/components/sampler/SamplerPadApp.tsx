@@ -25,9 +25,11 @@ interface AppSettings {
   stopMode: StopMode;
   sideMenuOpen: boolean;
   mixerOpen: boolean;
+  sidePanelMode: 'overlay' | 'reflow';
   editMode: boolean;
   padSize: number;
   hideShortcutLabels: boolean;
+  midiEnabled: boolean;
   midiDeviceProfileId: string | null;
   systemMappings: SystemMappings;
 }
@@ -103,9 +105,11 @@ const defaultSettings: AppSettings = {
   stopMode: 'brake',
   sideMenuOpen: false,
   mixerOpen: false,
+  sidePanelMode: 'overlay',
   editMode: false,
   padSize: 5,
-  hideShortcutLabels: false,
+  hideShortcutLabels: true,
+  midiEnabled: true,
   midiDeviceProfileId: null,
   systemMappings: DEFAULT_SYSTEM_MAPPINGS
 };
@@ -205,10 +209,17 @@ export function SamplerPadApp() {
   }, [settings]);
 
   React.useEffect(() => {
+    if (!settings.midiEnabled) return;
     if (midi.enabled && !midi.accessGranted) {
       midi.requestAccess();
     }
-  }, [midi.enabled, midi.accessGranted, midi.requestAccess]);
+  }, [settings.midiEnabled, midi.enabled, midi.accessGranted, midi.requestAccess]);
+
+  React.useEffect(() => {
+    if (midi.enabled !== settings.midiEnabled) {
+      midi.setEnabled(settings.midiEnabled);
+    }
+  }, [midi, settings.midiEnabled]);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -268,6 +279,7 @@ export function SamplerPadApp() {
   }, [playbackManager]);
 
   const handleToggleMidiEnabled = React.useCallback((enabled: boolean) => {
+    updateSetting('midiEnabled', enabled);
     midi.setEnabled(enabled);
     if (enabled) {
       if (!midi.accessGranted) {
@@ -276,7 +288,7 @@ export function SamplerPadApp() {
     } else {
       midi.setSelectedInputId(null);
     }
-  }, [midi]);
+  }, [midi, updateSetting]);
 
   const isMac = React.useMemo(
     () => typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.userAgent),
@@ -2075,24 +2087,21 @@ export function SamplerPadApp() {
     return isDualMode ? Math.max(1, Math.floor(finalSize / 2)) : finalSize;
   }, [settings.padSize, windowWidth, isDualMode]);
 
+  // Overlay mode keeps width stable to minimize reflow.
+  // Reflow mode shifts content on desktop only.
   const getMainContentMargin = React.useMemo(() => {
     const isMobile = windowWidth < 768;
-
-    if (settings.sideMenuOpen && !settings.mixerOpen) {
-      return isMobile ? 'ml-0' : 'ml-64';
-    } else if (!settings.sideMenuOpen && settings.mixerOpen) {
-      return isMobile ? 'mr-0' : 'mr-64';
-    } else if (settings.sideMenuOpen && settings.mixerOpen) {
-      return isMobile ? 'mx-0' : 'mx-64';
-    } else {
-      return 'mx-0';
-    }
-  }, [settings.sideMenuOpen, settings.mixerOpen, windowWidth]);
+    if (isMobile || settings.sidePanelMode === 'overlay') return 'mx-0';
+    if (settings.sideMenuOpen && !settings.mixerOpen) return 'ml-64';
+    if (!settings.sideMenuOpen && settings.mixerOpen) return 'mr-64';
+    if (settings.sideMenuOpen && settings.mixerOpen) return 'mx-64';
+    return 'mx-0';
+  }, [windowWidth, settings.sidePanelMode, settings.sideMenuOpen, settings.mixerOpen]);
 
   const getMainContentPadding = React.useMemo(() => {
     const isMobile = windowWidth < 768;
-    return isMobile ? (settings.sideMenuOpen || settings.mixerOpen ? 'px-0' : 'px-1') : 'px-2';
-  }, [settings.sideMenuOpen, settings.mixerOpen, windowWidth]);
+    return isMobile ? 'px-1' : 'px-2';
+  }, [windowWidth]);
 
   const handleErrorClose = () => {
     setShowErrorDialog(false);
@@ -2164,7 +2173,7 @@ export function SamplerPadApp() {
         onTransferPad={handleTransferPad}
         canTransferFromBank={canTransferFromBank}
         onExportAdmin={exportAdminBank}
-        midiEnabled={midi.accessGranted}
+        midiEnabled={midi.enabled && midi.accessGranted}
         blockedShortcutKeys={blockedShortcutKeys}
         blockedMidiNotes={blockedMidiNotes}
         blockedMidiCCs={blockedMidiCCs}
@@ -2191,7 +2200,7 @@ export function SamplerPadApp() {
         />
       )}
 
-      <div className={`flex-1 min-h-0 transition-all duration-300 ${getMainContentMargin} ${getMainContentPadding}`}>
+      <div className={`flex-1 min-h-0 ${getMainContentMargin} ${getMainContentPadding}`}>
         <div className="max-w-full mx-auto py-2 relative z-10 h-full min-h-0 flex flex-col">
           <HeaderControls
             primaryBank={displayPrimary}
@@ -2236,6 +2245,8 @@ export function SamplerPadApp() {
             midiNoteAssignments={midiNoteAssignments}
             hideShortcutLabels={settings.hideShortcutLabels}
             onToggleHideShortcutLabels={handleToggleHideShortcutLabels}
+            sidePanelMode={settings.sidePanelMode}
+            onChangeSidePanelMode={(mode) => updateSetting('sidePanelMode', mode)}
             onResetAllSystemMappings={handleResetAllSystemMappings}
             onClearAllSystemMappings={handleClearAllSystemMappings}
             onResetAllChannelMappings={handleResetAllChannelMappings}

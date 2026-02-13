@@ -58,6 +58,8 @@ interface AboutDialogProps {
   midiNoteAssignments: Array<{ note: number; type: 'pad' | 'bank'; bankName: string; padName?: string }>;
   hideShortcutLabels: boolean;
   onToggleHideShortcutLabels: (hide: boolean) => void;
+  sidePanelMode: 'overlay' | 'reflow';
+  onChangeSidePanelMode: (mode: 'overlay' | 'reflow') => void;
   onResetAllSystemMappings: () => void;
   onClearAllSystemMappings: () => void;
   onResetAllChannelMappings: () => void;
@@ -98,6 +100,8 @@ export function AboutDialog({
   midiNoteAssignments,
   hideShortcutLabels,
   onToggleHideShortcutLabels,
+  sidePanelMode,
+  onChangeSidePanelMode,
   onResetAllSystemMappings,
   onClearAllSystemMappings,
   onResetAllChannelMappings,
@@ -558,6 +562,21 @@ export function AboutDialog({
             <div className="flex items-center justify-between gap-3">
               <Label className="text-xs">Hide keyboard shortcut text on pads</Label>
               <Switch checked={hideShortcutLabels} onCheckedChange={onToggleHideShortcutLabels} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Side Panel Behavior</Label>
+              <Select
+                value={sidePanelMode}
+                onValueChange={(value) => onChangeSidePanelMode(value as 'overlay' | 'reflow')}
+              >
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="overlay">Overlay (Less lag)</SelectItem>
+                  <SelectItem value="reflow">Reflow (Resize pads)</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div className="rounded-lg border p-3 space-y-3">

@@ -216,7 +216,7 @@ export function VolumeMixer({
       {/* Slide-down notifications */}
       <NoticesPortal notices={notices} dismiss={dismiss} theme={theme} />
 
-      <div className={`fixed inset-y-0 right-0 z-50 w-64 border-l transition-all duration-300 ${theme === 'dark'
+      <div className={`fixed inset-y-0 right-0 z-50 w-64 border-l transition-transform duration-300 will-change-transform ${theme === 'dark'
         ? 'bg-gray-800 border-gray-700'
         : 'bg-white border-gray-200'
         } ${open ? 'translate-x-0' : 'translate-x-full'}`}>
