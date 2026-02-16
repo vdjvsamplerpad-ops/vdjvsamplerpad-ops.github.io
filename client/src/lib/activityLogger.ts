@@ -1,4 +1,4 @@
-import { edgeFunctionUrl } from '@/lib/edge-api'
+import { edgeFunctionUrl, getAuthHeaders } from '@/lib/edge-api'
 
 export type ActivityEventType =
   | 'auth.login'
@@ -63,6 +63,9 @@ let runtimeStarted = false
 let isFlushing = false
 let cachedDevice: ActivityDevice | null = null
 let devicePromise: Promise<ActivityDevice> | null = null
+
+const hasAuthorizationHeader = (headers: Record<string, string> | null | undefined): boolean =>
+  Boolean(headers?.Authorization)
 
 const safeJsonParse = <T>(raw: string | null, fallback: T): T => {
   if (!raw) return fallback
@@ -320,11 +323,19 @@ const buildDevice = async (): Promise<ActivityDevice> => {
   return devicePromise
 }
 
-const postJson = async (endpoint: string, payload: Record<string, unknown>) => {
+const postJson = async (
+  endpoint: string,
+  payload: Record<string, unknown>,
+  authHeaders?: Record<string, string>
+) => {
   const isEvent = endpoint.endsWith('/event')
+  const headers = authHeaders ?? (await getAuthHeaders(false))
   const resp = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
     body: JSON.stringify(payload),
     keepalive: !isEvent,
     credentials: 'omit',
@@ -360,15 +371,21 @@ export const flushActivityQueue = async () => {
   if (!queue.length) return
   isFlushing = true
   try {
+    const authHeaders = await getAuthHeaders(false)
+    if (!hasAuthorizationHeader(authHeaders)) {
+      return
+    }
     const remaining: ActivityQueueItem[] = []
     for (const item of queue) {
       try {
-        await postJson(edgeFunctionUrl('activity-api', item.endpoint), item.payload)
+        await postJson(edgeFunctionUrl('activity-api', item.endpoint), item.payload, authHeaders)
       } catch (err: any) {
         const message = String(err?.message || '')
         const retriable =
           message.includes('HTTP 5') ||
           message.includes('HTTP 429') ||
+          message.includes('HTTP 401') ||
+          message.includes('Not authenticated') ||
           message.includes('Failed to fetch') ||
           message.includes('NetworkError')
         if (retriable) {
@@ -389,17 +406,27 @@ const sendOrQueue = async (
   payload: Record<string, unknown>
 ) => {
   if (!isBrowser) return
+  const authHeaders = await getAuthHeaders(false)
+  if (!hasAuthorizationHeader(authHeaders)) {
+    const userId = typeof payload.userId === 'string' ? payload.userId : ''
+    if (userId) {
+      enqueue({ endpoint, payload })
+    }
+    return
+  }
   if (!navigator.onLine) {
     enqueue({ endpoint, payload })
     return
   }
   try {
-    await postJson(edgeFunctionUrl('activity-api', endpoint), payload)
+    await postJson(edgeFunctionUrl('activity-api', endpoint), payload, authHeaders)
   } catch (err: any) {
     const message = String(err?.message || '')
     const retriable =
       message.includes('HTTP 5') ||
       message.includes('HTTP 429') ||
+      message.includes('HTTP 401') ||
+      message.includes('Not authenticated') ||
       message.includes('Failed to fetch') ||
       message.includes('NetworkError')
     if (retriable) {
@@ -471,6 +498,8 @@ export const sendActivityHeartbeat = async (input: HeartbeatInput) => {
   if (!isBrowser || !input.userId) return
   if (!navigator.onLine) return
   ensureActivityRuntime()
+  const authHeaders = await getAuthHeaders(false)
+  if (!hasAuthorizationHeader(authHeaders)) return
   const device = await buildDevice()
   const payload = {
     sessionKey: getSessionKey(),
@@ -481,28 +510,18 @@ export const sendActivityHeartbeat = async (input: HeartbeatInput) => {
     lastEvent: input.lastEvent || 'heartbeat',
     meta: input.meta || {},
   }
-  await postJson(edgeFunctionUrl('activity-api', 'heartbeat'), payload)
+  await postJson(edgeFunctionUrl('activity-api', 'heartbeat'), payload, authHeaders)
 }
 
-export const sendHeartbeatBeacon = (input: {
+export const sendHeartbeatBeacon = (_input: {
   userId?: string | null
   email?: string | null
   lastEvent?: string
   meta?: Record<string, unknown>
 }): boolean => {
-  if (!isBrowser || !navigator.sendBeacon || !input.userId) return false
-  const device = cachedDevice || buildMinimalDevice()
-  const payload = {
-    sessionKey: getSessionKey(),
-    deviceSessionId: getDeviceSessionId(),
-    userId: input.userId,
-    email: input.email || null,
-    device,
-    lastEvent: input.lastEvent || 'heartbeat',
-    meta: input.meta || {},
-  }
-  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
-  return navigator.sendBeacon(edgeFunctionUrl('activity-api', 'heartbeat'), blob)
+  // `sendBeacon` cannot attach auth headers required by activity-api.
+  // Keep this disabled to avoid unauthorized noise and wasted requests.
+  return false
 }
 
 export const checkSessionValidity = async (input: {
@@ -512,6 +531,8 @@ export const checkSessionValidity = async (input: {
   meta?: Record<string, unknown>
 }) => {
   if (!isBrowser || !input.userId || !navigator.onLine) return
+  const authHeaders = await getAuthHeaders(false)
+  if (!hasAuthorizationHeader(authHeaders)) return
   const device = await buildDevice()
   await postJson(edgeFunctionUrl('activity-api', 'session-check'), {
     sessionKey: getSessionKey(),
@@ -521,5 +542,5 @@ export const checkSessionValidity = async (input: {
     device,
     lastEvent: input.lastEvent || 'session-check',
     meta: input.meta || {},
-  })
+  }, authHeaders)
 }

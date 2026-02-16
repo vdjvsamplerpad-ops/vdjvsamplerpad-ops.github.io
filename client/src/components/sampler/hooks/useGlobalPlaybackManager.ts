@@ -183,6 +183,16 @@ class GlobalPlaybackManagerClass {
   private pendingGlobalEQ: EqSettings | null = null;
   private foregroundUnlockTimeout: NodeJS.Timeout | null = null;
 
+  private hasUserActivation(): boolean {
+    const nav = navigator as Navigator & {
+      userActivation?: {
+        isActive?: boolean;
+        hasBeenActive?: boolean;
+      };
+    };
+    return Boolean(nav.userActivation?.isActive || nav.userActivation?.hasBeenActive);
+  }
+
   constructor() {
     this.isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
     this.isAndroid = /Android/.test(navigator.userAgent);
@@ -208,6 +218,9 @@ class GlobalPlaybackManagerClass {
         clearTimeout(this.foregroundUnlockTimeout);
       }
       this.foregroundUnlockTimeout = setTimeout(() => {
+        if (!this.contextUnlocked && !this.hasUserActivation()) {
+          return;
+        }
         this.preUnlockAudio().catch((error) => {
           console.warn('Foreground audio restore failed:', error);
         });
@@ -304,6 +317,9 @@ class GlobalPlaybackManagerClass {
       if (!this.audioContext) this.initializeAudioContext();
       
       if (this.audioContext?.state === 'suspended') {
+        if (!this.contextUnlocked && !this.hasUserActivation()) {
+          return;
+        }
         await this.audioContext.resume();
       }
 
@@ -330,6 +346,9 @@ class GlobalPlaybackManagerClass {
       this.contextUnlocked = this.audioContext?.state === 'running';
       console.log('🔥 Audio system pre-warmed');
     } catch (error) {
+      if (String((error as Error)?.name || '').toLowerCase() === 'notallowederror') {
+        return;
+      }
       console.error('Pre-warm failed:', error);
     }
   }
