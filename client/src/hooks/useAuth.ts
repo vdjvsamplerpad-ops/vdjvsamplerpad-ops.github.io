@@ -194,6 +194,34 @@ function isBanError(error: { message?: string | null; status?: number; code?: st
   )
 }
 
+function isTransientNetworkError(
+  error:
+    | {
+        message?: string | null
+        status?: number
+        code?: string | null
+        name?: string | null
+      }
+    | null
+    | undefined
+): boolean {
+  if (!error) return false
+  if (error.status === 401 || error.status === 403) return false
+  if (error.status === 0) return true
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return true
+
+  const haystack = `${error.name || ''} ${error.code || ''} ${error.message || ''}`.toLowerCase()
+  return (
+    haystack.includes('failed to fetch') ||
+    haystack.includes('fetch failed') ||
+    haystack.includes('networkerror') ||
+    haystack.includes('network request failed') ||
+    haystack.includes('load failed') ||
+    haystack.includes('timeout') ||
+    haystack.includes('aborterror')
+  )
+}
+
 function isUserBanned(user: User | null): boolean {
   if (!user) return false
   const bannedUntil =
@@ -352,7 +380,10 @@ function useAuthValue(): AuthState & AuthActions {
       }
       if (session?.user) {
         const { data: authData, error: authError } = await supabase.auth.getUser()
-        const authUser = authData?.user || null
+        const transientAuthError = isTransientNetworkError(authError)
+        const fallbackCachedUser = getCachedUser() || session.user
+        const authUser = authData?.user || (transientAuthError ? fallbackCachedUser : null)
+
         if (!authUser || authError?.status === 401 || authError?.status === 403) {
           cacheUserData(null, null)
           clearUserBankCache()
@@ -369,7 +400,11 @@ function useAuthValue(): AuthState & AuthActions {
           return
         }
         if (authError) {
-          console.warn('Failed to validate auth user:', authError)
+          if (transientAuthError) {
+            console.warn('Using cached auth state due transient auth validation failure:', authError)
+          } else {
+            console.warn('Failed to validate auth user:', authError)
+          }
         } else {
           setBannedState(false)
         }
@@ -379,25 +414,31 @@ function useAuthValue(): AuthState & AuthActions {
         const { data: profile, error } = await supabase
           .from('profiles')
           .select('*')
-          .eq('id', session.user.id)
+          .eq('id', authUser.id)
           .maybeSingle()
 
         if (error) {
-          console.warn('Profile lookup failed, clearing local auth state:', error)
-          cacheUserData(null, null)
-          clearUserBankCache()
-          cacheRefreshedForUserIdRef.current = null
-          setState((s) => ({ ...s, user: null, profile: null, loading: false }))
+          if (isTransientNetworkError(error)) {
+            const fallbackProfile = getCachedProfile()
+            cacheUserData(authUser, fallbackProfile)
+            setState((s) => ({ ...s, user: authUser, profile: fallbackProfile, loading: false }))
+          } else {
+            console.warn('Profile lookup failed, clearing local auth state:', error)
+            cacheUserData(null, null)
+            clearUserBankCache()
+            cacheRefreshedForUserIdRef.current = null
+            setState((s) => ({ ...s, user: null, profile: null, loading: false }))
+          }
         } else {
-          const resolvedProfile = profile ? (profile as Profile) : await ensureProfile(session.user)
-          cacheUserData(session.user, resolvedProfile)
-          setState((s) => ({ ...s, user: session.user, profile: resolvedProfile, loading: false }))
+          const resolvedProfile = profile ? (profile as Profile) : await ensureProfile(authUser)
+          cacheUserData(authUser, resolvedProfile)
+          setState((s) => ({ ...s, user: authUser, profile: resolvedProfile, loading: false }))
         }
         
         // Refresh accessible banks cache ONLY once per user session (not on every auth state change)
-        if (cacheRefreshedForUserIdRef.current !== session.user.id) {
-          cacheRefreshedForUserIdRef.current = session.user.id
-          refreshAccessibleBanksCache(session.user.id).catch(console.warn)
+        if (cacheRefreshedForUserIdRef.current !== authUser.id) {
+          cacheRefreshedForUserIdRef.current = authUser.id
+          refreshAccessibleBanksCache(authUser.id).catch(console.warn)
         }
       } else {
         cacheUserData(null, null)
@@ -498,11 +539,21 @@ function useAuthValue(): AuthState & AuthActions {
   React.useEffect(() => {
     if (!state.user || state.banned) return
     const onOnline = () => {
+      void checkSessionValidity({
+        userId: state.user!.id,
+        email: state.user!.email || null,
+        lastEvent: 'reconnect-check',
+        meta: { visibility: typeof document !== 'undefined' ? document.visibilityState : 'unknown' },
+      }).catch((err) => {
+        if (err instanceof SessionConflictError) {
+          void enforceSessionConflict(err.message)
+        }
+      })
       refreshAccessibleBanksCache(state.user!.id).catch(console.warn)
     }
     window.addEventListener('online', onOnline)
     return () => window.removeEventListener('online', onOnline)
-  }, [state.user?.id, state.banned])
+  }, [state.user?.id, state.user?.email, state.banned, enforceSessionConflict])
 
   React.useEffect(() => {
     if (!state.user || state.banned) return
