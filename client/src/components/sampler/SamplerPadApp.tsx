@@ -156,6 +156,7 @@ export function SamplerPadApp() {
   const { width: windowWidth } = useWindowSize();
   const midi = useWebMidi();
   const { user } = useAuth();
+  const settingsSaveTimeoutRef = React.useRef<number | null>(null);
 
   // Load settings from localStorage
   const [settings, setSettings] = React.useState<AppSettings>(() => {
@@ -180,8 +181,6 @@ export function SamplerPadApp() {
   const [globalMuted, setGlobalMuted] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [showErrorDialog, setShowErrorDialog] = React.useState(false);
-  const [showAudioUnlockDialog, setShowAudioUnlockDialog] = React.useState(false);
-  const [audioUnlockState, setAudioUnlockState] = React.useState<string>('unknown');
   const [VolumeMixer, setVolumeMixer] = React.useState<React.ComponentType<any> | null>(null);
   const [editRequest, setEditRequest] = React.useState<{ padId: string; token: number } | null>(null);
   const [editBankRequest, setEditBankRequest] = React.useState<{ bankId: string; token: number } | null>(null);
@@ -200,12 +199,23 @@ export function SamplerPadApp() {
   // Save settings to localStorage whenever they change
   React.useEffect(() => {
     if (typeof window !== 'undefined') {
-      try {
-        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-      } catch (error) {
-        console.warn('Failed to save settings:', error);
+      if (settingsSaveTimeoutRef.current !== null) {
+        window.clearTimeout(settingsSaveTimeoutRef.current);
       }
+      settingsSaveTimeoutRef.current = window.setTimeout(() => {
+        try {
+          localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+        } catch (error) {
+          console.warn('Failed to save settings:', error);
+        }
+      }, 200);
     }
+    return () => {
+      if (settingsSaveTimeoutRef.current !== null) {
+        window.clearTimeout(settingsSaveTimeoutRef.current);
+        settingsSaveTimeoutRef.current = null;
+      }
+    };
   }, [settings]);
 
   React.useEffect(() => {
@@ -224,26 +234,45 @@ export function SamplerPadApp() {
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    const handleUnlockRequired = (event: Event) => {
-      const customEvent = event as CustomEvent<{ contextState?: string }>;
-      const contextState = customEvent.detail?.contextState || 'unknown';
-      setAudioUnlockState(contextState);
-      setShowAudioUnlockDialog(true);
+    const capacitor = (window as any).Capacitor;
+    if (!capacitor?.isNativePlatform?.()) return;
+    const appPlugin = capacitor?.Plugins?.App;
+    if (!appPlugin?.addListener) return;
+
+    let cancelled = false;
+    let removeListener: (() => void) | null = null;
+
+    const setup = async () => {
+      try {
+        const listener = await appPlugin.addListener('appStateChange', ({ isActive }: { isActive: boolean }) => {
+          if (!isActive) return;
+          playbackManager.preUnlockAudio().catch((error: unknown) => {
+            console.warn('Failed to restore audio after app resume:', error);
+          });
+        });
+
+        if (cancelled) {
+          await listener.remove();
+          return;
+        }
+
+        removeListener = () => {
+          void listener.remove();
+        };
+      } catch (error) {
+        console.warn('Capacitor appStateChange listener setup failed:', error);
+      }
     };
 
-    const handleUnlockRestored = () => {
-      setShowAudioUnlockDialog(false);
-      setAudioUnlockState('running');
-    };
-
-    window.addEventListener('vdjv-audio-unlock-required', handleUnlockRequired as EventListener);
-    window.addEventListener('vdjv-audio-unlock-restored', handleUnlockRestored);
+    void setup();
 
     return () => {
-      window.removeEventListener('vdjv-audio-unlock-required', handleUnlockRequired as EventListener);
-      window.removeEventListener('vdjv-audio-unlock-restored', handleUnlockRestored);
+      cancelled = true;
+      if (removeListener) {
+        removeListener();
+      }
     };
-  }, []);
+  }, [playbackManager]);
 
   // Update individual settings
   const updateSetting = React.useCallback(<K extends keyof AppSettings>(
@@ -264,19 +293,6 @@ export function SamplerPadApp() {
   const handleToggleHideShortcutLabels = React.useCallback((hide: boolean) => {
     updateSetting('hideShortcutLabels', hide);
   }, [updateSetting]);
-
-  const handleAudioUnlockRetry = React.useCallback(async () => {
-    try {
-      await playbackManager.preUnlockAudio();
-      const state = playbackManager.getAudioState().contextState;
-      setAudioUnlockState(state);
-      if (state === 'running') {
-        setShowAudioUnlockDialog(false);
-      }
-    } catch (error) {
-      console.error('Manual audio unlock failed:', error);
-    }
-  }, [playbackManager]);
 
   const handleToggleMidiEnabled = React.useCallback((enabled: boolean) => {
     updateSetting('midiEnabled', enabled);
@@ -2405,27 +2421,6 @@ export function SamplerPadApp() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={showAudioUnlockDialog} onOpenChange={setShowAudioUnlockDialog}>
-        <DialogContent
-          className={`sm:max-w-md ${theme === 'dark' ? 'bg-gray-800 border-amber-500' : 'bg-white border-amber-500'}`}
-          aria-describedby={undefined}
-        >
-          <DialogHeader>
-            <DialogTitle className="text-amber-600">Enable Audio</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <p className={`text-sm ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>
-              Audio is blocked by this browser context. Tap retry to unlock audio, then press a pad again.
-            </p>
-            <p className={`text-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
-              Audio context state: {audioUnlockState}
-            </p>
-            <Button onClick={handleAudioUnlockRetry} className="w-full">
-              Retry Audio Unlock
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

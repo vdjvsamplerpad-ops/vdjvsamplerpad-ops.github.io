@@ -133,15 +133,29 @@ export function VolumeMixer({
   const [localChannelVolumes, setLocalChannelVolumes] = React.useState<number[]>([]);
   const channelVolumeRafRef = React.useRef<Map<number, number>>(new Map());
   const channelVolumePendingRef = React.useRef<Map<number, number>>(new Map());
+  const masterVolumeRafRef = React.useRef<number | null>(null);
+  const pendingMasterVolumeRef = React.useRef<number | null>(null);
+  const eqRafRef = React.useRef<number | null>(null);
+  const pendingEqRef = React.useRef<EqSettings | null>(null);
   
   // Slide notices
   const { notices, pushNotice, dismiss } = useNotices();
 
   const handleMasterVolumeDoubleClick = () => {
+    if (masterVolumeRafRef.current !== null) {
+      cancelAnimationFrame(masterVolumeRafRef.current);
+      masterVolumeRafRef.current = null;
+    }
+    pendingMasterVolumeRef.current = null;
     onMasterVolumeChange(1); // Reset to 100%
   };
 
   const handleEqDoubleClick = (type: keyof EqSettings) => {
+    if (eqRafRef.current !== null) {
+      cancelAnimationFrame(eqRafRef.current);
+      eqRafRef.current = null;
+    }
+    pendingEqRef.current = null;
     onEqChange({ ...eqSettings, [type]: 0 });
   };
 
@@ -188,11 +202,53 @@ export function VolumeMixer({
     [scheduleChannelVolumeUpdate]
   );
 
+  const scheduleMasterVolumeUpdate = React.useCallback(
+    (volume: number) => {
+      pendingMasterVolumeRef.current = volume;
+      if (masterVolumeRafRef.current !== null) return;
+      masterVolumeRafRef.current = requestAnimationFrame(() => {
+        const next = pendingMasterVolumeRef.current;
+        if (typeof next === 'number') {
+          onMasterVolumeChange(next);
+        }
+        pendingMasterVolumeRef.current = null;
+        masterVolumeRafRef.current = null;
+      });
+    },
+    [onMasterVolumeChange]
+  );
+
+  const scheduleEqUpdate = React.useCallback(
+    (next: EqSettings) => {
+      pendingEqRef.current = next;
+      if (eqRafRef.current !== null) return;
+      eqRafRef.current = requestAnimationFrame(() => {
+        const pending = pendingEqRef.current;
+        if (pending) {
+          onEqChange(pending);
+        }
+        pendingEqRef.current = null;
+        eqRafRef.current = null;
+      });
+    },
+    [onEqChange]
+  );
+
   React.useEffect(() => {
     return () => {
       channelVolumeRafRef.current.forEach((rafId) => cancelAnimationFrame(rafId));
       channelVolumeRafRef.current.clear();
       channelVolumePendingRef.current.clear();
+      if (masterVolumeRafRef.current !== null) {
+        cancelAnimationFrame(masterVolumeRafRef.current);
+        masterVolumeRafRef.current = null;
+      }
+      pendingMasterVolumeRef.current = null;
+      if (eqRafRef.current !== null) {
+        cancelAnimationFrame(eqRafRef.current);
+        eqRafRef.current = null;
+      }
+      pendingEqRef.current = null;
     };
   }, []);
 
@@ -267,7 +323,7 @@ export function VolumeMixer({
             </Label>
             <Slider
               value={[masterVolume * 100]}
-              onValueChange={([value]) => onMasterVolumeChange(value / 100)}
+              onValueChange={([value]) => scheduleMasterVolumeUpdate(value / 100)}
               max={100}
               min={0}
               step={1}
@@ -296,7 +352,7 @@ export function VolumeMixer({
               </div>
               <Slider
                 value={[eqSettings.high]}
-                onValueChange={([value]) => onEqChange({ ...eqSettings, high: value })}
+                onValueChange={([value]) => scheduleEqUpdate({ ...eqSettings, high: value })}
                 max={12}
                 min={-12}
                 step={1}
@@ -315,7 +371,7 @@ export function VolumeMixer({
               </div>
               <Slider
                 value={[eqSettings.mid]}
-                onValueChange={([value]) => onEqChange({ ...eqSettings, mid: value })}
+                onValueChange={([value]) => scheduleEqUpdate({ ...eqSettings, mid: value })}
                 max={12}
                 min={-12}
                 step={1}
@@ -334,7 +390,7 @@ export function VolumeMixer({
               </div>
               <Slider
                 value={[eqSettings.low]}
-                onValueChange={([value]) => onEqChange({ ...eqSettings, low: value })}
+                onValueChange={([value]) => scheduleEqUpdate({ ...eqSettings, low: value })}
                 max={12}
                 min={-12}
                 step={1}
