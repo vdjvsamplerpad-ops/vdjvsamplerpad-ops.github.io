@@ -55,6 +55,9 @@ const isNativeAndroid = (): boolean => {
   return isAndroid && capacitor?.isNativePlatform?.() === true;
 };
 
+const EXPORT_FOLDER_NAME = 'VDJV-Export';
+const ANDROID_DOWNLOAD_ROOT = '/storage/emulated/0/Download';
+
 const saveMappingFile = async (blob: Blob, fileName: string): Promise<string> => {
   if (isNativeAndroid()) {
     try {
@@ -69,13 +72,39 @@ const saveMappingFile = async (blob: Blob, fileName: string): Promise<string> =>
         reader.onerror = reject;
         reader.readAsDataURL(blob);
       });
+      const downloadRelativePath = `Download/${EXPORT_FOLDER_NAME}/${fileName}`;
+      const downloadAbsolutePath = `${ANDROID_DOWNLOAD_ROOT}/${EXPORT_FOLDER_NAME}/${fileName}`;
+
+      // Best effort: request public storage permission when required by Android version.
+      try {
+        const permissionStatus = await Filesystem.checkPermissions();
+        if (permissionStatus.publicStorage !== 'granted') {
+          await Filesystem.requestPermissions();
+        }
+      } catch {
+        // Ignore permission API errors; write attempts below will handle fallback.
+      }
+
+      // Preferred location: Android Download folder.
+      try {
+        await Filesystem.writeFile({
+          path: downloadAbsolutePath,
+          data: base64Data,
+          recursive: true
+        });
+        return `Mappings exported to ${downloadRelativePath}`;
+      } catch (downloadError) {
+        console.warn('Download folder write failed, falling back to Documents:', downloadError);
+      }
+
+      // Fallback for devices that block direct Download folder writes.
       await Filesystem.writeFile({
-        path: fileName,
+        path: `${EXPORT_FOLDER_NAME}/${fileName}`,
         data: base64Data,
         directory: Directory.Documents,
         recursive: true
       });
-      return `Mappings exported to Documents/${fileName}`;
+      return `Mappings exported to Documents/${EXPORT_FOLDER_NAME}/${fileName}`;
     } catch (error) {
       console.error('Failed to save mappings using Capacitor Filesystem:', error);
     }
@@ -155,8 +184,9 @@ export function SamplerPadApp() {
   const { theme, toggleTheme } = useTheme();
   const { width: windowWidth } = useWindowSize();
   const midi = useWebMidi();
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const settingsSaveTimeoutRef = React.useRef<number | null>(null);
+  const canUseAdminExport = profile?.role === 'admin';
 
   // Load settings from localStorage
   const [settings, setSettings] = React.useState<AppSettings>(() => {
@@ -2218,7 +2248,7 @@ export function SamplerPadApp() {
         onMoveBankDown={moveBankDown}
         onTransferPad={handleTransferPad}
         canTransferFromBank={canTransferFromBank}
-        onExportAdmin={exportAdminBank}
+        onExportAdmin={canUseAdminExport ? exportAdminBank : undefined}
         midiEnabled={midi.enabled && midi.accessGranted}
         blockedShortcutKeys={blockedShortcutKeys}
         blockedMidiNotes={blockedMidiNotes}

@@ -8,7 +8,6 @@ import {
   decryptZip, 
   isZipPasswordMatch,
   getDerivedKey, 
-  createAdminBankWithDerivedKey, 
   addBankMetadata, 
   extractBankMetadata,
   hasBankAccess,
@@ -32,6 +31,9 @@ const isNativeAndroid = (): boolean => {
   return isAndroid && capacitor?.isNativePlatform?.() === true;
 };
 
+const EXPORT_FOLDER_NAME = 'VDJV-Export';
+const ANDROID_DOWNLOAD_ROOT = '/storage/emulated/0/Download';
+
 // Helper to save file using Capacitor Filesystem or standard download
 // Returns object with success status and message
 const saveBankFile = async (blob: Blob, fileName: string): Promise<{ success: boolean; message?: string; savedPath?: string }> => {
@@ -53,19 +55,50 @@ const saveBankFile = async (blob: Blob, fileName: string): Promise<{ success: bo
         reader.readAsDataURL(blob);
       });
       
-      // Save to Documents directory
+      const downloadRelativePath = `Download/${EXPORT_FOLDER_NAME}/${fileName}`;
+      const downloadAbsolutePath = `${ANDROID_DOWNLOAD_ROOT}/${EXPORT_FOLDER_NAME}/${fileName}`;
+
+      // Best effort: request public storage permission when required by Android version.
+      try {
+        const permissionStatus = await Filesystem.checkPermissions();
+        if (permissionStatus.publicStorage !== 'granted') {
+          await Filesystem.requestPermissions();
+        }
+      } catch {
+        // Ignore permission API errors; write attempts below will handle fallback.
+      }
+
+      // Preferred location: Android Download folder.
+      try {
+        await Filesystem.writeFile({
+          path: downloadAbsolutePath,
+          data: base64Data,
+          recursive: true
+        });
+
+        console.log(`✅ Bank saved to ${downloadRelativePath}`);
+        return {
+          success: true,
+          message: `Successfully exported to ${downloadRelativePath}`,
+          savedPath: downloadRelativePath
+        };
+      } catch (downloadError) {
+        console.warn('Download folder write failed, falling back to Documents:', downloadError);
+      }
+
+      // Fallback for devices that block direct Download folder writes.
       await Filesystem.writeFile({
-        path: fileName,
+        path: `${EXPORT_FOLDER_NAME}/${fileName}`,
         data: base64Data,
         directory: Directory.Documents,
         recursive: true
       });
-      
-      console.log(`✅ Bank saved to Documents/${fileName}`);
-      return { 
-        success: true, 
-        message: 'Successfully exported, saved to Documents',
-        savedPath: `Documents/${fileName}`
+
+      console.log(`✅ Bank saved to Documents/${EXPORT_FOLDER_NAME}/${fileName}`);
+      return {
+        success: true,
+        message: `Successfully exported to Documents/${EXPORT_FOLDER_NAME}`,
+        savedPath: `Documents/${EXPORT_FOLDER_NAME}/${fileName}`
       };
     } catch (error) {
       console.error('❌ Failed to save using Capacitor Filesystem, falling back to download:', error);
@@ -1676,6 +1709,7 @@ export function useSamplerStore(): SamplerStore {
       onProgress && onProgress(50);
       
       if (addToDatabase) {
+        const { createAdminBankWithDerivedKey } = await import('@/lib/admin-bank-utils');
         const adminBank = await createAdminBankWithDerivedKey(title, description, user.id, bank.defaultColor);
         if (!adminBank) throw new Error('DB creation failed');
         const bankId = adminBank.id;

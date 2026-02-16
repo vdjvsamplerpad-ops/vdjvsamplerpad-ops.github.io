@@ -37,6 +37,11 @@ export function ProgressDialog({
   statusMessage,
   showWarning
 }: ProgressDialogProps) {
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    // Keep dialog visible while processing to prevent accidental close on backdrop click.
+    if (!nextOpen && status === 'loading') return;
+    onOpenChange(nextOpen);
+  };
   
   // Check if error message indicates login is required
   const needsLogin = errorMessage && (
@@ -70,7 +75,7 @@ export function ProgressDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       {/* Inject styles for the flowing animation */}
       <style>{`
         @keyframes flow-glow {
@@ -82,9 +87,17 @@ export function ProgressDialog({
         }
       `}</style>
 
-      <DialogContent className={`sm:max-w-md backdrop-blur-md transition-colors duration-200 ${
+      <DialogContent
+        className={`sm:max-w-md backdrop-blur-md transition-colors duration-200 ${
         theme === 'dark' ? 'bg-gray-800/95 border-gray-600' : 'bg-white/95 border-gray-300'
-      }`}>
+      }`}
+        onEscapeKeyDown={(event) => {
+          if (status === 'loading') event.preventDefault();
+        }}
+        onPointerDownOutside={(event) => {
+          if (status === 'loading') event.preventDefault();
+        }}
+      >
         <DialogHeader>
           <div className="flex items-center gap-3">
             <div className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${

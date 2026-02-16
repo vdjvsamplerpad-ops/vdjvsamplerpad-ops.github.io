@@ -15,6 +15,8 @@ import { normalizeStoredShortcutKey } from '@/lib/keyboard-shortcuts';
 
 type Notice = { id: string; variant: 'success' | 'error' | 'info'; message: string };
 
+const EXPORT_MIN_DIALOG_MS = 900;
+
 interface EqSettings {
   low: number;
   mid: number;
@@ -487,6 +489,7 @@ export function SideMenu({
   const importPhase = getImportPhaseInfo();
 
   const handleExportBank = async (bankId: string) => {
+    const startedAt = Date.now();
     setShowExportProgress(true);
     setExportStatus('loading');
     setExportProgress(0);
@@ -496,6 +499,10 @@ export function SideMenu({
       const exportMessage = await onExportBank(bankId, (progress) => {
         setExportProgress(progress);
       });
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < EXPORT_MIN_DIALOG_MS) {
+        await new Promise((resolve) => window.setTimeout(resolve, EXPORT_MIN_DIALOG_MS - elapsed));
+      }
       setExportStatus('success');
       // Show success notification with platform-specific message
       if (exportMessage) {
@@ -503,6 +510,10 @@ export function SideMenu({
       }
     } catch (error) {
       console.error('Export failed:', error);
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < EXPORT_MIN_DIALOG_MS) {
+        await new Promise((resolve) => window.setTimeout(resolve, EXPORT_MIN_DIALOG_MS - elapsed));
+      }
       setExportStatus('error');
       setExportError(error instanceof Error ? error.message : 'Export failed');
     }
