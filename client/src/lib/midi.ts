@@ -4,6 +4,8 @@ import { useNativeMidiBackend } from '@/lib/midi-native';
 
 const DEBUG_MIDI = false;
 const MIDI_INPUT_CACHE_KEY = 'vdjv-midi-selected-input';
+const MIDI_CC_DEDUPE_WINDOW_MS = 20;
+const MIDI_CC_CACHE_MAX_SIZE = 256;
 
 export type MidiMessage =
   | { type: 'noteon'; note: number; velocity: number; channel: number; inputId: string; inputName?: string }
@@ -97,9 +99,25 @@ function useWebMidiBackend(enabled: boolean): MidiBackendState {
   const [inputs, setInputs] = React.useState<MidiInputInfo[]>([]);
   const [outputs, setOutputs] = React.useState<MidiOutputInfo[]>([]);
   const [selectedInputId, setSelectedInputId] = React.useState<string | null>(null);
-  const [lastMessage, setLastMessage] = React.useState<MidiMessage | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const currentInputRef = React.useRef<MIDIInput | null>(null);
+  const lastCcMessageRef = React.useRef<Map<string, { value: number; at: number }>>(new Map());
+
+  const shouldSkipMessage = React.useCallback((message: MidiMessage): boolean => {
+    if (message.type !== 'cc') return false;
+    const key = `${message.inputId}:${message.channel}:${message.cc}`;
+    const now = Date.now();
+    const previous = lastCcMessageRef.current.get(key);
+    if (previous && previous.value === message.value && now - previous.at < MIDI_CC_DEDUPE_WINDOW_MS) {
+      return true;
+    }
+
+    lastCcMessageRef.current.set(key, { value: message.value, at: now });
+    if (lastCcMessageRef.current.size > MIDI_CC_CACHE_MAX_SIZE) {
+      lastCcMessageRef.current.clear();
+    }
+    return false;
+  }, []);
 
   const requestAccess = React.useCallback(async () => {
     if (!supported) {
@@ -141,6 +159,7 @@ function useWebMidiBackend(enabled: boolean): MidiBackendState {
       selected.onmidimessage = (event) => {
         const parsed = parseMessage(event);
         if (!parsed) return;
+        if (shouldSkipMessage(parsed)) return;
         if (DEBUG_MIDI) {
           console.log('[MIDI]', {
             device: parsed.inputName || parsed.inputId,
@@ -152,7 +171,6 @@ function useWebMidiBackend(enabled: boolean): MidiBackendState {
             channel: parsed.channel
           });
         }
-        setLastMessage(parsed);
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('vdjv-midi', { detail: parsed }));
         }
@@ -161,7 +179,7 @@ function useWebMidiBackend(enabled: boolean): MidiBackendState {
     } else if (!selectedInputId) {
       currentInputRef.current = null;
     }
-  }, [access, enabled, selectedInputId]);
+  }, [access, enabled, selectedInputId, shouldSkipMessage]);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -253,7 +271,7 @@ function useWebMidiBackend(enabled: boolean): MidiBackendState {
     selectedInputId,
     setSelectedInputId,
     requestAccess,
-    lastMessage,
+    lastMessage: null,
     error,
     sendNoteOn,
     sendNoteOff
@@ -267,13 +285,13 @@ const isNativeAndroid = (): boolean => {
 };
 
 export function useWebMidi() {
-  const [enabled, setEnabled] = React.useState<boolean>(true);
+  const [enabled, setEnabled] = React.useState<boolean>(false);
   const webBackend = useWebMidiBackend(enabled);
   const nativeBackend = useNativeMidiBackend(enabled);
 
   const useNative = React.useMemo(
-    () => isNativeAndroid() && !webBackend.supported && nativeBackend.supported,
-    [webBackend.supported, nativeBackend.supported]
+    () => isNativeAndroid() && nativeBackend.supported,
+    [nativeBackend.supported]
   );
 
   const active = useNative ? nativeBackend : webBackend;

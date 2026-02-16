@@ -10,7 +10,7 @@ import { StopMode, PadData } from './types/sampler';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { normalizeShortcutKey, normalizeStoredShortcutKey } from '@/lib/keyboard-shortcuts';
-import { useWebMidi } from '@/lib/midi';
+import { MidiMessage, useWebMidi } from '@/lib/midi';
 import { DEFAULT_SYSTEM_MAPPINGS, SystemAction, SystemMappings } from '@/lib/system-mappings';
 import { LED_COLOR_OPTIONS } from '@/lib/led-colors';
 import { getMidiDeviceProfile, getMidiDeviceProfileById, midiDeviceProfiles } from '@/lib/midi/device-profiles';
@@ -109,7 +109,7 @@ const defaultSettings: AppSettings = {
   editMode: false,
   padSize: 5,
   hideShortcutLabels: true,
-  midiEnabled: true,
+  midiEnabled: false,
   midiDeviceProfileId: null,
   systemMappings: DEFAULT_SYSTEM_MAPPINGS
 };
@@ -1696,6 +1696,8 @@ export function SamplerPadApp() {
   const activeMidiNotesRef = React.useRef<Map<string, boolean>>(new Map());
   const midiHoldPadByNoteRef = React.useRef<Map<number, string>>(new Map());
   const midiShiftActiveRef = React.useRef(false);
+  const pendingMidiMasterVolumeRef = React.useRef<number | null>(null);
+  const midiMasterVolumeRafRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
     if (!isDualMode || !secondaryBankId) {
@@ -1704,9 +1706,16 @@ export function SamplerPadApp() {
   }, [isDualMode, secondaryBankId]);
 
   React.useEffect(() => {
-    const message = midi.lastMessage;
-    if (!message) return;
+    return () => {
+      if (midiMasterVolumeRafRef.current !== null) {
+        window.cancelAnimationFrame(midiMasterVolumeRafRef.current);
+        midiMasterVolumeRafRef.current = null;
+      }
+      pendingMidiMasterVolumeRef.current = null;
+    };
+  }, []);
 
+  const handleMidiMessage = React.useCallback((message: MidiMessage) => {
     const resolvePad = (mapped: { pad: PadData; bankId: string; bankName: string } | undefined) => {
       if (!mapped) return null;
       return mapped;
@@ -1903,8 +1912,17 @@ export function SamplerPadApp() {
       }
 
       if (typeof settings.systemMappings.masterVolumeCC === 'number' && settings.systemMappings.masterVolumeCC === message.cc) {
-        const next = normalizeMidiValue(message.value);
-        updateSetting('masterVolume', Number(next.toFixed(3)));
+        pendingMidiMasterVolumeRef.current = Number(normalizeMidiValue(message.value).toFixed(3));
+        if (midiMasterVolumeRafRef.current === null) {
+          midiMasterVolumeRafRef.current = window.requestAnimationFrame(() => {
+            midiMasterVolumeRafRef.current = null;
+            const next = pendingMidiMasterVolumeRef.current;
+            pendingMidiMasterVolumeRef.current = null;
+            if (typeof next === 'number') {
+              updateSetting('masterVolume', next);
+            }
+          });
+        }
         return;
       }
 
@@ -1970,7 +1988,6 @@ export function SamplerPadApp() {
       }
     }
   }, [
-    midi.lastMessage,
     midiNoteByBank,
     midiCCByBank,
     midiBankNoteMap,
@@ -2006,6 +2023,19 @@ export function SamplerPadApp() {
     requestEditPad,
     requestEditBank
   ]);
+
+  React.useEffect(() => {
+    const onMidiEvent = (event: Event) => {
+      const detail = (event as CustomEvent<MidiMessage>).detail;
+      if (!detail) return;
+      handleMidiMessage(detail);
+    };
+
+    window.addEventListener('vdjv-midi', onMidiEvent as EventListener);
+    return () => {
+      window.removeEventListener('vdjv-midi', onMidiEvent as EventListener);
+    };
+  }, [handleMidiMessage]);
 
   // Enhanced pad transfer handler with better dual mode support
   const handleTransferPad = React.useCallback((padId: string, sourceBankId: string, targetBankId: string) => {

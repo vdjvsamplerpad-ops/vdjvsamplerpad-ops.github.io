@@ -2,6 +2,9 @@ import * as React from 'react';
 import { Capacitor, PluginListenerHandle, registerPlugin } from '@capacitor/core';
 import type { MidiInputInfo, MidiMessage, MidiOutputInfo } from '@/lib/midi';
 
+const MIDI_CC_DEDUPE_WINDOW_MS = 20;
+const MIDI_CC_CACHE_MAX_SIZE = 256;
+
 type MidiNativePlugin = {
   requestAccess: () => Promise<{ granted?: boolean } | void>;
   getInputs: () => Promise<{ inputs: MidiInputInfo[] }>;
@@ -26,10 +29,26 @@ export function useNativeMidiBackend(enabled: boolean) {
   const [inputs, setInputs] = React.useState<MidiInputInfo[]>([]);
   const [outputs, setOutputs] = React.useState<MidiOutputInfo[]>([]);
   const [selectedInputId, setSelectedInputIdState] = React.useState<string | null>(null);
-  const [lastMessage, setLastMessage] = React.useState<MidiMessage | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const listenerRef = React.useRef<PluginListenerHandle | null>(null);
+  const lastCcMessageRef = React.useRef<Map<string, { value: number; at: number }>>(new Map());
   const outputSupported = supported && typeof Midi.sendNoteOn === 'function';
+
+  const shouldSkipMessage = React.useCallback((message: MidiMessage): boolean => {
+    if (message.type !== 'cc') return false;
+    const key = `${message.inputId}:${message.channel}:${message.cc}`;
+    const now = Date.now();
+    const previous = lastCcMessageRef.current.get(key);
+    if (previous && previous.value === message.value && now - previous.at < MIDI_CC_DEDUPE_WINDOW_MS) {
+      return true;
+    }
+
+    lastCcMessageRef.current.set(key, { value: message.value, at: now });
+    if (lastCcMessageRef.current.size > MIDI_CC_CACHE_MAX_SIZE) {
+      lastCcMessageRef.current.clear();
+    }
+    return false;
+  }, []);
 
   const requestAccess = React.useCallback(async () => {
     if (!supported) {
@@ -71,7 +90,7 @@ export function useNativeMidiBackend(enabled: boolean) {
     }
 
     const handleMessage = (message: MidiMessage) => {
-      setLastMessage(message);
+      if (shouldSkipMessage(message)) return;
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('vdjv-midi', { detail: message }));
       }
@@ -88,7 +107,7 @@ export function useNativeMidiBackend(enabled: boolean) {
         listenerRef.current = null;
       }
     };
-  }, [enabled, supported]);
+  }, [enabled, shouldSkipMessage, supported]);
 
   const sendNoteOn = React.useCallback(
     (note: number, velocity: number, options?: { outputId?: string; outputName?: string; channel?: number }) => {
@@ -127,7 +146,7 @@ export function useNativeMidiBackend(enabled: boolean) {
     selectedInputId,
     setSelectedInputId,
     requestAccess,
-    lastMessage,
+    lastMessage: null,
     error,
     sendNoteOn,
     sendNoteOff
