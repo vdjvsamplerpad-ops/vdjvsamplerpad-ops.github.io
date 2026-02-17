@@ -1,13 +1,35 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import { execSync } from 'node:child_process';
 
 export const vitePort = 3000;
+
+const fallbackVersion = () => {
+  const now = new Date();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const yy = String(now.getFullYear()).slice(-2);
+  const tt = `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+  return `1.${mm}.${dd}.${yy}.${tt}`;
+};
+
+const getCommitBasedVersion = () => {
+  try {
+    const stamp = execSync('git log -1 --format=%cd --date=format:%m.%d.%y.%H%M', {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (stamp) return `1.${stamp}`;
+  } catch {}
+  return process.env.VITE_APP_VERSION || fallbackVersion();
+};
 
 export default defineConfig(({ mode }) => {
   // Use relative paths for Electron, absolute for web
   const isElectron = process.env.ELECTRON === 'true';
   const base = isElectron ? './' : '/';
+  const appVersion = getCommitBasedVersion();
   
   return {
     // 1. TELL VITE WHERE YOUR APP LIVES
@@ -18,6 +40,9 @@ export default defineConfig(({ mode }) => {
 
     // 3. Base Path - relative for Electron, absolute for web
     base: base,
+    define: {
+      'import.meta.env.VITE_APP_VERSION': JSON.stringify(appVersion),
+    },
     
     plugins: [
       react(),

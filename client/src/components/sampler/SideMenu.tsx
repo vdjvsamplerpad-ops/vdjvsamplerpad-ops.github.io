@@ -120,24 +120,7 @@ export function SideMenu({
   const [importError, setImportError] = React.useState<string>('');
   const [dragOverBankId, setDragOverBankId] = React.useState<string | null>(null);
   const [renderContent, setRenderContent] = React.useState(open);
-
-  const handleClearPadShortcuts = React.useCallback(() => {
-    if (!editingBank) return;
-    editingBank.pads.forEach((pad) => {
-      if (pad.shortcutKey) {
-        onUpdatePad(editingBank.id, pad.id, { ...pad, shortcutKey: undefined });
-      }
-    });
-  }, [editingBank, onUpdatePad]);
-
-  const handleClearPadMidi = React.useCallback(() => {
-    if (!editingBank) return;
-    editingBank.pads.forEach((pad) => {
-      if (typeof pad.midiNote === 'number' || typeof pad.midiCC === 'number') {
-        onUpdatePad(editingBank.id, pad.id, { ...pad, midiNote: undefined, midiCC: undefined });
-      }
-    });
-  }, [editingBank, onUpdatePad]);
+  const [pendingBulkClearAction, setPendingBulkClearAction] = React.useState<'keys' | 'midi' | null>(null);
 
   
   // ETA Calculation State
@@ -162,6 +145,43 @@ export function SideMenu({
   const dismissNotice = React.useCallback((id: string) => {
     setNotices((arr) => arr.filter((n) => n.id !== id));
   }, []);
+
+  const executeClearPadShortcuts = React.useCallback(() => {
+    if (!editingBank) return;
+    const latestBank = banks.find((bank) => bank.id === editingBank.id);
+    if (!latestBank) return;
+    let cleared = 0;
+    latestBank.pads.forEach((pad) => {
+      if (pad.shortcutKey) {
+        cleared += 1;
+        onUpdatePad(latestBank.id, pad.id, { ...pad, shortcutKey: undefined });
+      }
+    });
+    onUpdateBank(latestBank.id, { disableDefaultPadShortcutLayout: true });
+    if (cleared > 0) {
+      pushNotice({ variant: 'success', message: `Cleared keyboard shortcuts from ${cleared} pad${cleared === 1 ? '' : 's'}.` });
+    } else {
+      pushNotice({ variant: 'info', message: 'No pad keyboard shortcuts to clear.' });
+    }
+  }, [banks, editingBank, onUpdatePad, onUpdateBank, pushNotice]);
+
+  const executeClearPadMidi = React.useCallback(() => {
+    if (!editingBank) return;
+    const latestBank = banks.find((bank) => bank.id === editingBank.id);
+    if (!latestBank) return;
+    let cleared = 0;
+    latestBank.pads.forEach((pad) => {
+      if (typeof pad.midiNote === 'number' || typeof pad.midiCC === 'number') {
+        cleared += 1;
+        onUpdatePad(latestBank.id, pad.id, { ...pad, midiNote: undefined, midiCC: undefined });
+      }
+    });
+    if (cleared > 0) {
+      pushNotice({ variant: 'success', message: `Cleared MIDI mappings from ${cleared} pad${cleared === 1 ? '' : 's'}.` });
+    } else {
+      pushNotice({ variant: 'info', message: 'No pad MIDI mappings to clear.' });
+    }
+  }, [banks, editingBank, onUpdatePad, pushNotice]);
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const { user } = useAuth();
@@ -209,6 +229,14 @@ export function SideMenu({
     setEditingBank(bank);
     setShowEditDialog(true);
   };
+
+  React.useEffect(() => {
+    if (!showEditDialog || !editingBank) return;
+    const latest = banks.find((bank) => bank.id === editingBank.id);
+    if (latest && latest !== editingBank) {
+      setEditingBank(latest);
+    }
+  }, [banks, showEditDialog, editingBank]);
 
   React.useEffect(() => {
     if (!editMode || !editBankRequest) return;
@@ -629,6 +657,15 @@ export function SideMenu({
     return canTransferFromBank ? canTransferFromBank(bankId) : true;
   };
 
+  const handleConfirmBulkClear = React.useCallback(() => {
+    if (pendingBulkClearAction === 'keys') {
+      executeClearPadShortcuts();
+    } else if (pendingBulkClearAction === 'midi') {
+      executeClearPadMidi();
+    }
+    setPendingBulkClearAction(null);
+  }, [pendingBulkClearAction, executeClearPadShortcuts, executeClearPadMidi]);
+
   return (
     <>
       <div
@@ -1000,7 +1037,13 @@ export function SideMenu({
           onOpenChange={setShowEditDialog}
           theme={theme}
           onSave={(updates) => {
-            onUpdateBank(editingBank.id, updates);
+            const nextUpdates: Partial<SamplerBank> = { ...updates };
+            if (updates.shortcutKey === undefined && editingBank.shortcutKey) {
+              nextUpdates.disableDefaultBankShortcutLayout = true;
+            } else if (typeof updates.shortcutKey === 'string' && updates.shortcutKey.trim().length > 0) {
+              nextUpdates.disableDefaultBankShortcutLayout = false;
+            }
+            onUpdateBank(editingBank.id, nextUpdates);
             setShowEditDialog(false);
           }}
           onDelete={() => {
@@ -1016,8 +1059,8 @@ export function SideMenu({
           blockedShortcutKeys={blockedShortcutKeys}
           blockedMidiNotes={blockedMidiNotes}
           blockedMidiCCs={blockedMidiCCs}
-          onClearPadShortcuts={handleClearPadShortcuts}
-          onClearPadMidi={handleClearPadMidi}
+          onClearPadShortcuts={() => setPendingBulkClearAction('keys')}
+          onClearPadMidi={() => setPendingBulkClearAction('midi')}
         />
       )}
 
@@ -1032,6 +1075,22 @@ export function SideMenu({
         theme={theme}
       />
 
+      <ConfirmationDialog
+        open={pendingBulkClearAction !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingBulkClearAction(null);
+        }}
+        title={pendingBulkClearAction === 'midi' ? 'Clear All MIDI' : 'Clear All Keys'}
+        description={
+          pendingBulkClearAction === 'midi'
+            ? `Clear all MIDI note/CC mappings for pads in "${editingBank?.name || 'this bank'}"?`
+            : `Clear all keyboard shortcuts for pads in "${editingBank?.name || 'this bank'}"?`
+        }
+        confirmText={pendingBulkClearAction === 'midi' ? 'Clear MIDI' : 'Clear Keys'}
+        onConfirm={handleConfirmBulkClear}
+        theme={theme}
+      />
+
       <ProgressDialog
         open={showExportProgress}
         onOpenChange={setShowExportProgress}
@@ -1042,6 +1101,8 @@ export function SideMenu({
         type="export"
         theme={theme}
         errorMessage={exportError}
+        hideCloseButton
+        useHistory={false}
         onRetry={() => {
           if (banks.length > 0) {
             handleExportBank(banks[0].id);
@@ -1062,6 +1123,7 @@ export function SideMenu({
         statusMessage={importPhase.message}
         etaSeconds={importEta}
         showWarning={importPhase.showWarning}
+        useHistory={false}
         onRetry={() => {
           handleImportClick();
         }}

@@ -360,6 +360,7 @@ export function SamplerPadApp() {
     if (!bankId) return;
     const bank = banks.find((entry) => entry.id === bankId);
     if (!bank) return;
+    if (bank.disableDefaultPadShortcutLayout) return;
     const sortedPads = [...bank.pads].sort((a, b) => (a.position || 0) - (b.position || 0));
     sortedPads.forEach((pad, index) => {
       const desiredKey = defaultPadShortcutLayout[index] || undefined;
@@ -1377,6 +1378,7 @@ export function SamplerPadApp() {
 
     let candidateIndex = 0;
     orderedBanks.forEach((bank) => {
+      if (bank.disableDefaultBankShortcutLayout) return;
       const currentKey = normalizeStoredShortcutKey(bank.shortcutKey);
       if (currentKey) return;
       while (candidateIndex < normalizedCandidates.length && usedKeys.has(normalizedCandidates[candidateIndex])) {

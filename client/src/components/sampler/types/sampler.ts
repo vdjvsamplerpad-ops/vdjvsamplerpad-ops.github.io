@@ -37,6 +37,8 @@ export interface SamplerBank {
   exportable?: boolean; // Whether this bank can be exported
   bankMetadata?: BankMetadata; // Metadata for admin banks
   creatorEmail?: string; // Email of the user who created/exported the bank
+  disableDefaultPadShortcutLayout?: boolean; // Prevent automatic pad shortcut re-apply for this bank
+  disableDefaultBankShortcutLayout?: boolean; // Prevent automatic bank shortcut auto-fill for this bank
 }
 
 export interface BankMetadata {

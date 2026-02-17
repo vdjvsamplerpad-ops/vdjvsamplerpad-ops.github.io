@@ -159,6 +159,7 @@ const STORAGE_KEY = 'vdjv-sampler-banks';
 const STATE_STORAGE_KEY = 'vdjv-sampler-state';
 const DEFAULT_BANK_LOADED_KEY = 'vdjv-default-bank-loaded';
 const DEFAULT_BANK_LOADING_LOCK_KEY = 'vdjv-default-bank-loading-lock';
+const DEFAULT_BANK_SOURCE_ID = 'vdjv-default-bank-source';
 const SESSION_ENFORCEMENT_EVENT_KEY = 'vdjv-session-enforcement-event';
 const HIDE_PROTECTED_BANKS_KEY = 'vdjv-hide-protected-banks';
 
@@ -553,6 +554,7 @@ const storeFile = async (padId: string, file: File, type: 'audio' | 'image'): Pr
 export function useSamplerStore(): SamplerStore {
   const { user, profile, loading, sessionConflictReason } = useAuth();
   const [banks, setBanks] = React.useState<SamplerBank[]>([]);
+  const [isBanksHydrated, setIsBanksHydrated] = React.useState(false);
   const [primaryBankId, setPrimaryBankIdState] = React.useState<string | null>(null);
   const [secondaryBankId, setSecondaryBankIdState] = React.useState<string | null>(null);
   const [currentBankId, setCurrentBankIdState] = React.useState<string | null>(null);
@@ -675,6 +677,7 @@ export function useSamplerStore(): SamplerStore {
   }, []);
 
   const restoreAllFiles = React.useCallback(async () => {
+    setIsBanksHydrated(false);
     if (typeof window === 'undefined') return;
     const savedData = getLocalStorageItemSafe(STORAGE_KEY);
     const savedState = getLocalStorageItemSafe(STATE_STORAGE_KEY);
@@ -685,6 +688,7 @@ export function useSamplerStore(): SamplerStore {
         const defaultBank: SamplerBank = { id: generateId(), name: 'Default Bank', defaultColor: '#3b82f6', pads: [], createdAt: new Date(), sortOrder: 0 };
       setBanks([defaultBank]); 
       setCurrentBankIdState(defaultBank.id);
+      setIsBanksHydrated(true);
         return;
     }
     try {
@@ -728,9 +732,10 @@ export function useSamplerStore(): SamplerStore {
       setSecondaryBankIdState(restoredState.secondaryBankId);
       if (restoredState.currentBankId && restoredBanks.find(b => b.id === restoredState.currentBankId)) setCurrentBankIdState(restoredState.currentBankId);
       else if (restoredBanks.length > 0) setCurrentBankIdState(restoredBanks[0].id);
+      setIsBanksHydrated(true);
     } catch (error) {
        const defaultBank: SamplerBank = { id: generateId(), name: 'Default Bank', defaultColor: '#3b82f6', pads: [], createdAt: new Date(), sortOrder: 0 };
-       setBanks([defaultBank]); setCurrentBankIdState(defaultBank.id);
+       setBanks([defaultBank]); setCurrentBankIdState(defaultBank.id); setIsBanksHydrated(true);
     }
   }, []);
 
@@ -921,7 +926,18 @@ export function useSamplerStore(): SamplerStore {
         updatedPad.imageData = undefined;
       } catch (e) {}
     }
-    setBanks(prev => prev.map(b => b.id === bankId ? { ...b, pads: b.pads.map(pad => pad.id === id ? updatedPad : pad) } : b));
+    setBanks(prev =>
+      prev.map((bank) => {
+        if (bank.id !== bankId) return bank;
+        const existingPad = bank.pads.find((pad) => pad.id === id);
+        const removedShortcut = Boolean(existingPad?.shortcutKey) && !updatedPad.shortcutKey;
+        return {
+          ...bank,
+          disableDefaultPadShortcutLayout: removedShortcut ? true : bank.disableDefaultPadShortcutLayout,
+          pads: bank.pads.map((pad) => (pad.id === id ? updatedPad : pad))
+        };
+      })
+    );
   }, []);
 
   const removePad = React.useCallback(async (bankId: string, id: string) => {
@@ -951,21 +967,25 @@ export function useSamplerStore(): SamplerStore {
 
   const moveBankUp = React.useCallback((id: string) => {
     setBanks(prev => {
-      const sorted = [...prev].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-      const idx = sorted.findIndex(b => b.id === id);
+      const ordered = [...prev]
+        .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0))
+        .map((bank, index) => ({ ...bank, sortOrder: index }));
+      const idx = ordered.findIndex((bank) => bank.id === id);
       if (idx <= 0) return prev;
-      const t = sorted[idx - 1].sortOrder; sorted[idx - 1].sortOrder = sorted[idx].sortOrder; sorted[idx].sortOrder = t;
-      return sorted;
+      [ordered[idx - 1], ordered[idx]] = [ordered[idx], ordered[idx - 1]];
+      return ordered.map((bank, index) => ({ ...bank, sortOrder: index }));
     });
   }, []);
 
   const moveBankDown = React.useCallback((id: string) => {
     setBanks(prev => {
-      const sorted = [...prev].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-      const idx = sorted.findIndex(b => b.id === id);
-      if (idx >= sorted.length - 1 || idx === -1) return prev;
-      const t = sorted[idx + 1].sortOrder; sorted[idx + 1].sortOrder = sorted[idx].sortOrder; sorted[idx].sortOrder = t;
-      return sorted;
+      const ordered = [...prev]
+        .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0))
+        .map((bank, index) => ({ ...bank, sortOrder: index }));
+      const idx = ordered.findIndex((bank) => bank.id === id);
+      if (idx === -1 || idx >= ordered.length - 1) return prev;
+      [ordered[idx], ordered[idx + 1]] = [ordered[idx + 1], ordered[idx]];
+      return ordered.map((bank, index) => ({ ...bank, sortOrder: index }));
     });
   }, []);
 
@@ -995,7 +1015,18 @@ export function useSamplerStore(): SamplerStore {
   const setCurrentBank = React.useCallback((id: string | null) => { if (!isDualMode) setCurrentBankIdState(id); }, [isDualMode]);
   
   const updateBank = React.useCallback((id: string, updates: Partial<SamplerBank>) => {
-    setBanks(prev => prev.map(b => b.id === id ? { ...b, ...updates } : b));
+    setBanks(prev =>
+      prev.map((bank) => {
+        if (bank.id !== id) return bank;
+        const next: SamplerBank = { ...bank, ...updates };
+        if (bank.shortcutKey && updates.shortcutKey === undefined) {
+          next.disableDefaultBankShortcutLayout = true;
+        } else if (typeof updates.shortcutKey === 'string' && updates.shortcutKey.trim().length > 0) {
+          next.disableDefaultBankShortcutLayout = false;
+        }
+        return next;
+      })
+    );
   }, []);
 
   const deleteBank = React.useCallback(async (id: string) => {
@@ -1815,6 +1846,10 @@ export function useSamplerStore(): SamplerStore {
       return;
     }
 
+    if (!isBanksHydrated) {
+      return;
+    }
+
     const justLoggedIn = currentUserId && prevUserIdRef.current !== currentUserId;
     if (!justLoggedIn) {
       prevUserIdRef.current = currentUserId;
@@ -1827,6 +1862,20 @@ export function useSamplerStore(): SamplerStore {
 
     const userDefaultBankKey = `${DEFAULT_BANK_LOADED_KEY}_${currentUserId}`;
     const alreadyLoaded = getLocalStorageItemSafe(userDefaultBankKey);
+    const hasExistingDefaultBank = banks.some(
+      (bank) =>
+        (bank.name === 'Default Bank' || bank.sourceBankId === DEFAULT_BANK_SOURCE_ID) &&
+        Array.isArray(bank.pads) &&
+        bank.pads.length > 0
+    );
+    if (alreadyLoaded && hasExistingDefaultBank) {
+      return;
+    }
+    if (alreadyLoaded && !hasExistingDefaultBank) {
+      try {
+        localStorage.removeItem(userDefaultBankKey);
+      } catch {}
+    }
 
     const lockKey = `${DEFAULT_BANK_LOADING_LOCK_KEY}_${currentUserId}`;
     const existingLock = getLocalStorageItemSafe(lockKey);
@@ -1840,7 +1889,10 @@ export function useSamplerStore(): SamplerStore {
       setLocalStorageItemSafe(lockKey, String(Date.now()));
       try {
         const hasNonEmptyDefault = banks.some(
-          (bank) => bank.name === 'Default Bank' && Array.isArray(bank.pads) && bank.pads.length > 0
+          (bank) =>
+            (bank.name === 'Default Bank' || bank.sourceBankId === DEFAULT_BANK_SOURCE_ID) &&
+            Array.isArray(bank.pads) &&
+            bank.pads.length > 0
         );
         if (hasNonEmptyDefault) {
           setLocalStorageItemSafe(userDefaultBankKey, 'true');
@@ -1849,7 +1901,9 @@ export function useSamplerStore(): SamplerStore {
 
         // Find and delete empty "Default Bank" if it exists
         const emptyDefaultBank = banks.find(
-          (b) => b.name === 'Default Bank' && (!b.pads || b.pads.length === 0)
+          (b) =>
+            (b.name === 'Default Bank' || b.sourceBankId === DEFAULT_BANK_SOURCE_ID) &&
+            (!b.pads || b.pads.length === 0)
         );
         if (emptyDefaultBank) {
           setBanks((prev) => prev.filter((b) => b.id !== emptyDefaultBank.id));
@@ -1887,8 +1941,8 @@ export function useSamplerStore(): SamplerStore {
         // Import the bank
         const importedBank = await importBank(file);
         if (importedBank) {
-          // Rename to "Default Bank" and set as current
-          updateBank(importedBank.id, { name: 'Default Bank' });
+          // Keep a stable source id so default bank isn't imported twice per device cache.
+          updateBank(importedBank.id, { name: 'Default Bank', sourceBankId: DEFAULT_BANK_SOURCE_ID });
           setCurrentBankIdState(importedBank.id);
           setLocalStorageItemSafe(userDefaultBankKey, 'true');
         } else {
@@ -1905,10 +1959,8 @@ export function useSamplerStore(): SamplerStore {
       }
     };
 
-    if (!alreadyLoaded) {
-      loadDefaultBank();
-    }
-  }, [user?.id, importBank, updateBank, getDefaultBankPath, banks, currentBankId]);
+    loadDefaultBank();
+  }, [user?.id, importBank, updateBank, getDefaultBankPath, banks, currentBankId, isBanksHydrated]);
 
 
   return {

@@ -198,12 +198,13 @@ export function HeaderControls({
   onImportMappings
 }: HeaderControlsProps) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const { user, profile, loading } = useAuth();
+  const { user, profile, loading, signOut } = useAuth();
   const isAdmin = profile?.role === 'admin';
   const [adminDialogOpen, setAdminDialogOpen] = React.useState(false);
   const [AdminAccessDialog, setAdminAccessDialog] = React.useState<React.ComponentType<any> | null>(null);
   const [showLoginModal, setShowLoginModal] = React.useState(false);
   const [aboutOpen, setAboutOpen] = React.useState(false);
+  const [headerCompact, setHeaderCompact] = React.useState(false);
 
   // Dynamically load AdminAccessDialog only for admin users
   React.useEffect(() => {
@@ -226,6 +227,16 @@ export function HeaderControls({
     const handleLoginRequest = () => setShowLoginModal(true);
     window.addEventListener('vdjv-login-request', handleLoginRequest as EventListener);
     return () => window.removeEventListener('vdjv-login-request', handleLoginRequest as EventListener);
+  }, []);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleScroll = () => {
+      setHeaderCompact(window.scrollY > 24);
+    };
+    handleScroll();
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
   }, []);
   
   // Show greeting notification when user logs in
@@ -268,6 +279,15 @@ export function HeaderControls({
     fileInputRef.current?.click();
   };
 
+  const handleSignOut = React.useCallback(async () => {
+    const { error } = await signOut();
+    if (error) {
+      pushNotice({ variant: 'error', message: error.message || 'Sign out failed.' });
+      return;
+    }
+    pushNotice({ variant: 'success', message: 'Signed out.' });
+  }, [signOut, pushNotice]);
+
   const isMobileScreen = windowWidth < 1160;
 
   const getTimeBasedGreeting = () => {
@@ -284,6 +304,7 @@ export function HeaderControls({
 
   const displayName = profile?.display_name || user?.email?.split('@')[0] || 'Guest';
   const appVersion = (import.meta as any).env?.VITE_APP_VERSION || 'unknown';
+  const showBranding = !headerCompact && !isDualMode;
 
   const getBankDisplayName = () => {
     if (isDualMode) {
@@ -308,30 +329,43 @@ export function HeaderControls({
         id="global-audio-upload-input"
       />
 
-      <header className="text-center mb-6">
-        <div className="flex items-center justify-center gap-4 mb-1">
-          <button
-            type="button"
-            onClick={() => setAboutOpen(true)}
-            className="rounded-full transition-transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-            aria-label="About VDJV Sampler Pad"
-          >
-            <img
-              src="./assets/logo.png"
-              alt="VDJV Logo"
-              className="w-12 h-12 object-contain"
-            />
-          </button>
-          <h1 className={`font-bold text-red-600 ${isMobileScreen
-            ? 'text-m'
-            : isMobileScreen
-              ? 'text-l'
-              : windowWidth < 1024
-                ? 'text-xl'
-                : 'text-2xl xl:text-3xl'
-            }`}>
-            {getTitleText()}
-          </h1>
+      <header
+        className={`sticky top-0 z-40 text-center mb-2 backdrop-blur-sm ${
+          theme === 'dark' ? 'bg-gray-900/70' : 'bg-white/70'
+        }`}
+      >
+        <div
+          className={`overflow-hidden will-change-[max-height,opacity,transform] transition-all duration-300 ease-out ${
+            showBranding ? 'max-h-20 opacity-100 translate-y-0 mb-1' : 'max-h-0 opacity-0 -translate-y-1 mb-0 pointer-events-none'
+          }`}
+        >
+          <div className="flex items-center justify-center gap-4">
+            <button
+              type="button"
+              onClick={() => setAboutOpen(true)}
+              className="rounded-full transition-transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+              aria-label="About VDJV Sampler Pad"
+              tabIndex={showBranding ? 0 : -1}
+            >
+              <img
+                src="./assets/logo.png"
+                alt="VDJV Logo"
+                className="w-12 h-12 object-contain"
+              />
+            </button>
+            <h1
+              className={`font-bold text-red-600 transition-opacity duration-200 ${showBranding ? 'opacity-100' : 'opacity-0'} ${isMobileScreen
+                ? 'text-m'
+                : isMobileScreen
+                  ? 'text-l'
+                  : windowWidth < 1024
+                    ? 'text-xl'
+                    : 'text-2xl xl:text-3xl'
+                }`}
+            >
+              {getTitleText()}
+            </h1>
+          </div>
         </div>
 
         <div className={`mb-1 text-sm ${theme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
@@ -534,6 +568,8 @@ export function HeaderControls({
         onSelectMidiDeviceProfile={onSelectMidiDeviceProfile}
         onExportMappings={onExportMappings}
         onImportMappings={onImportMappings}
+        isAuthenticated={Boolean(user)}
+        onSignOut={handleSignOut}
       />
 
       {/* Login Modal */}

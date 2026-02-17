@@ -19,6 +19,8 @@ interface ProgressDialogProps {
   etaSeconds?: number | null;
   statusMessage?: string;
   showWarning?: boolean;
+  hideCloseButton?: boolean;
+  useHistory?: boolean;
 }
 
 export function ProgressDialog({
@@ -35,7 +37,9 @@ export function ProgressDialog({
   onLogin,
   etaSeconds,
   statusMessage,
-  showWarning
+  showWarning,
+  hideCloseButton = false,
+  useHistory = true
 }: ProgressDialogProps) {
   const handleDialogOpenChange = (nextOpen: boolean) => {
     // Keep dialog visible while processing to prevent accidental close on backdrop click.
@@ -75,7 +79,7 @@ export function ProgressDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
+    <Dialog open={open} onOpenChange={handleDialogOpenChange} useHistory={useHistory}>
       {/* Inject styles for the flowing animation */}
       <style>{`
         @keyframes flow-glow {
@@ -88,6 +92,7 @@ export function ProgressDialog({
       `}</style>
 
       <DialogContent
+        hideCloseButton={hideCloseButton}
         className={`sm:max-w-md backdrop-blur-md transition-colors duration-200 ${
         theme === 'dark' ? 'bg-gray-800/95 border-gray-600' : 'bg-white/95 border-gray-300'
       }`}

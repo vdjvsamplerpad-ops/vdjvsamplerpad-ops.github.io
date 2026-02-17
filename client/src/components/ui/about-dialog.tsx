@@ -69,6 +69,8 @@ interface AboutDialogProps {
   onSelectMidiDeviceProfile: (id: string | null) => void;
   onExportMappings: () => Promise<string>;
   onImportMappings: (file: File) => Promise<string>;
+  isAuthenticated?: boolean;
+  onSignOut?: () => Promise<void> | void;
 }
 
 export function AboutDialog({
@@ -110,7 +112,9 @@ export function AboutDialog({
   midiDeviceProfileId,
   onSelectMidiDeviceProfile,
   onExportMappings,
-  onImportMappings
+  onImportMappings,
+  isAuthenticated = false,
+  onSignOut
 }: AboutDialogProps) {
   const [midiLearnAction, setMidiLearnAction] = React.useState<
     | { type: 'system'; action: SystemAction }
@@ -118,8 +122,10 @@ export function AboutDialog({
     | { type: 'masterVolume' }
     | null
   >(null);
+  const [activePanel, setActivePanel] = React.useState<'general' | 'system' | 'channels' | 'backup'>('general');
   const [mappingError, setMappingError] = React.useState<string | null>(null);
   const [mappingNotice, setMappingNotice] = React.useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [isSigningOut, setIsSigningOut] = React.useState(false);
   const importInputRef = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
@@ -127,6 +133,7 @@ export function AboutDialog({
       setMidiLearnAction(null);
       setMappingError(null);
       setMappingNotice(null);
+      setActivePanel('general');
     }
   }, [open]);
 
@@ -467,6 +474,17 @@ export function AboutDialog({
     [onImportMappings]
   );
 
+  const handleSignOut = React.useCallback(async () => {
+    if (!onSignOut || isSigningOut) return;
+    setIsSigningOut(true);
+    try {
+      await onSignOut();
+      onOpenChange(false);
+    } finally {
+      setIsSigningOut(false);
+    }
+  }, [onSignOut, isSigningOut, onOpenChange]);
+
   const showColorColumn = midiEnabled;
   const showMidiColumn = midiAccessGranted;
   const systemGridCols = showMidiColumn
@@ -475,12 +493,21 @@ export function AboutDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[95vw] max-h-[90vh] overflow-y-auto sm:max-w-lg backdrop-blur-md bg-white/95 border-gray-300 dark:bg-gray-800/95 dark:border-gray-600">
-        <DialogHeader>
+      <DialogContent className="w-[96vw] max-h-[92vh] overflow-hidden sm:max-w-4xl backdrop-blur-md bg-white/95 border-gray-300 dark:bg-gray-800/95 dark:border-gray-600">
+        <DialogHeader className="pb-2 border-b border-gray-200 dark:border-gray-700">
           <DialogTitle>VDJV Sampler Pad</DialogTitle>
           <DialogDescription>{DEFAULT_DESCRIPTION}</DialogDescription>
         </DialogHeader>
-        <div className="space-y-4 text-sm">
+        <div className="space-y-3 py-2 max-h-[calc(92vh-96px)] overflow-y-auto pr-1 text-sm">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <Button type="button" variant={activePanel === 'general' ? 'default' : 'outline'} size="sm" onClick={() => setActivePanel('general')}>General</Button>
+            <Button type="button" variant={activePanel === 'system' ? 'default' : 'outline'} size="sm" onClick={() => setActivePanel('system')}>System</Button>
+            <Button type="button" variant={activePanel === 'channels' ? 'default' : 'outline'} size="sm" onClick={() => setActivePanel('channels')}>Channels</Button>
+            <Button type="button" variant={activePanel === 'backup' ? 'default' : 'outline'} size="sm" onClick={() => setActivePanel('backup')}>Backup</Button>
+          </div>
+
+          {activePanel === 'general' && (
+            <>
           <div className="grid gap-2 sm:grid-cols-2">
             <div className="rounded-lg border p-3">
               <div className="text-xs uppercase tracking-wide text-gray-500">User</div>
@@ -579,6 +606,22 @@ export function AboutDialog({
               </Select>
             </div>
           </div>
+          {isAuthenticated && onSignOut && (
+            <div className="rounded-lg border p-3">
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={handleSignOut}
+                disabled={isSigningOut}
+              >
+                {isSigningOut ? 'Signing out...' : 'Sign Out'}
+              </Button>
+            </div>
+          )}
+            </>
+          )}
+          {activePanel === 'system' && (
           <div className="rounded-lg border p-3 space-y-3">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="text-xs uppercase tracking-wide text-gray-500">System Mapping</div>
@@ -594,7 +637,103 @@ export function AboutDialog({
             {mappingError && (
               <div className="text-xs text-red-500">{mappingError}</div>
             )}
-            <div className={`grid gap-2 text-xs font-medium text-gray-500 grid-cols-1 ${systemGridCols}`}>
+            <div className="space-y-2 sm:hidden">
+              {systemActions.map((action) => {
+                const mapping = systemMappings[action] as SystemMappings[SystemAction] & { color?: string };
+                const hasMidi = mapping.midiNote !== undefined || mapping.midiCC !== undefined;
+                return (
+                  <div key={`mobile-${action}`} className="rounded-md border p-2 space-y-2">
+                    <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">{SYSTEM_ACTION_LABELS[action]}</div>
+                    <div className="space-y-1">
+                      <Label className="text-[10px] uppercase tracking-wide text-gray-500">Keyboard</Label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          value={mapping.key || ''}
+                          onKeyDown={handleKeyAssign(action)}
+                          placeholder={DEFAULT_SYSTEM_MAPPINGS[action].key}
+                          readOnly
+                          className="h-8 text-xs"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8 px-2 text-[10px]"
+                          onClick={() => {
+                            onResetSystemKey(action);
+                            onUpdateSystemMidi(action, undefined, undefined);
+                          }}
+                        >
+                          Reset
+                        </Button>
+                      </div>
+                    </div>
+                    {showColorColumn && (
+                      <div className="space-y-1">
+                        <Label className="text-[10px] uppercase tracking-wide text-gray-500">Color</Label>
+                        <Select
+                          value={mapping.color || '__none__'}
+                          onValueChange={(value) => onUpdateSystemColor(action, value === '__none__' ? undefined : value)}
+                        >
+                          <SelectTrigger className="h-8 text-xs">
+                            <SelectValue placeholder="—" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__none__">None</SelectItem>
+                            {SYSTEM_COLOR_OPTIONS.map((entry) => (
+                              <SelectItem key={entry.name} value={entry.hex}>
+                                {entry.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                    {showMidiColumn && (
+                      <div className="space-y-1">
+                        <Label className="text-[10px] uppercase tracking-wide text-gray-500">MIDI</Label>
+                        <div className="flex items-center gap-2">
+                          {!hasMidi && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-8 px-2 text-[10px]"
+                              onClick={() => setMidiLearnAction({ type: 'system', action })}
+                            >
+                              {midiLearnAction?.type === 'system' && midiLearnAction.action === action ? 'Listening...' : 'Learn'}
+                            </Button>
+                          )}
+                          {hasMidi && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-8 px-2 text-[10px]"
+                              onClick={() => {
+                                onUpdateSystemMidi(action, undefined, undefined);
+                                setMappingError(null);
+                              }}
+                            >
+                              Clear
+                            </Button>
+                          )}
+                          <span className="text-xs text-gray-500">
+                            {mapping.midiNote !== undefined
+                              ? `Note ${mapping.midiNote}`
+                              : mapping.midiCC !== undefined
+                                ? `CC ${mapping.midiCC}`
+                                : '—'}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className={`hidden sm:grid gap-2 text-xs font-medium text-gray-500 grid-cols-1 ${systemGridCols}`}>
               <div>Function</div>
               <div>Keyboard</div>
               {showColorColumn && <div>Color</div>}
@@ -604,7 +743,7 @@ export function AboutDialog({
               const mapping = systemMappings[action] as SystemMappings[SystemAction] & { color?: string };
               const hasMidi = mapping.midiNote !== undefined || mapping.midiCC !== undefined;
               return (
-                <div key={action} className={`grid gap-2 items-center grid-cols-1 ${systemGridCols}`}>
+                <div key={action} className={`hidden sm:grid gap-2 items-center grid-cols-1 ${systemGridCols}`}>
                   <div className="text-xs text-gray-700 dark:text-gray-200">{SYSTEM_ACTION_LABELS[action]}</div>
                   <div className="flex items-center gap-2">
                     <Input
@@ -686,6 +825,8 @@ export function AboutDialog({
             })}
 
           </div>
+          )}
+          {activePanel === 'channels' && (
           <div className="rounded-lg border p-3 space-y-3">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="text-xs uppercase tracking-wide text-gray-500">Channel Mapping</div>
@@ -698,7 +839,192 @@ export function AboutDialog({
                 </Button>
               </div>
             </div>
-            <div className={`grid gap-2 text-xs font-medium text-gray-500 grid-cols-1 ${showMidiColumn ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}>
+            <div className="space-y-2 sm:hidden">
+              {(systemMappings.channelMappings || []).map((mapping, index) => (
+                <div key={`mobile-channel-${index}`} className="rounded-md border p-2 space-y-2">
+                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Channel {index + 1}</div>
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase tracking-wide text-gray-500">Volume Up</Label>
+                    <Input
+                      value={mapping.keyUp || ''}
+                      onKeyDown={handleChannelKeyAssign(index, 'keyUp')}
+                      placeholder="—"
+                      readOnly
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase tracking-wide text-gray-500">Volume Down</Label>
+                    <Input
+                      value={mapping.keyDown || ''}
+                      onKeyDown={handleChannelKeyAssign(index, 'keyDown')}
+                      placeholder="—"
+                      readOnly
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase tracking-wide text-gray-500">Stop</Label>
+                    <Input
+                      value={mapping.keyStop || ''}
+                      onKeyDown={handleChannelKeyAssign(index, 'keyStop')}
+                      placeholder="—"
+                      readOnly
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  {showMidiColumn && (
+                    <div className="space-y-1">
+                      <Label className="text-[10px] uppercase tracking-wide text-gray-500">MIDI Note / CC</Label>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {mapping.midiNote === undefined ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-[10px]"
+                            onClick={() => setMidiLearnAction({ type: 'channel', channelIndex: index })}
+                          >
+                            {midiLearnAction?.type === 'channel' && midiLearnAction.channelIndex === index ? 'Listening...' : 'Learn Note'}
+                          </Button>
+                        ) : (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-[10px]"
+                            onClick={() => {
+                              onUpdateChannelMapping(index, { midiNote: undefined });
+                              setMappingError(null);
+                            }}
+                          >
+                            Clear Note
+                          </Button>
+                        )}
+                        {mapping.midiCC === undefined ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-[10px]"
+                            onClick={() => setMidiLearnAction({ type: 'channel', channelIndex: index })}
+                          >
+                            {midiLearnAction?.type === 'channel' && midiLearnAction.channelIndex === index ? 'Listening...' : 'Learn CC'}
+                          </Button>
+                        ) : (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-[10px]"
+                            onClick={() => {
+                              onUpdateChannelMapping(index, { midiCC: undefined });
+                              setMappingError(null);
+                            }}
+                          >
+                            Clear CC
+                          </Button>
+                        )}
+                        <span className="text-xs text-gray-500">Note: {mapping.midiNote ?? '—'} / CC: {mapping.midiCC ?? '—'}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              <div className="rounded-md border p-2 space-y-2">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Master</div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] uppercase tracking-wide text-gray-500">Volume Up</Label>
+                  <Input
+                    value={systemMappings.volumeUp.key || ''}
+                    onKeyDown={handleMasterKeyAssign('volumeUp')}
+                    placeholder={DEFAULT_SYSTEM_MAPPINGS.volumeUp.key}
+                    readOnly
+                    className="h-8 text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] uppercase tracking-wide text-gray-500">Volume Down</Label>
+                  <Input
+                    value={systemMappings.volumeDown.key || ''}
+                    onKeyDown={handleMasterKeyAssign('volumeDown')}
+                    placeholder={DEFAULT_SYSTEM_MAPPINGS.volumeDown.key}
+                    readOnly
+                    className="h-8 text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] uppercase tracking-wide text-gray-500">Mute</Label>
+                  <Input
+                    value={systemMappings.mute.key || ''}
+                    onKeyDown={handleMasterKeyAssign('mute')}
+                    placeholder={DEFAULT_SYSTEM_MAPPINGS.mute.key}
+                    readOnly
+                    className="h-8 text-xs"
+                  />
+                  {showMidiColumn && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {systemMappings.mute.midiNote === undefined ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-[10px]"
+                          onClick={() => setMidiLearnAction({ type: 'system', action: 'mute' })}
+                        >
+                          {midiLearnAction?.type === 'system' && midiLearnAction.action === 'mute' ? 'Listening...' : 'Learn Note'}
+                        </Button>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-[10px]"
+                          onClick={() => {
+                            onUpdateSystemMidi('mute', undefined, undefined);
+                            setMappingError(null);
+                          }}
+                        >
+                          Clear Note
+                        </Button>
+                      )}
+                      <span className="text-xs text-gray-500">Note: {systemMappings.mute.midiNote ?? '—'}</span>
+                    </div>
+                  )}
+                </div>
+                {showMidiColumn && (
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase tracking-wide text-gray-500">Master Volume CC</Label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {systemMappings.masterVolumeCC === undefined && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-[10px]"
+                          onClick={() => setMidiLearnAction({ type: 'masterVolume' })}
+                        >
+                          {midiLearnAction?.type === 'masterVolume' ? 'Listening...' : 'Learn CC'}
+                        </Button>
+                      )}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-[10px]"
+                        onClick={() => onSetMasterVolumeCC(undefined)}
+                      >
+                        Clear
+                      </Button>
+                      <span className="text-xs text-gray-500">CC: {systemMappings.masterVolumeCC ?? '—'}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className={`hidden sm:grid gap-2 text-xs font-medium text-gray-500 grid-cols-1 ${showMidiColumn ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}>
               <div>Channel</div>
               <div>Vol +</div>
               <div>Vol -</div>
@@ -708,7 +1034,7 @@ export function AboutDialog({
             {(systemMappings.channelMappings || []).map((mapping, index) => (
               <div
                 key={`channel-${index}`}
-                className={`grid gap-2 items-center grid-cols-1 ${showMidiColumn ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}
+                className={`hidden sm:grid gap-2 items-center grid-cols-1 ${showMidiColumn ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}
               >
                 <div className="text-xs text-gray-700 dark:text-gray-200">CH {index + 1}</div>
                 <Input
@@ -800,7 +1126,7 @@ export function AboutDialog({
                 )}
               </div>
             ))}
-            <div className={`grid gap-2 items-center grid-cols-1 ${showMidiColumn ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}>
+            <div className={`hidden sm:grid gap-2 items-center grid-cols-1 ${showMidiColumn ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}>
               <div className="text-xs text-gray-700 dark:text-gray-200">Master</div>
               <Input
                 value={systemMappings.volumeUp.key || ''}
@@ -882,6 +1208,8 @@ export function AboutDialog({
               )}
             </div>
           </div>
+          )}
+          {activePanel === 'backup' && (
           <div className="rounded-lg border p-3 space-y-2">
             <div className="text-xs uppercase tracking-wide text-gray-500">Mapping Backup</div>
             {mappingNotice && (
@@ -905,6 +1233,7 @@ export function AboutDialog({
               />
             </div>
           </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>

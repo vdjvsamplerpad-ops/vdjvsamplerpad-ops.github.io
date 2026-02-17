@@ -29,7 +29,8 @@
     "cap:sync": "npm run build && npm run generate:android-icons && npx cap sync",
     "cap:build:android": "npm run cap:sync && cd android && .\\gradlew.bat assembleRelease",
     "cap:open:android": "npx cap open android",
-    "cap:open:ios": "npx cap open ios"
+    "cap:open:ios": "npx cap open ios",
+    "hooks:install": "node scripts/install-git-hooks.cjs"
   },
   "dependencies": {
     "@capacitor/filesystem": "^6.0.4",
