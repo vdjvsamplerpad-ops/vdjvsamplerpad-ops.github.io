@@ -1,4 +1,4 @@
-import * as React from 'react';
+﻿import * as React from 'react';
 import JSZip from 'jszip';
 import lamejs from 'lamejs';
 import { PadData, SamplerBank, BankMetadata } from '../types/sampler';
@@ -40,102 +40,199 @@ const isNativeCapacitorPlatform = (): boolean => {
 const EXPORT_FOLDER_NAME = 'VDJV-Export';
 const ANDROID_DOWNLOAD_ROOT = '/storage/emulated/0/Download';
 const NATIVE_MEDIA_ROOT = `${EXPORT_FOLDER_NAME}/_media`;
-const BACKUP_VERSION = 1;
+const EXPORT_LOGS_FOLDER = `${EXPORT_FOLDER_NAME}/logs`;
+const BACKUP_VERSION = 2;
 const BACKUP_EXT = '.vdjvbackup';
 const MIN_FREE_STORAGE_BYTES = 200 * 1024 * 1024;
+const MAX_UNKNOWN_STORAGE_OPERATION_BYTES = 450 * 1024 * 1024;
+const MAX_NATIVE_BANK_EXPORT_BYTES = 350 * 1024 * 1024;
+const MAX_NATIVE_APP_BACKUP_BYTES = 600 * 1024 * 1024;
+const MAX_NATIVE_STARTUP_RESTORE_PADS = 320;
 
-// Helper to save file using Capacitor Filesystem or standard download
-// Returns object with success status and message
-const saveBankFile = async (blob: Blob, fileName: string): Promise<{ success: boolean; message?: string; savedPath?: string }> => {
-  if (isNativeAndroid()) {
+type MediaBackend = 'native' | 'idb';
+type OperationName = 'bank_export' | 'admin_bank_export' | 'app_backup_export' | 'app_backup_restore';
+
+interface OperationStage {
+  stage: string;
+  at: string;
+  details?: Record<string, unknown>;
+}
+
+interface OperationDiagnostics {
+  operationId: string;
+  operation: OperationName;
+  startedAt: string;
+  endedAt?: string;
+  platform: string;
+  isCapacitorNative: boolean;
+  isElectron: boolean;
+  userId?: string | null;
+  stages: OperationStage[];
+  metrics: Record<string, number>;
+  error?: {
+    message: string;
+    stack?: string;
+  };
+}
+
+const normalizeFolderPath = (path: string): string => path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+
+const getRuntimePlatformLabel = (): string => {
+  if (typeof window === 'undefined') return 'unknown';
+  if (isNativeCapacitorPlatform()) return isNativeAndroid() ? 'capacitor-android' : 'capacitor-ios';
+  if (window.navigator.userAgent.includes('Electron')) return 'electron';
+  return 'web';
+};
+
+const createOperationDiagnostics = (operation: OperationName, userId?: string | null): OperationDiagnostics => ({
+  operationId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  operation,
+  startedAt: new Date().toISOString(),
+  platform: getRuntimePlatformLabel(),
+  isCapacitorNative: isNativeCapacitorPlatform(),
+  isElectron: typeof window !== 'undefined' && window.navigator.userAgent.includes('Electron'),
+  userId: userId || null,
+  stages: [],
+  metrics: {}
+});
+
+const addOperationStage = (
+  diagnostics: OperationDiagnostics,
+  stage: string,
+  details?: Record<string, unknown>
+) => {
+  diagnostics.stages.push({ stage, at: new Date().toISOString(), details });
+};
+
+const sanitizeOperationError = (error: unknown): { message: string; stack?: string } => {
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      stack: error.stack ? error.stack.slice(0, 4000) : undefined
+    };
+  }
+  return { message: String(error) };
+};
+
+const ensureExportPermission = async (): Promise<void> => {
+  if (!isNativeAndroid()) return;
+  const { Filesystem } = await import('@capacitor/filesystem');
+  const permissionStatus = await Filesystem.checkPermissions();
+  if (permissionStatus.publicStorage === 'granted') return;
+  const requested = await Filesystem.requestPermissions();
+  if (requested.publicStorage !== 'granted') {
+    throw new Error('Storage permission was denied. Please allow storage access and try again.');
+  }
+};
+
+const saveExportFile = async (
+  blob: Blob,
+  fileName: string,
+  relativeFolder: string = EXPORT_FOLDER_NAME
+): Promise<{ success: boolean; message?: string; savedPath?: string }> => {
+  const normalizedFolder = normalizeFolderPath(relativeFolder);
+  if (isNativeCapacitorPlatform()) {
     try {
-      // Use Capacitor Filesystem for native Android
+      await ensureExportPermission();
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Storage permission denied.'
+      };
+    }
+
+    try {
       const { Filesystem, Directory } = await import('@capacitor/filesystem');
-      
-      // Convert blob to base64
       const base64Data = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onloadend = () => {
-          const result = reader.result as string;
-          // Remove data URL prefix (e.g., "data:application/zip;base64,")
-          const base64 = result.split(',')[1];
+          const result = String(reader.result || '');
+          const base64 = result.includes(',') ? result.split(',')[1] : result;
           resolve(base64);
         };
         reader.onerror = reject;
         reader.readAsDataURL(blob);
       });
-      
-      const downloadRelativePath = `Download/${EXPORT_FOLDER_NAME}/${fileName}`;
-      const downloadAbsolutePath = `${ANDROID_DOWNLOAD_ROOT}/${EXPORT_FOLDER_NAME}/${fileName}`;
 
-      // Best effort: request public storage permission when required by Android version.
-      try {
-        const permissionStatus = await Filesystem.checkPermissions();
-        if (permissionStatus.publicStorage !== 'granted') {
-          await Filesystem.requestPermissions();
+      if (isNativeAndroid()) {
+        const downloadRelativePath = `Download/${normalizedFolder}/${fileName}`;
+        const downloadAbsolutePath = `${ANDROID_DOWNLOAD_ROOT}/${normalizedFolder}/${fileName}`;
+        try {
+          await Filesystem.writeFile({
+            path: downloadAbsolutePath,
+            data: base64Data,
+            recursive: true
+          });
+          return {
+            success: true,
+            message: `Successfully saved to ${downloadRelativePath}`,
+            savedPath: downloadRelativePath
+          };
+        } catch (downloadError) {
+          console.warn('Download folder write failed, falling back to Documents:', downloadError);
         }
-      } catch {
-        // Ignore permission API errors; write attempts below will handle fallback.
       }
 
-      // Preferred location: Android Download folder.
-      try {
-        await Filesystem.writeFile({
-          path: downloadAbsolutePath,
-          data: base64Data,
-          recursive: true
-        });
-
-        console.log(`✅ Bank saved to ${downloadRelativePath}`);
-        return {
-          success: true,
-          message: `Successfully exported to ${downloadRelativePath}`,
-          savedPath: downloadRelativePath
-        };
-      } catch (downloadError) {
-        console.warn('Download folder write failed, falling back to Documents:', downloadError);
-      }
-
-      // Fallback for devices that block direct Download folder writes.
       await Filesystem.writeFile({
-        path: `${EXPORT_FOLDER_NAME}/${fileName}`,
+        path: `${normalizedFolder}/${fileName}`,
         data: base64Data,
         directory: Directory.Documents,
         recursive: true
       });
-
-      console.log(`✅ Bank saved to Documents/${EXPORT_FOLDER_NAME}/${fileName}`);
       return {
         success: true,
-        message: `Successfully exported to Documents/${EXPORT_FOLDER_NAME}`,
-        savedPath: `Documents/${EXPORT_FOLDER_NAME}/${fileName}`
+        message: `Successfully saved to Documents/${normalizedFolder}/${fileName}`,
+        savedPath: `Documents/${normalizedFolder}/${fileName}`
       };
     } catch (error) {
-      console.error('❌ Failed to save using Capacitor Filesystem, falling back to download:', error);
-      // Fall through to standard download
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Failed to save file.'
+      };
     }
   }
-  
-  // Standard web download (works for web browsers and Electron)
-  const isElectron = typeof window !== 'undefined' && window.navigator.userAgent.includes('Electron');
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = fileName;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  
-  // For web/Electron, the browser handles the save location
-  // We can't know the exact path, but we know it was saved to the selected/download location
-  return { 
-    success: true,
-    message: isElectron ? `Successfully exported in 'selected path'` : `Successfully exported in 'selected path'`,
-    savedPath: fileName
-  };
+
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    return {
+      success: true,
+      message: `Successfully downloaded ${fileName}`,
+      savedPath: fileName
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Failed to trigger download.'
+    };
+  }
 };
 
+const writeOperationDiagnosticsLog = async (
+  diagnostics: OperationDiagnostics,
+  error: unknown
+): Promise<string | null> => {
+  try {
+    diagnostics.endedAt = new Date().toISOString();
+    diagnostics.error = sanitizeOperationError(error);
+    const payload = JSON.stringify(diagnostics, null, 2);
+    const fileName = `vdjv-${diagnostics.operation}-${diagnostics.operationId}.json`;
+    const result = await saveExportFile(
+      new Blob([payload], { type: 'application/json' }),
+      fileName,
+      EXPORT_LOGS_FOLDER
+    );
+    return result.success ? result.savedPath || fileName : null;
+  } catch {
+    return null;
+  }
+};
 interface SamplerStore {
   banks: SamplerBank[];
   primaryBankId: string | null;
@@ -272,7 +369,13 @@ const parseStorageKeyExt = (storageKey: string): string => {
 };
 
 const ensureStorageHeadroom = async (requiredBytes: number, operation: string): Promise<void> => {
-  if (typeof navigator === 'undefined' || typeof navigator.storage?.estimate !== 'function') return;
+  if (typeof navigator === 'undefined' || typeof navigator.storage?.estimate !== 'function') {
+    if (requiredBytes > MAX_UNKNOWN_STORAGE_OPERATION_BYTES) {
+      const requiredMb = Math.ceil(requiredBytes / (1024 * 1024));
+      throw new Error(`Unable to verify free storage for ${operation}. Operation is too large (${requiredMb}MB) without quota support.`);
+    }
+    return;
+  }
   try {
     const estimate = await navigator.storage.estimate();
     if (!estimate.quota || !estimate.usage) return;
@@ -288,6 +391,8 @@ const ensureStorageHeadroom = async (requiredBytes: number, operation: string): 
     }
   }
 };
+
+const yieldToMainThread = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 const writeNativeMediaBlob = async (padId: string, blob: Blob, type: 'audio' | 'image'): Promise<string | null> => {
   if (!isNativeCapacitorPlatform()) return null;
@@ -326,6 +431,20 @@ const readNativeMediaBlob = async (storageKey: string, type: 'audio' | 'image'):
     return new Blob([bytes], { type: mimeFromExt(parseStorageKeyExt(storageKey), type) });
   } catch {
     return null;
+  }
+};
+
+const readNativeMediaSize = async (storageKey?: string | null): Promise<number> => {
+  if (!isNativeCapacitorPlatform() || !storageKey) return 0;
+  try {
+    const { Filesystem, Directory } = await import('@capacitor/filesystem');
+    const stat = await Filesystem.stat({
+      path: `${NATIVE_MEDIA_ROOT}/${storageKey}`,
+      directory: Directory.Data
+    });
+    return Number(stat.size || 0);
+  } catch {
+    return 0;
   }
 };
 
@@ -631,10 +750,10 @@ const encodeAudioBufferToMP3 = (audioBuffer: AudioBuffer, bitrate: number = 128)
     const result = new Uint8Array(totalLength);
     let offset = 0;
     for (const chunk of mp3Data) { result.set(chunk, offset); offset += chunk.length; }
-    console.log('✅ MP3 encoding successful');
+    console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ MP3 encoding successful');
     return { blob: new Blob([result], { type: 'audio/mp3' }), format: 'mp3' };
   } catch (error) {
-    console.warn('⚠️ MP3 encoding failed, falling back to WAV:', error);
+    console.warn('ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â MP3 encoding failed, falling back to WAV:', error);
     return { blob: audioBufferToWavBlob(audioBuffer), format: 'wav' };
   }
 };
@@ -645,7 +764,7 @@ const trimAudio = async (
   endTimeMs: number,
   originalFormat: 'mp3' | 'wav' | 'ogg' | 'unknown'
 ): Promise<{ blob: Blob; newDurationMs: number }> => {
-  console.log(`🔧 trimAudio() called: startMs=${startTimeMs}, endMs=${endTimeMs}, format=${originalFormat}`);
+  console.log(`ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â§ trimAudio() called: startMs=${startTimeMs}, endMs=${endTimeMs}, format=${originalFormat}`);
   const arrayBuffer = await audioBlob.arrayBuffer();
   const arrayBufferCopy = arrayBuffer.slice(0);
   const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -683,63 +802,146 @@ const trimAudio = async (
 const restoreFileAccess = async (
   padId: string,
   type: 'audio' | 'image',
-  storageKey?: string
-): Promise<{ url: string | null; storageKey?: string }> => {
+  storageKey?: string,
+  backend?: MediaBackend
+): Promise<{ url: string | null; storageKey?: string; backend: MediaBackend }> => {
   const keyPrefix = type === 'image' ? 'image' : 'audio';
   const storageId = `${keyPrefix}_${padId}`;
 
-  if (isNativeCapacitorPlatform()) {
-    const candidateKeys: string[] = [];
-    if (storageKey) {
-      candidateKeys.push(storageKey);
-    } else {
-      const extensions = type === 'audio' ? ['mp3', 'wav', 'ogg', 'aac', 'm4a', 'bin'] : ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bin'];
-      extensions.forEach((ext) => candidateKeys.push(`${type}/${padId}.${ext}`));
-    }
-    for (const candidate of candidateKeys) {
-      const blob = await readNativeMediaBlob(candidate, type);
-      if (blob) {
-        return { url: URL.createObjectURL(blob), storageKey: candidate };
-      }
+  if (isNativeCapacitorPlatform() && storageKey) {
+    const blob = await readNativeMediaBlob(storageKey, type);
+    if (blob) {
+      return { url: URL.createObjectURL(blob), storageKey, backend: 'native' };
     }
   }
 
   if (supportsFileSystemAccess()) {
     try {
       const handle = await getFileHandle(storageId, type);
-      if (handle && ((await (handle as any).queryPermission?.()) === 'granted' || (await (handle as any).requestPermission?.()) === 'granted')) {
-        const file = await handle.getFile();
-        if (isNativeCapacitorPlatform()) {
-          const migratedKey = await writeNativeMediaBlob(padId, file, type);
-          return { url: URL.createObjectURL(file), storageKey: migratedKey || storageKey };
+      if (handle) {
+        const permission = await (handle as any).queryPermission?.();
+        if (permission === 'granted') {
+          const file = await handle.getFile();
+          return { url: URL.createObjectURL(file), storageKey, backend: 'idb' };
         }
-        return { url: URL.createObjectURL(file), storageKey };
       }
-    } catch (e) {}
+    } catch {}
   }
+
   try {
     const blob = await getBlobFromDB(storageId);
     if (blob) {
-      if (isNativeCapacitorPlatform()) {
-        const migratedKey = await writeNativeMediaBlob(padId, blob, type);
-        return { url: URL.createObjectURL(blob), storageKey: migratedKey || storageKey };
-      }
-      return { url: URL.createObjectURL(blob), storageKey };
+      return { url: URL.createObjectURL(blob), storageKey, backend: 'idb' };
     }
-  } catch (e) {}
-  return { url: null, storageKey };
+  } catch {}
+
+  if (isNativeCapacitorPlatform() && (!storageKey || backend === 'native')) {
+    const candidateKeys: string[] = [];
+    if (storageKey) {
+      candidateKeys.push(storageKey);
+    }
+    const extensions = type === 'audio' ? ['mp3', 'wav', 'ogg', 'aac', 'm4a', 'bin'] : ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bin'];
+    extensions.forEach((ext) => candidateKeys.push(`${type}/${padId}.${ext}`));
+    for (const candidate of candidateKeys) {
+      const blob = await readNativeMediaBlob(candidate, type);
+      if (blob) {
+        return { url: URL.createObjectURL(blob), storageKey: candidate, backend: 'native' };
+      }
+    }
+  }
+
+  return { url: null, storageKey, backend: backend || (storageKey ? 'native' : 'idb') };
 };
 
-const storeFile = async (padId: string, file: File, type: 'audio' | 'image'): Promise<string | undefined> => {
+const storeFile = async (
+  padId: string,
+  file: File,
+  type: 'audio' | 'image'
+): Promise<{ storageKey?: string; backend: MediaBackend }> => {
   if (isNativeCapacitorPlatform()) {
     const nativeKey = await writeNativeMediaBlob(padId, file, type);
-    if (nativeKey) return nativeKey;
+    if (nativeKey) return { storageKey: nativeKey, backend: 'native' };
   }
 
   const keyPrefix = type === 'image' ? 'image' : 'audio';
   const storageId = `${keyPrefix}_${padId}`;
   await saveBlobToDB(storageId, file, type === 'image');
-  return undefined;
+  return { backend: 'idb' };
+};
+
+const loadPadMediaBlob = async (pad: PadData, type: 'audio' | 'image'): Promise<Blob | null> => {
+  const storageId = `${type}_${pad.id}`;
+  const storageKey = type === 'audio' ? pad.audioStorageKey : pad.imageStorageKey;
+  if (storageKey) {
+    const nativeBlob = await readNativeMediaBlob(storageKey, type);
+    if (nativeBlob) return nativeBlob;
+  }
+
+  if (supportsFileSystemAccess()) {
+    try {
+      const handle = await getFileHandle(storageId, type);
+      if (handle && (await (handle as any).queryPermission?.()) === 'granted') {
+        const file = await handle.getFile();
+        return file;
+      }
+    } catch {}
+  }
+
+  try {
+    const blob = await getBlobFromDB(storageId);
+    if (blob) return blob;
+  } catch {}
+
+  const mediaUrl = type === 'audio' ? pad.audioUrl : pad.imageUrl;
+  if (mediaUrl) {
+    try {
+      return await (await fetch(mediaUrl)).blob();
+    } catch {}
+  }
+  return null;
+};
+
+const estimatePadMediaBytes = async (pad: PadData, type: 'audio' | 'image'): Promise<number> => {
+  const storageId = `${type}_${pad.id}`;
+  const storageKey = type === 'audio' ? pad.audioStorageKey : pad.imageStorageKey;
+  if (storageKey) {
+    const nativeSize = await readNativeMediaSize(storageKey);
+    if (nativeSize > 0) return nativeSize;
+  }
+  if (supportsFileSystemAccess()) {
+    try {
+      const handle = await getFileHandle(storageId, type);
+      if (handle && (await (handle as any).queryPermission?.()) === 'granted') {
+        const file = await handle.getFile();
+        if (file?.size) return file.size;
+      }
+    } catch {}
+  }
+  try {
+    const blob = await getBlobFromDB(storageId);
+    if (blob) return blob.size;
+  } catch {}
+  const mediaUrl = type === 'audio' ? pad.audioUrl : pad.imageUrl;
+  if (mediaUrl) {
+    try {
+      const blob = await (await fetch(mediaUrl)).blob();
+      return blob.size;
+    } catch {}
+  }
+  return 0;
+};
+
+const estimateBankMediaBytes = async (bank: SamplerBank): Promise<number> => {
+  let total = 0;
+  for (const pad of bank.pads) {
+    total += await estimatePadMediaBytes(pad, 'audio');
+    total += await estimatePadMediaBytes(pad, 'image');
+  }
+  return total;
+};
+
+const shouldAttemptTrim = (pad: PadData): boolean => {
+  return pad.startTimeMs > 50 && pad.endTimeMs > pad.startTimeMs;
 };
 
 export function useSamplerStore(): SamplerStore {
@@ -885,53 +1087,32 @@ export function useSamplerStore(): SamplerStore {
     try {
       const { banks: savedBanks } = JSON.parse(savedData);
       let restoredState = { primaryBankId: null, secondaryBankId: null, currentBankId: null };
-      if (savedState) try { restoredState = JSON.parse(savedState); } catch (e) {}
+      if (savedState) try { restoredState = JSON.parse(savedState); } catch {}
 
-      let restoredBanks = await Promise.all(savedBanks.map(async (bank: any, index: number) => {
-        const restoredPads = await Promise.all(bank.pads.map(async (pad: any, index: number) => {
-          const restoredPad = {
-            ...pad, audioUrl: null, imageUrl: null, fadeInMs: pad.fadeInMs || 0, fadeOutMs: pad.fadeOutMs || 0,
-            startTimeMs: pad.startTimeMs || 0, endTimeMs: pad.endTimeMs || 0, pitch: pad.pitch || 0, position: pad.position ?? index,
-          };
-          try {
-            const restoredAudio = await restoreFileAccess(pad.id, 'audio', pad.audioStorageKey);
-            if (restoredAudio.url) restoredPad.audioUrl = restoredAudio.url;
-            if (restoredAudio.storageKey) restoredPad.audioStorageKey = restoredAudio.storageKey;
-          } catch (e) {}
-          try {
-            const restoredImage = await restoreFileAccess(pad.id, 'image', pad.imageStorageKey);
-            if (restoredImage.url) restoredPad.imageUrl = restoredImage.url;
-            if (restoredImage.storageKey) restoredPad.imageStorageKey = restoredImage.storageKey;
-            else if (pad.imageData) {
-              try { restoredPad.imageUrl = URL.createObjectURL(base64ToBlob(pad.imageData)); } catch (e) {}
-            }
-          } catch (e) {}
-          return restoredPad;
-        }));
-        return { ...bank, createdAt: new Date(bank.createdAt), sortOrder: bank.sortOrder ?? index, pads: restoredPads };
-      }));
-      const hideProtectedLock =
-        typeof window !== 'undefined' && localStorage.getItem(HIDE_PROTECTED_BANKS_KEY) === '1';
-      if (hideProtectedLock) {
-        const visible = pruneProtectedBanksFromCache(restoredBanks);
-        hiddenProtectedBanksRef.current = restoredBanks.filter(
-          (bank) => !visible.some((visibleBank) => visibleBank.id === bank.id)
-        );
-        restoredBanks = visible;
-      }
-      restoredBanks.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+      const applyRestoredState = (nextBanks: SamplerBank[]) => {
+        setBanks(nextBanks);
+        setPrimaryBankIdState(restoredState.primaryBankId);
+        setSecondaryBankIdState(restoredState.secondaryBankId);
+        if (restoredState.currentBankId && nextBanks.find((b) => b.id === restoredState.currentBankId)) {
+          setCurrentBankIdState(restoredState.currentBankId);
+        } else if (nextBanks.length > 0) {
+          setCurrentBankIdState(nextBanks[0].id);
+        }
+        setIsBanksHydrated(true);
+      };
 
-      if (isNativeCapacitorPlatform()) {
+      const emitMissingMediaDetected = (candidateBanks: SamplerBank[]) => {
         let missingAudio = 0;
         let missingImages = 0;
         const affectedBanks = new Set<string>();
-        restoredBanks.forEach((bank) => {
+        candidateBanks.forEach((bank) => {
           bank.pads.forEach((pad) => {
             if (!pad.audioUrl) {
               missingAudio += 1;
               affectedBanks.add(bank.name);
             }
-            if (pad.imageStorageKey && !pad.imageUrl) {
+            const expectsImage = Boolean(pad.imageStorageKey || pad.imageBackend === 'idb' || pad.imageData);
+            if (expectsImage && !pad.imageUrl) {
               missingImages += 1;
               affectedBanks.add(bank.name);
             }
@@ -946,14 +1127,85 @@ export function useSamplerStore(): SamplerStore {
             }
           }));
         }
+      };
+
+      let restoredBanks: SamplerBank[] = savedBanks.map((bank: any, index: number) => ({
+        ...bank,
+        createdAt: new Date(bank.createdAt),
+        sortOrder: bank.sortOrder ?? index,
+        pads: (bank.pads || []).map((pad: any, padIndex: number) => ({
+          ...pad,
+          audioUrl: null,
+          imageUrl: null,
+          audioBackend: (pad.audioBackend as MediaBackend | undefined) || (pad.audioStorageKey ? 'native' : 'idb'),
+          imageBackend: (pad.imageBackend as MediaBackend | undefined) || (pad.imageStorageKey ? 'native' : 'idb'),
+          fadeInMs: pad.fadeInMs || 0,
+          fadeOutMs: pad.fadeOutMs || 0,
+          startTimeMs: pad.startTimeMs || 0,
+          endTimeMs: pad.endTimeMs || 0,
+          pitch: pad.pitch || 0,
+          position: pad.position ?? padIndex,
+        })),
+      }));
+
+      const hideProtectedLock =
+        typeof window !== 'undefined' && localStorage.getItem(HIDE_PROTECTED_BANKS_KEY) === '1';
+      if (hideProtectedLock) {
+        const visible = pruneProtectedBanksFromCache(restoredBanks);
+        hiddenProtectedBanksRef.current = restoredBanks.filter(
+          (bank) => !visible.some((visibleBank) => visibleBank.id === bank.id)
+        );
+        restoredBanks = visible;
       }
 
-      setBanks(restoredBanks);
-      setPrimaryBankIdState(restoredState.primaryBankId);
-      setSecondaryBankIdState(restoredState.secondaryBankId);
-      if (restoredState.currentBankId && restoredBanks.find(b => b.id === restoredState.currentBankId)) setCurrentBankIdState(restoredState.currentBankId);
-      else if (restoredBanks.length > 0) setCurrentBankIdState(restoredBanks[0].id);
-      setIsBanksHydrated(true);
+      restoredBanks.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+      const totalPads = restoredBanks.reduce((sum, bank) => sum + bank.pads.length, 0);
+      const eagerRestoreLimit = isNativeCapacitorPlatform() ? MAX_NATIVE_STARTUP_RESTORE_PADS : 1200;
+
+      if (totalPads > eagerRestoreLimit) {
+        emitMissingMediaDetected(restoredBanks);
+        applyRestoredState(restoredBanks);
+        return;
+      }
+
+      restoredBanks = await Promise.all(restoredBanks.map(async (bank) => {
+        const restoredPads = await Promise.all(bank.pads.map(async (pad) => {
+          const restoredPad: PadData = { ...pad };
+          try {
+            const restoredAudio = await restoreFileAccess(
+              pad.id,
+              'audio',
+              pad.audioStorageKey,
+              pad.audioBackend
+            );
+            if (restoredAudio.url) restoredPad.audioUrl = restoredAudio.url;
+            if (restoredAudio.storageKey) restoredPad.audioStorageKey = restoredAudio.storageKey;
+            restoredPad.audioBackend = restoredAudio.backend;
+          } catch {}
+          try {
+            const restoredImage = await restoreFileAccess(
+              pad.id,
+              'image',
+              pad.imageStorageKey,
+              pad.imageBackend
+            );
+            if (restoredImage.url) restoredPad.imageUrl = restoredImage.url;
+            if (restoredImage.storageKey) restoredPad.imageStorageKey = restoredImage.storageKey;
+            restoredPad.imageBackend = restoredImage.backend;
+            if (!restoredPad.imageUrl && pad.imageData) {
+              try {
+                restoredPad.imageUrl = URL.createObjectURL(base64ToBlob(pad.imageData));
+                restoredPad.imageBackend = 'idb';
+              } catch {}
+            }
+          } catch {}
+          return restoredPad;
+        }));
+        return { ...bank, pads: restoredPads };
+      }));
+
+      emitMissingMediaDetected(restoredBanks);
+      applyRestoredState(restoredBanks);
     } catch (error) {
        const defaultBank: SamplerBank = { id: generateId(), name: 'Default Bank', defaultColor: '#3b82f6', pads: [], createdAt: new Date(), sortOrder: 0 };
        setBanks([defaultBank]); setCurrentBankIdState(defaultBank.id); setIsBanksHydrated(true);
@@ -1010,7 +1262,9 @@ export function useSamplerStore(): SamplerStore {
                 id: pad.id,
                 name: pad.name,
                 audioStorageKey: pad.audioStorageKey,
+                audioBackend: pad.audioBackend,
                 imageStorageKey: pad.imageStorageKey,
+                imageBackend: pad.imageBackend,
                 color: pad.color,
                 shortcutKey: pad.shortcutKey,
                 midiNote: pad.midiNote,
@@ -1054,13 +1308,14 @@ export function useSamplerStore(): SamplerStore {
       await ensureStorageHeadroom(file.size, 'audio upload');
       const padId = generateId();
       const audioUrl = URL.createObjectURL(file);
-      const audioStorageKey = await storeFile(padId, file, 'audio');
+      const storedAudio = await storeFile(padId, file, 'audio');
       const maxPosition = targetBank.pads.length > 0 ? Math.max(...targetBank.pads.map(p => p.position || 0)) : -1;
       const newPad: PadData = {
         id: padId,
         name: trimPadName(file.name.replace(/\.[^/.]+$/, '')),
         audioUrl,
-        audioStorageKey,
+        audioStorageKey: storedAudio.storageKey,
+        audioBackend: storedAudio.backend,
         color: targetBank.defaultColor,
         triggerMode: 'toggle',
         playbackMode: 'once',
@@ -1104,8 +1359,11 @@ export function useSamplerStore(): SamplerStore {
         const padId = generateId();
         const audioUrl = URL.createObjectURL(file);
         let audioStorageKey: string | undefined;
+        let audioBackend: MediaBackend = 'idb';
         if (isNativeCapacitorPlatform()) {
-          audioStorageKey = await storeFile(padId, file, 'audio');
+          const storedAudio = await storeFile(padId, file, 'audio');
+          audioStorageKey = storedAudio.storageKey;
+          audioBackend = storedAudio.backend;
         } else {
           batchItems.push({ id: padId, blob: file, type: 'audio' });
         }
@@ -1116,6 +1374,7 @@ export function useSamplerStore(): SamplerStore {
           name: trimPadName(file.name.replace(/\.[^/.]+$/, '')),
           audioUrl,
           audioStorageKey,
+          audioBackend,
           color: targetBank.defaultColor,
           triggerMode: 'toggle',
           playbackMode: 'once',
@@ -1154,8 +1413,9 @@ export function useSamplerStore(): SamplerStore {
         await ensureStorageHeadroom(imageBlob.size, 'pad image save');
         if (updatedPad.imageUrl && updatedPad.imageUrl.startsWith('blob:')) URL.revokeObjectURL(updatedPad.imageUrl);
         updatedPad.imageUrl = URL.createObjectURL(imageBlob);
-        const imageStorageKey = await storeFile(id, new File([imageBlob], 'image', { type: imageBlob.type }), 'image');
-        if (imageStorageKey) updatedPad.imageStorageKey = imageStorageKey;
+        const storedImage = await storeFile(id, new File([imageBlob], 'image', { type: imageBlob.type }), 'image');
+        if (storedImage.storageKey) updatedPad.imageStorageKey = storedImage.storageKey;
+        updatedPad.imageBackend = storedImage.backend;
         updatedPad.imageData = undefined;
       } catch (e) {}
     }
@@ -1299,136 +1559,164 @@ export function useSamplerStore(): SamplerStore {
     });
   }, [primaryBankId, secondaryBankId, currentBankId]);
 
-  // --- FIXED EXPORT BANK (Prevents Audio Bloat) ---
+  // --- STABLE EXPORT BANK ---
   const exportBank = React.useCallback(async (id: string, onProgress?: (progress: number) => void) => {
-    const bank = banks.find(b => b.id === id);
+    const bank = banks.find((b) => b.id === id);
     if (!bank) throw new Error('Bank not found');
-    
-    // Block export if exportable is false
-    if (bank.exportable === false) {
-      throw new Error('Export is disabled for this bank');
-    }
-    
+    if (bank.exportable === false) throw new Error('Export is disabled for this bank');
+
+    const effectiveUser = user || getCachedUser();
+    const diagnostics = createOperationDiagnostics('bank_export', effectiveUser?.id || null);
+    addOperationStage(diagnostics, 'start', { bankId: bank.id, bankName: bank.name, padCount: bank.pads.length });
+
     try {
+      onProgress?.(5);
+      await ensureExportPermission();
+
+      const estimatedBytes = await estimateBankMediaBytes(bank);
+      diagnostics.metrics.estimatedBytes = estimatedBytes;
+      addOperationStage(diagnostics, 'preflight', { estimatedBytes });
+
+      if (isNativeCapacitorPlatform() && estimatedBytes > MAX_NATIVE_BANK_EXPORT_BYTES) {
+        throw new Error(
+          `Bank export is too large for mobile export (${Math.ceil(estimatedBytes / (1024 * 1024))}MB). Reduce bank size and try again.`
+        );
+      }
+
+      await ensureStorageHeadroom(Math.ceil(estimatedBytes * 0.35), 'bank export');
+
       const zip = new JSZip();
-      
-      const exportPads = bank.pads.map(pad => ({
-        ...pad,
-        audioUrl: pad.audioUrl ? `audio/${pad.id}.audio` : undefined,
-        imageUrl: pad.imageUrl ? `images/${pad.id}.image` : undefined,
-      }));
-      
-      const bankData = { 
-        ...bank, 
-        createdAt: bank.createdAt.toISOString(), 
-        pads: exportPads,
-        creatorEmail: user?.email || undefined,
-      };
-      
       const audioFolder = zip.folder('audio');
       const imageFolder = zip.folder('images');
-      const totalFiles = bank.pads.filter(p => p.audioUrl).length + bank.pads.filter(p => p.imageUrl).length;
-      let processedFiles = 0;
-      
-      if (audioFolder) {
-        for (let i = 0; i < bank.pads.length; i++) {
-          const pad = bank.pads[i];
-          if (pad.audioUrl) {
-            onProgress && onProgress((processedFiles / totalFiles) * 60);
-            try {
-              let audioBlob = await (await fetch(pad.audioUrl)).blob();
-              const originalSize = audioBlob.size;
-              
-              // Get actual audio duration to detect trim-out
-              let actualDurationMs = 0;
-              try {
-                const arrayBuffer = await audioBlob.arrayBuffer();
-                const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-                const tempContext = new AudioContextClass();
-                const audioBuffer = await tempContext.decodeAudioData(arrayBuffer.slice(0)); 
-                actualDurationMs = audioBuffer.duration * 1000;
-                tempContext.close();
-                audioBlob = await (await fetch(pad.audioUrl)).blob(); // Reset blob
-              } catch (e) {
-                console.warn('Could not get actual duration, assuming no trim out needed:', e);
-                actualDurationMs = pad.endTimeMs + 1000; // Fake it so check fails safe
-              }
-              
-              // LOGIC FIX: Check if trim is actually needed
-              const hasTrimIn = pad.startTimeMs > 50; // Tolerance for float/UI
-              const hasTrimOut = pad.endTimeMs > 0 && (actualDurationMs - pad.endTimeMs) > 200; // Tolerance
-              const isTrimmed = hasTrimIn || hasTrimOut;
+      if (!audioFolder || !imageFolder) throw new Error('Unable to create bank archive folders.');
 
-              if (isTrimmed && pad.endTimeMs > pad.startTimeMs) {
-                console.log(`🎵 Export: Pad "${pad.name}" IS trimmed. Processing...`);
-                const format = detectAudioFormat(audioBlob);
-                try {
-                  const trimResult = await trimAudio(audioBlob, pad.startTimeMs, pad.endTimeMs, format);
-                  audioBlob = trimResult.blob;
-                  console.log(`✅ Trimmed "${pad.name}" - original: ${(originalSize / 1024).toFixed(1)}KB, new: ${(audioBlob.size / 1024).toFixed(1)}KB`);
-                  
-                  const exportPad = exportPads.find(p => p.id === pad.id);
-                  if (exportPad) {
-                    exportPad.startTimeMs = 0;
-                    exportPad.endTimeMs = trimResult.newDurationMs; 
-                  }
-                } catch (trimError) {
-                  console.warn(`⚠️ Trim failed for "${pad.name}", using original:`, trimError);
+      const totalMediaItems = Math.max(
+        1,
+        bank.pads.reduce((count, pad) => count + (pad.audioUrl ? 1 : 0) + (pad.imageUrl ? 1 : 0), 0)
+      );
+      let processedItems = 0;
+      let exportedAudio = 0;
+      let exportedImages = 0;
+      let totalExportBytes = 0;
+
+      const exportPads = bank.pads.map((pad) => ({
+        ...pad,
+        audioUrl: undefined as string | undefined,
+        imageUrl: undefined as string | undefined,
+      }));
+      const exportPadMap = new Map(exportPads.map((pad) => [pad.id, pad]));
+
+      for (const pad of bank.pads) {
+        if (pad.audioUrl) {
+          const exportPad = exportPadMap.get(pad.id);
+          const sourceBlob = await loadPadMediaBlob(pad, 'audio');
+          if (sourceBlob) {
+            let audioBlob = sourceBlob;
+            if (shouldAttemptTrim(pad)) {
+              try {
+                const trimResult = await trimAudio(sourceBlob, pad.startTimeMs, pad.endTimeMs, detectAudioFormat(sourceBlob));
+                audioBlob = trimResult.blob;
+                if (exportPad) {
+                  exportPad.startTimeMs = 0;
+                  exportPad.endTimeMs = trimResult.newDurationMs;
                 }
-              } else {
-                 console.log(`⏩ Export: Pad "${pad.name}" is NOT trimmed. Using original file.`);
-                 // Keep startTimeMs and endTimeMs in JSON as they are, so they load back correctly relative to the untrimmed file
+                addOperationStage(diagnostics, 'audio-trimmed', {
+                  padId: pad.id,
+                  padName: pad.name || 'Untitled Pad',
+                  originalBytes: sourceBlob.size,
+                  trimmedBytes: audioBlob.size,
+                });
+              } catch (trimError) {
+                addOperationStage(diagnostics, 'audio-trim-fallback', {
+                  padId: pad.id,
+                  padName: pad.name || 'Untitled Pad',
+                  reason: trimError instanceof Error ? trimError.message : String(trimError),
+                });
               }
-              
-              audioFolder.file(`${pad.id}.audio`, audioBlob);
-            } catch (e) {
-              console.error('Audio export error:', e);
             }
-            processedFiles++;
+            audioFolder.file(`${pad.id}.audio`, audioBlob);
+            if (exportPad) exportPad.audioUrl = `audio/${pad.id}.audio`;
+            exportedAudio += 1;
+            totalExportBytes += audioBlob.size;
+            if (isNativeCapacitorPlatform() && totalExportBytes > MAX_NATIVE_BANK_EXPORT_BYTES) {
+              throw new Error('Bank export exceeded mobile size limit during packaging.');
+            }
           }
+          processedItems += 1;
+          onProgress?.(10 + (processedItems / totalMediaItems) * 60);
+          if (processedItems % 8 === 0) await yieldToMainThread();
+        }
+
+        if (pad.imageUrl) {
+          const exportPad = exportPadMap.get(pad.id);
+          const imageBlob = await loadPadMediaBlob(pad, 'image');
+          if (imageBlob) {
+            imageFolder.file(`${pad.id}.image`, imageBlob);
+            if (exportPad) exportPad.imageUrl = `images/${pad.id}.image`;
+            exportedImages += 1;
+            totalExportBytes += imageBlob.size;
+            if (isNativeCapacitorPlatform() && totalExportBytes > MAX_NATIVE_BANK_EXPORT_BYTES) {
+              throw new Error('Bank export exceeded mobile size limit during packaging.');
+            }
+          }
+          processedItems += 1;
+          onProgress?.(10 + (processedItems / totalMediaItems) * 60);
+          if (processedItems % 8 === 0) await yieldToMainThread();
         }
       }
-      
+
+      diagnostics.metrics.processedBytes = totalExportBytes;
+      diagnostics.metrics.exportedAudio = exportedAudio;
+      diagnostics.metrics.exportedImages = exportedImages;
+
+      const bankData = {
+        ...bank,
+        createdAt: bank.createdAt.toISOString(),
+        pads: exportPads,
+        creatorEmail: effectiveUser?.email || undefined,
+      };
       zip.file('bank.json', JSON.stringify(bankData, null, 2));
-      
-      if (imageFolder) {
-        for (const pad of bank.pads) {
-          if (pad.imageUrl) {
-            onProgress && onProgress(60 + (processedFiles / totalFiles) * 20);
-            try { const b = await (await fetch(pad.imageUrl)).blob(); imageFolder.file(`${pad.id}.image`, b); } catch (e) {}
-            processedFiles++;
-          }
-        }
-      }
-      
-      onProgress && onProgress(80);
-      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 9 } }, (m) => onProgress && onProgress(80 + (m.percent * 0.2)));
-      onProgress && onProgress(100);
-      
+
+      addOperationStage(diagnostics, 'archive-generate');
+      onProgress?.(75);
+      const compressionLevel = isNativeCapacitorPlatform() ? 2 : 9;
+      const zipBlob = await zip.generateAsync(
+        {
+          type: 'blob',
+          compression: 'DEFLATE',
+          compressionOptions: { level: compressionLevel }
+        },
+        (meta) => onProgress?.(75 + meta.percent * 0.2)
+      );
+
       const fileName = `${bank.name.replace(/[^a-z0-9]/gi, '_')}.bank`;
-      const saveResult = await saveBankFile(zipBlob, fileName);
-      if (saveResult.message) {
-        console.log('✅', saveResult.message);
+      const saveResult = await saveExportFile(zipBlob, fileName);
+      if (!saveResult.success) {
+        throw new Error(saveResult.message || 'Failed to save exported bank.');
       }
+      addOperationStage(diagnostics, 'saved', { path: saveResult.savedPath || fileName });
+
+      onProgress?.(100);
       logExportActivity({
         status: 'success',
         bankName: bank.name,
         bankId: bank.id,
         padNames: bank.pads.map((pad) => pad.name || 'Untitled Pad'),
       });
-      return saveResult.message || 'Bank exported successfully';
-    } catch (e) {
-      const errorMessage = e instanceof Error ? e.message : String(e);
+      return saveResult.message || 'Bank exported successfully.';
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const logPath = await writeOperationDiagnosticsLog(diagnostics, error);
       logExportActivity({
         status: 'failed',
         bankName: bank.name,
         bankId: bank.id,
         padNames: bank.pads.map((pad) => pad.name || 'Untitled Pad'),
-        errorMessage,
+        errorMessage: logPath ? `${errorMessage} (diagnostics: ${logPath})` : errorMessage,
       });
-      throw e;
+      throw new Error(logPath ? `${errorMessage} (Diagnostics log: ${logPath})` : errorMessage);
     }
-  }, [banks, logExportActivity]);
+  }, [banks, logExportActivity, user]);
 
   // --- FIXED IMPORT BANK ---
   const importBank = React.useCallback(async (
@@ -1488,9 +1776,9 @@ export function useSamplerStore(): SamplerStore {
       try {
         // Try to load as regular zip with timeout
         contents = await loadZipFromBlob(file, 'Zip load');
-        console.log('✅ Bank file loaded successfully (unencrypted)');
+        console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Bank file loaded successfully (unencrypted)');
       } catch (error) {
-        console.log('🔒 Attempting to decrypt bank file...');
+        console.log('ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ¢â‚¬â„¢ Attempting to decrypt bank file...');
         
         let decrypted = false;
         let lastError: Error | null = null;
@@ -1511,19 +1799,19 @@ export function useSamplerStore(): SamplerStore {
             );
             contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
             decrypted = true;
-            console.log('✅ Decrypted using shared password (export disabled encryption)');
+            console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Decrypted using shared password (export disabled encryption)');
           } else {
             throw new Error('Shared password mismatch');
           }
         } catch (e) {
           lastError = e instanceof Error ? e : new Error(String(e));
-          console.log('⚠️ Shared password decryption failed, trying user-specific keys...');
+          console.log('ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â Shared password decryption failed, trying user-specific keys...');
         }
         
         // If shared password didn't work, try user-specific keys (requires login)
         if (!decrypted) {
           // Use cached user if auth state not yet synced
-          console.log('🔐 Auth check:', { user: !!user, cachedUser: !!getCachedUser(), effectiveUser: !!effectiveUser });
+          console.log('ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â Auth check:', { user: !!user, cachedUser: !!getCachedUser(), effectiveUser: !!effectiveUser });
           
           if (!effectiveUser) {
             throw new Error('Login required to import encrypted banks. Please sign in and try again.');
@@ -1548,7 +1836,7 @@ export function useSamplerStore(): SamplerStore {
                 const decryptedBlob = await withTimeout(decryptZip(file, derivedKey), adaptiveTimeoutMs, 'Decrypt');
                 contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
                 decrypted = true;
-                console.log('✅ Decrypted using cached key');
+                console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Decrypted using cached key');
                 break;
               }
             } catch (e) {
@@ -1573,7 +1861,7 @@ export function useSamplerStore(): SamplerStore {
                     const decryptedBlob = await withTimeout(decryptZip(file, d), adaptiveTimeoutMs, 'Decrypt');
                     contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
                     decrypted = true;
-                    console.log('✅ Decrypted using hinted bank ID');
+                    console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Decrypted using hinted bank ID');
                   } else {
                     throw new Error('Hinted ID password mismatch');
                   }
@@ -1589,7 +1877,7 @@ export function useSamplerStore(): SamplerStore {
         if (!decrypted) {
             try {
               const accessible = await listAccessibleBankIds(effectiveUser.id);
-              console.log(`🔍 Trying ${accessible.length} accessible banks...`);
+              console.log(`ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â Trying ${accessible.length} accessible banks...`);
            for (const bankId of accessible) {
                 try {
                   const d = await getDerivedKey(bankId, effectiveUser.id);
@@ -1603,7 +1891,7 @@ export function useSamplerStore(): SamplerStore {
                       const decryptedBlob = await withTimeout(decryptZip(file, d), adaptiveTimeoutMs, 'Decrypt');
                       contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
                       decrypted = true;
-                      console.log('✅ Decrypted using accessible bank ID:', bankId);
+                      console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Decrypted using accessible bank ID:', bankId);
                       break;
                     }
                   }
@@ -1649,7 +1937,7 @@ export function useSamplerStore(): SamplerStore {
           throw new Error('Invalid bank file format: Missing required fields');
         }
         
-        console.log('✅ Bank data parsed:', { name: bankData.name, padCount: bankData.pads.length });
+        console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Bank data parsed:', { name: bankData.name, padCount: bankData.pads.length });
         importBankName = bankData.name;
         importPadNames = bankData.pads.map((pad: any) => pad?.name || 'Untitled Pad');
       } catch (error) {
@@ -1797,6 +2085,8 @@ export function useSamplerStore(): SamplerStore {
              let imageUrl: string | null = null;
              let audioStorageKey: string | undefined;
              let imageStorageKey: string | undefined;
+             let audioBackend: MediaBackend = 'idb';
+             let imageBackend: MediaBackend = 'idb';
 
              if (audioFile) {
                try {
@@ -1807,21 +2097,23 @@ export function useSamplerStore(): SamplerStore {
                 );
                  
                  if (!audioBlob || audioBlob.size === 0) {
-                   console.warn(`⚠️ Audio file for pad "${padData.name || padData.id}" is empty`);
+                   console.warn(`ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â Audio file for pad "${padData.name || padData.id}" is empty`);
                  } else {
                    if (nativeMode) {
-                     audioStorageKey = await storeFile(
+                     const storedAudio = await storeFile(
                        newPadId,
                        new File([audioBlob], `${newPadId}.audio`, { type: audioBlob.type || 'application/octet-stream' }),
                        'audio'
                      );
+                     audioStorageKey = storedAudio.storageKey;
+                     audioBackend = storedAudio.backend;
                    } else {
                      batchFilesToStore.push({ id: newPadId, blob: audioBlob, type: 'audio' });
                    }
                    audioUrl = await createFastIOSBlobURL(audioBlob);
              }
                } catch (e) {
-                 console.error(`❌ Failed to load audio for pad "${padData.name || padData.id}":`, e);
+                 console.error(`ÃƒÂ¢Ã‚ÂÃ…â€™ Failed to load audio for pad "${padData.name || padData.id}":`, e);
                  // Continue without audio - pad will be imported but won't play
                }
              }
@@ -1835,21 +2127,23 @@ export function useSamplerStore(): SamplerStore {
                 );
                  
                  if (!imageBlob || imageBlob.size === 0) {
-                   console.warn(`⚠️ Image file for pad "${padData.name || padData.id}" is empty`);
+                   console.warn(`ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â Image file for pad "${padData.name || padData.id}" is empty`);
                  } else {
                    if (nativeMode) {
-                     imageStorageKey = await storeFile(
+                     const storedImage = await storeFile(
                        newPadId,
                        new File([imageBlob], `${newPadId}.image`, { type: imageBlob.type || 'application/octet-stream' }),
                        'image'
                      );
+                     imageStorageKey = storedImage.storageKey;
+                     imageBackend = storedImage.backend;
                    } else {
                      batchFilesToStore.push({ id: newPadId, blob: imageBlob, type: 'image' });
                    }
                    imageUrl = await createFastIOSBlobURL(imageBlob);
                  }
                } catch (e) {
-                 console.error(`❌ Failed to load image for pad "${padData.name || padData.id}":`, e);
+                 console.error(`ÃƒÂ¢Ã‚ÂÃ…â€™ Failed to load image for pad "${padData.name || padData.id}":`, e);
                  // Continue without image
                }
              }
@@ -1861,7 +2155,9 @@ export function useSamplerStore(): SamplerStore {
                  audioUrl,
                  imageUrl,
                  audioStorageKey,
+                 audioBackend,
                  imageStorageKey,
+                 imageBackend,
                  imageData: undefined,
                 shortcutKey: padData.shortcutKey || undefined,
                 midiNote: typeof padData.midiNote === 'number' ? padData.midiNote : undefined,
@@ -1875,12 +2171,12 @@ export function useSamplerStore(): SamplerStore {
                  position: padData.position ?? (newPads.length + padIndex),
                };
              } else {
-               console.warn(`⚠️ Skipping pad "${padData.name || padData.id}" - no audio file found`);
+               console.warn(`ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â Skipping pad "${padData.name || padData.id}" - no audio file found`);
              return null;
              }
           } catch (e) {
             const errorMsg = e instanceof Error ? e.message : String(e);
-            console.error(`❌ Pad import error for pad at index ${padIndex}:`, errorMsg);
+            console.error(`ÃƒÂ¢Ã‚ÂÃ…â€™ Pad import error for pad at index ${padIndex}:`, errorMsg);
             return null;
           }
         }));
@@ -1893,7 +2189,7 @@ export function useSamplerStore(): SamplerStore {
               'Save batch'
             );
           } catch (e) {
-            console.error('❌ Failed to save batch files to database:', e);
+            console.error('ÃƒÂ¢Ã‚ÂÃ…â€™ Failed to save batch files to database:', e);
             throw new Error(`Failed to save files to storage: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
@@ -1906,14 +2202,14 @@ export function useSamplerStore(): SamplerStore {
       }
 
       if (newPads.length === 0) {
-        console.warn('⚠️ No valid pads were imported from the bank file');
+        console.warn('ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â No valid pads were imported from the bank file');
         throw new Error('No valid pads found in bank file. The bank may be corrupted or empty.');
       }
 
       newBank.pads = newPads;
       setBanks(prev => [...prev, newBank]);
       onProgress && onProgress(100);
-      console.log(`✅ Import complete: ${newPads.length} pads loaded from "${newBank.name}"`);
+      console.log(`ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Import complete: ${newPads.length} pads loaded from "${newBank.name}"`);
       if (!options?.skipActivityLog) {
         logImportActivity({
           status: 'success',
@@ -1927,7 +2223,7 @@ export function useSamplerStore(): SamplerStore {
 
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : 'Unknown import error';
-      console.error('❌ Import failed:', errorMessage, e);
+      console.error('ÃƒÂ¢Ã‚ÂÃ…â€™ Import failed:', errorMessage, e);
       if (!options?.skipActivityLog) {
         logImportActivity({
           status: 'failed',
@@ -1953,166 +2249,212 @@ export function useSamplerStore(): SamplerStore {
     }
   }, [banks, user, logImportActivity]);
 
-  // --- FIXED ADMIN EXPORT (Respects "Transferable" & Prevents Audio Bloat) ---
-  const exportAdminBank = React.useCallback(async (id: string, title: string, description: string, transferable: boolean, addToDatabase: boolean, allowExport: boolean, onProgress?: (progress: number) => void) => {
-      if (!user || profile?.role !== 'admin') throw new Error('Admin only');
-      const bank = banks.find(b => b.id === id);
-      if (!bank) throw new Error('Bank not found');
-      onProgress && onProgress(5);
-      
+  // --- STABLE ADMIN EXPORT ---
+  const exportAdminBank = React.useCallback(async (
+    id: string,
+    title: string,
+    description: string,
+    transferable: boolean,
+    addToDatabase: boolean,
+    allowExport: boolean,
+    onProgress?: (progress: number) => void
+  ) => {
+    if (!user || profile?.role !== 'admin') throw new Error('Admin only');
+    const bank = banks.find((b) => b.id === id);
+    if (!bank) throw new Error('Bank not found');
+
+    const diagnostics = createOperationDiagnostics('admin_bank_export', user.id);
+    addOperationStage(diagnostics, 'start', {
+      bankId: bank.id,
+      bankName: bank.name,
+      padCount: bank.pads.length,
+      addToDatabase,
+      allowExport,
+      transferable,
+    });
+
+    try {
+      onProgress?.(5);
+      await ensureExportPermission();
+
+      const estimatedBytes = await estimateBankMediaBytes(bank);
+      diagnostics.metrics.estimatedBytes = estimatedBytes;
+      addOperationStage(diagnostics, 'preflight', { estimatedBytes });
+
+      if (isNativeCapacitorPlatform() && estimatedBytes > MAX_NATIVE_BANK_EXPORT_BYTES) {
+        throw new Error(
+          `Admin bank export is too large for mobile export (${Math.ceil(estimatedBytes / (1024 * 1024))}MB). Reduce bank size and try again.`
+        );
+      }
+
+      await ensureStorageHeadroom(Math.ceil(estimatedBytes * 0.35), 'admin bank export');
+
       const zip = new JSZip();
-      
-      const exportPads = bank.pads.map(pad => ({
-        ...pad,
-        audioUrl: pad.audioUrl ? `audio/${pad.id}.audio` : undefined,
-        imageUrl: pad.imageUrl ? `images/${pad.id}.image` : undefined,
-      }));
-      
-      const bankData = { ...bank, createdAt: bank.createdAt.toISOString(), pads: exportPads };
-      
       const audioFolder = zip.folder('audio');
       const imageFolder = zip.folder('images');
-      const total = bank.pads.filter(p => p.audioUrl).length + bank.pads.filter(p => p.imageUrl).length;
-      let count = 0;
-      
-      if (audioFolder) {
-        for (const pad of bank.pads) {
-          if (pad.audioUrl) {
-            onProgress && onProgress(5 + (count / total) * 35);
-            try {
-              let audioBlob = await (await fetch(pad.audioUrl)).blob();
-              const originalSize = audioBlob.size;
-              
-              let actualDurationMs = 0;
+      if (!audioFolder || !imageFolder) throw new Error('Unable to create bank archive folders.');
+
+      const totalMediaItems = Math.max(
+        1,
+        bank.pads.reduce((count, pad) => count + (pad.audioUrl ? 1 : 0) + (pad.imageUrl ? 1 : 0), 0)
+      );
+      let processedItems = 0;
+      let totalExportBytes = 0;
+      let exportedAudio = 0;
+      let exportedImages = 0;
+
+      const exportPads = bank.pads.map((pad) => ({
+        ...pad,
+        audioUrl: undefined as string | undefined,
+        imageUrl: undefined as string | undefined,
+      }));
+      const exportPadMap = new Map(exportPads.map((pad) => [pad.id, pad]));
+
+      for (const pad of bank.pads) {
+        if (pad.audioUrl) {
+          const exportPad = exportPadMap.get(pad.id);
+          const sourceBlob = await loadPadMediaBlob(pad, 'audio');
+          if (sourceBlob) {
+            let audioBlob = sourceBlob;
+            if (shouldAttemptTrim(pad)) {
               try {
-                const arrayBuffer = await audioBlob.arrayBuffer();
-                const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-                const tempContext = new AudioContextClass();
-                const audioBuffer = await tempContext.decodeAudioData(arrayBuffer.slice(0)); 
-                actualDurationMs = audioBuffer.duration * 1000;
-                tempContext.close();
-                audioBlob = await (await fetch(pad.audioUrl)).blob();
-              } catch (e) {
-                console.warn('Could not get actual duration, assuming no trim out needed:', e);
-                actualDurationMs = pad.endTimeMs + 1000;
-              }
-              
-              const hasTrimIn = pad.startTimeMs > 50; 
-              const hasTrimOut = pad.endTimeMs > 0 && (actualDurationMs - pad.endTimeMs) > 200; 
-              const isTrimmed = hasTrimIn || hasTrimOut;
-              
-              if (isTrimmed && pad.endTimeMs > pad.startTimeMs) {
-                console.log(`🎵 Admin Export: Pad "${pad.name}" IS trimmed. Processing...`);
-                const format = detectAudioFormat(audioBlob);
-                try {
-                  const trimResult = await trimAudio(audioBlob, pad.startTimeMs, pad.endTimeMs, format);
-                  audioBlob = trimResult.blob;
-                  console.log(`✅ Trimmed "${pad.name}" - original: ${(originalSize / 1024).toFixed(1)}KB, new: ${(audioBlob.size / 1024).toFixed(1)}KB`);
-                  
-                  const exportPad = exportPads.find(p => p.id === pad.id);
-                  if (exportPad) {
-                    exportPad.startTimeMs = 0;
-                    exportPad.endTimeMs = trimResult.newDurationMs; 
-                  }
-                } catch (trimError) {
-                  console.warn(`⚠️ Trim failed for "${pad.name}", using original:`, trimError);
+                const trimResult = await trimAudio(sourceBlob, pad.startTimeMs, pad.endTimeMs, detectAudioFormat(sourceBlob));
+                audioBlob = trimResult.blob;
+                if (exportPad) {
+                  exportPad.startTimeMs = 0;
+                  exportPad.endTimeMs = trimResult.newDurationMs;
                 }
-              } else {
-                 console.log(`⏩ Admin Export: Pad "${pad.name}" is NOT trimmed. Using original.`);
+                addOperationStage(diagnostics, 'audio-trimmed', {
+                  padId: pad.id,
+                  padName: pad.name || 'Untitled Pad',
+                  originalBytes: sourceBlob.size,
+                  trimmedBytes: audioBlob.size,
+                });
+              } catch (trimError) {
+                addOperationStage(diagnostics, 'audio-trim-fallback', {
+                  padId: pad.id,
+                  padName: pad.name || 'Untitled Pad',
+                  reason: trimError instanceof Error ? trimError.message : String(trimError),
+                });
               }
-              
-              audioFolder.file(`${pad.id}.audio`, audioBlob);
-            } catch (e) {
-              console.error('Audio export error:', e);
             }
-            count++;
+            audioFolder.file(`${pad.id}.audio`, audioBlob);
+            if (exportPad) exportPad.audioUrl = `audio/${pad.id}.audio`;
+            exportedAudio += 1;
+            totalExportBytes += audioBlob.size;
+            if (isNativeCapacitorPlatform() && totalExportBytes > MAX_NATIVE_BANK_EXPORT_BYTES) {
+              throw new Error('Admin bank export exceeded mobile size limit during packaging.');
+            }
           }
+          processedItems += 1;
+          onProgress?.(10 + (processedItems / totalMediaItems) * 45);
+          if (processedItems % 8 === 0) await yieldToMainThread();
+        }
+
+        if (pad.imageUrl) {
+          const exportPad = exportPadMap.get(pad.id);
+          const imageBlob = await loadPadMediaBlob(pad, 'image');
+          if (imageBlob) {
+            imageFolder.file(`${pad.id}.image`, imageBlob);
+            if (exportPad) exportPad.imageUrl = `images/${pad.id}.image`;
+            exportedImages += 1;
+            totalExportBytes += imageBlob.size;
+            if (isNativeCapacitorPlatform() && totalExportBytes > MAX_NATIVE_BANK_EXPORT_BYTES) {
+              throw new Error('Admin bank export exceeded mobile size limit during packaging.');
+            }
+          }
+          processedItems += 1;
+          onProgress?.(10 + (processedItems / totalMediaItems) * 45);
+          if (processedItems % 8 === 0) await yieldToMainThread();
         }
       }
-      
-      if (imageFolder) {
-        for (const pad of bank.pads) {
-          if (pad.imageUrl) {
-            onProgress && onProgress(40 + (count / total) * 10);
-            try {
-              const b = await (await fetch(pad.imageUrl)).blob();
-              imageFolder.file(`${pad.id}.image`, b);
-            } catch (e) {}
-            count++;
-          }
-        }
-      }
-      
+
+      diagnostics.metrics.processedBytes = totalExportBytes;
+      diagnostics.metrics.exportedAudio = exportedAudio;
+      diagnostics.metrics.exportedImages = exportedImages;
+
+      const bankData = {
+        ...bank,
+        createdAt: bank.createdAt.toISOString(),
+        pads: exportPads,
+      };
       zip.file('bank.json', JSON.stringify(bankData, null, 2));
-      
-      onProgress && onProgress(50);
-      
+
+      const normalizedTitle = (title || bank.name || 'Bank').trim();
+      const fileName = `${normalizedTitle.replace(/[^a-z0-9]/gi, '_')}.bank`;
+      let outputBlob: Blob;
+
       if (addToDatabase) {
+        addOperationStage(diagnostics, 'db-create');
         const { createAdminBankWithDerivedKey } = await import('@/lib/admin-bank-utils');
         const adminBank = await createAdminBankWithDerivedKey(title, description, user.id, bank.defaultColor);
-        if (!adminBank) throw new Error('DB creation failed');
-        const bankId = adminBank.id;
-        const derivedKey = adminBank.derived_key;
-        
-        // When Add to Database is enabled, export is automatically blocked (exportable: false)
-        addBankMetadata(zip, { password: true, transferable, exportable: false, title, description, color: bank.defaultColor, bankId });
-        
-        onProgress && onProgress(60);
-        
+        if (!adminBank) throw new Error('Failed to create admin bank metadata entry.');
+
+        addBankMetadata(zip, {
+          password: true,
+          transferable,
+          exportable: false,
+          title,
+          description,
+          color: bank.defaultColor,
+          bankId: adminBank.id,
+        });
+
         try {
           const { supabase } = await import('@/lib/supabase');
-          await supabase.from('user_bank_access').upsert({ user_id: user.id, bank_id: bankId }, { onConflict: 'user_id,bank_id' as any });
-        } catch (e) {}
-        
-        const encrypted = await encryptZip(zip, derivedKey);
-        onProgress && onProgress(80);
-        
-        const fileName = `${title.replace(/[^a-z0-9]/gi, '_')}.bank`;
-        const saveResult = await saveBankFile(encrypted, fileName);
-        if (saveResult.message) {
-          console.log('✅', saveResult.message);
+          await supabase
+            .from('user_bank_access')
+            .upsert({ user_id: user.id, bank_id: adminBank.id }, { onConflict: 'user_id,bank_id' as any });
+        } catch (upsertError) {
+          addOperationStage(diagnostics, 'db-access-upsert-warning', {
+            reason: upsertError instanceof Error ? upsertError.message : String(upsertError),
+          });
         }
-        return saveResult.message || 'Bank exported successfully';
+
+        onProgress?.(65);
+        outputBlob = await encryptZip(zip, adminBank.derived_key);
+        onProgress?.(88);
       } else {
-        // When Add to Database is disabled, use allowExport value to control export permission
-        addBankMetadata(zip, { password: !allowExport, transferable, exportable: allowExport, title, description, color: bank.defaultColor });
-        
-        onProgress && onProgress(60);
-        
+        addBankMetadata(zip, {
+          password: !allowExport,
+          transferable,
+          exportable: allowExport,
+          title,
+          description,
+          color: bank.defaultColor,
+        });
+
         if (!allowExport) {
-          // Encrypt with shared password when Allow Export is disabled
-          console.log('🔒 Encrypting bank with shared password (export disabled)');
-          const encrypted = await encryptZip(zip, SHARED_EXPORT_DISABLED_PASSWORD);
-          onProgress && onProgress(90);
-          
-          const fileName = `${title.replace(/[^a-z0-9]/gi, '_')}.bank`;
-          const saveResult = await saveBankFile(encrypted, fileName);
-          if (saveResult.message) {
-            console.log('✅', saveResult.message);
-          }
-          onProgress && onProgress(100);
-          return saveResult.message || 'Bank exported successfully';
+          onProgress?.(65);
+          outputBlob = await encryptZip(zip, SHARED_EXPORT_DISABLED_PASSWORD);
+          onProgress?.(88);
         } else {
-          // Unencrypted when Allow Export is enabled
-        console.log('📦 Creating shareable admin bank (unencrypted, no database entry)');
-        
-        const zipBlob = await zip.generateAsync({ 
-          type: 'blob', 
-          compression: 'DEFLATE', 
-          compressionOptions: { level: 9 } 
-        }, (m) => onProgress && onProgress(60 + (m.percent * 0.3)));
-        
-        onProgress && onProgress(90);
-        
-          const fileName = `${title.replace(/[^a-z0-9]/gi, '_')}.bank`;
-          const saveResult = await saveBankFile(zipBlob, fileName);
-          if (saveResult.message) {
-            console.log('✅', saveResult.message);
-      }
-      onProgress && onProgress(100);
-          return saveResult.message || 'Bank exported successfully';
+          addOperationStage(diagnostics, 'archive-generate');
+          onProgress?.(65);
+          const compressionLevel = isNativeCapacitorPlatform() ? 2 : 9;
+          outputBlob = await zip.generateAsync(
+            {
+              type: 'blob',
+              compression: 'DEFLATE',
+              compressionOptions: { level: compressionLevel },
+            },
+            (meta) => onProgress?.(65 + meta.percent * 0.23)
+          );
         }
       }
+
+      const saveResult = await saveExportFile(outputBlob, fileName);
+      if (!saveResult.success) {
+        throw new Error(saveResult.message || 'Failed to save admin bank export.');
+      }
+      addOperationStage(diagnostics, 'saved', { path: saveResult.savedPath || fileName });
+      onProgress?.(100);
+      return saveResult.message || 'Admin bank exported successfully.';
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const logPath = await writeOperationDiagnosticsLog(diagnostics, error);
+      throw new Error(logPath ? `${errorMessage} (Diagnostics log: ${logPath})` : errorMessage);
+    }
   }, [banks, user, profile]);
 
   const canTransferFromBank = React.useCallback((bankId: string): boolean => {
@@ -2146,202 +2488,264 @@ export function useSamplerStore(): SamplerStore {
     mappings: Record<string, unknown>;
     state: { primaryBankId: string | null; secondaryBankId: string | null; currentBankId: string | null };
   }) => {
-    if (!isNativeCapacitorPlatform()) {
-      throw new Error('Full backup export is available only in Capacitor builds.');
-    }
     const effectiveUser = user || getCachedUser();
     if (!effectiveUser?.id) {
       throw new Error('Please sign in before creating a backup.');
     }
 
-    const zip = new JSZip();
-    const backupBanks: any[] = [];
-    let totalMediaBytes = 0;
+    const diagnostics = createOperationDiagnostics('app_backup_export', effectiveUser.id);
+    addOperationStage(diagnostics, 'start', { bankCount: banks.length });
 
-    for (const bank of banks) {
-      const bankClone: any = {
-        ...bank,
-        createdAt: bank.createdAt instanceof Date ? bank.createdAt.toISOString() : bank.createdAt,
-        pads: [] as any[]
-      };
+    try {
+      await ensureExportPermission();
 
-      for (const pad of bank.pads) {
-        const padClone: any = {
-          ...pad,
-          audioUrl: undefined,
-          imageUrl: undefined,
-          imageData: undefined,
-          audioPath: null,
-          imagePath: null
+      let estimatedBytes = 0;
+      for (const bank of banks) {
+        estimatedBytes += await estimateBankMediaBytes(bank);
+      }
+      diagnostics.metrics.estimatedBytes = estimatedBytes;
+      diagnostics.metrics.bankCount = banks.length;
+
+      if (isNativeCapacitorPlatform() && estimatedBytes > MAX_NATIVE_APP_BACKUP_BYTES) {
+        throw new Error(
+          `Full backup is too large for mobile export (${Math.ceil(estimatedBytes / (1024 * 1024))}MB). Export banks individually.`
+        );
+      }
+
+      await ensureStorageHeadroom(Math.ceil(Math.max(estimatedBytes, 1) * 0.45), 'backup export');
+
+      const zip = new JSZip();
+      const backupBanks: any[] = [];
+      let totalMediaBytes = 0;
+      let processedPads = 0;
+      const totalPads = banks.reduce((sum, bank) => sum + bank.pads.length, 0);
+
+      for (const bank of banks) {
+        const bankClone: any = {
+          ...bank,
+          createdAt: bank.createdAt instanceof Date ? bank.createdAt.toISOString() : bank.createdAt,
+          pads: [] as any[]
         };
 
-        if (pad.audioUrl) {
-          try {
-            const audioBlob = await (await fetch(pad.audioUrl)).blob();
+        for (const pad of bank.pads) {
+          const padClone: any = {
+            ...pad,
+            audioUrl: undefined,
+            imageUrl: undefined,
+            imageData: undefined,
+            audioPath: null,
+            imagePath: null,
+            audioBackend: pad.audioBackend || (pad.audioStorageKey ? 'native' : 'idb'),
+            imageBackend: pad.imageBackend || (pad.imageStorageKey ? 'native' : 'idb'),
+          };
+
+          const audioBlob = pad.audioUrl ? await loadPadMediaBlob(pad, 'audio') : null;
+          if (audioBlob) {
             const audioPath = `media/audio/${bank.id}/${pad.id}.audio`;
             zip.file(audioPath, audioBlob);
             padClone.audioPath = audioPath;
             totalMediaBytes += audioBlob.size;
-          } catch (error) {
-            console.warn(`Skipping audio in backup for pad ${pad.id}:`, error);
           }
-        }
 
-        if (pad.imageUrl) {
-          try {
-            const imageBlob = await (await fetch(pad.imageUrl)).blob();
+          const imageBlob = pad.imageUrl ? await loadPadMediaBlob(pad, 'image') : null;
+          if (imageBlob) {
             const imagePath = `media/images/${bank.id}/${pad.id}.image`;
             zip.file(imagePath, imageBlob);
             padClone.imagePath = imagePath;
             totalMediaBytes += imageBlob.size;
-          } catch (error) {
-            console.warn(`Skipping image in backup for pad ${pad.id}:`, error);
           }
+
+          if (isNativeCapacitorPlatform() && totalMediaBytes > MAX_NATIVE_APP_BACKUP_BYTES) {
+            throw new Error('Backup exceeded mobile size limit during packaging. Export banks individually.');
+          }
+
+          bankClone.pads.push(padClone);
+          processedPads += 1;
+          if (processedPads % 8 === 0) await yieldToMainThread();
         }
 
-        bankClone.pads.push(padClone);
+        backupBanks.push(bankClone);
       }
 
-      backupBanks.push(bankClone);
+      diagnostics.metrics.processedBytes = totalMediaBytes;
+      diagnostics.metrics.padCount = totalPads;
+
+      zip.file(
+        'backup.json',
+        JSON.stringify(
+          {
+            version: BACKUP_VERSION,
+            exportedAt: new Date().toISOString(),
+            userId: effectiveUser.id,
+            manifest: {
+              schema: 'vdjv-backup',
+              mediaPolicy: 'hybrid',
+              hasBackendHints: true,
+              restoreMode: 'non-destructive-legacy',
+            },
+            state: payload.state,
+            settings: payload.settings,
+            mappings: payload.mappings,
+            banks: backupBanks
+          },
+          null,
+          2
+        )
+      );
+
+      addOperationStage(diagnostics, 'encrypt');
+      const backupPassword = await derivePassword(`backup-${effectiveUser.id}`);
+      const encrypted = await encryptZip(zip, backupPassword);
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const fileName = `vdjv-full-backup-${timestamp}${BACKUP_EXT}`;
+      const saveResult = await saveExportFile(encrypted, fileName);
+      if (!saveResult.success) {
+        throw new Error(saveResult.message || 'Failed to save backup file.');
+      }
+
+      addOperationStage(diagnostics, 'saved', { path: saveResult.savedPath || fileName });
+      return saveResult.message || 'Backup exported successfully.';
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const logPath = await writeOperationDiagnosticsLog(diagnostics, error);
+      throw new Error(logPath ? `${errorMessage} (Diagnostics log: ${logPath})` : errorMessage);
     }
-
-    await ensureStorageHeadroom(Math.ceil(totalMediaBytes * 0.35), 'backup export');
-
-    zip.file(
-      'backup.json',
-      JSON.stringify(
-        {
-          version: BACKUP_VERSION,
-          exportedAt: new Date().toISOString(),
-          userId: effectiveUser.id,
-          state: payload.state,
-          settings: payload.settings,
-          mappings: payload.mappings,
-          banks: backupBanks
-        },
-        null,
-        2
-      )
-    );
-
-    const backupPassword = await derivePassword(`backup-${effectiveUser.id}`);
-    const encrypted = await encryptZip(zip, backupPassword);
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const fileName = `vdjv-full-backup-${timestamp}${BACKUP_EXT}`;
-    const saveResult = await saveBankFile(encrypted, fileName);
-    if (!saveResult.success) {
-      throw new Error(saveResult.message || 'Failed to save backup file.');
-    }
-    return saveResult.message || 'Backup exported successfully.';
   }, [banks, user]);
 
   const restoreAppBackup = React.useCallback(async (file: File) => {
-    if (!isNativeCapacitorPlatform()) {
-      throw new Error('Full backup restore is available only in Capacitor builds.');
-    }
     const effectiveUser = user || getCachedUser();
     if (!effectiveUser?.id) {
       throw new Error('Please sign in before restoring a backup.');
     }
 
-    await ensureStorageHeadroom(Math.ceil(file.size * 1.2), 'backup restore');
+    const diagnostics = createOperationDiagnostics('app_backup_restore', effectiveUser.id);
+    addOperationStage(diagnostics, 'start', { inputBytes: file.size, bankCount: banks.length });
 
-    const backupPassword = await derivePassword(`backup-${effectiveUser.id}`);
-    const decryptedZipBlob = await decryptZip(file, backupPassword);
-    const zip = await new JSZip().loadAsync(await decryptedZipBlob.arrayBuffer());
-    const backupJsonFile = zip.file('backup.json');
-    if (!backupJsonFile) {
-      throw new Error('Invalid backup: backup.json missing.');
-    }
+    try {
+      await ensureExportPermission();
+      await ensureStorageHeadroom(Math.ceil(file.size * 1.2), 'backup restore');
 
-    const backupPayload = JSON.parse(await backupJsonFile.async('string'));
-    if (!backupPayload || backupPayload.version !== BACKUP_VERSION) {
-      throw new Error('Unsupported backup version.');
-    }
-    if (backupPayload.userId !== effectiveUser.id) {
-      throw new Error('This backup belongs to a different account.');
-    }
-
-    for (const bank of banks) {
-      await clearBankMedia(bank);
-    }
-
-    const restoredBanks: SamplerBank[] = [];
-    for (const bank of backupPayload.banks || []) {
-      const restoredPads: PadData[] = [];
-      for (const pad of bank.pads || []) {
-        let audioUrl = '';
-        let imageUrl: string | undefined;
-        let audioStorageKey: string | undefined;
-        let imageStorageKey: string | undefined;
-
-        if (pad.audioPath) {
-          const audioFile = zip.file(String(pad.audioPath));
-          if (audioFile) {
-            const audioBlob = await audioFile.async('blob');
-            audioStorageKey = await storeFile(
-              pad.id,
-              new File([audioBlob], `${pad.id}.audio`, { type: audioBlob.type || 'application/octet-stream' }),
-              'audio'
-            );
-            audioUrl = URL.createObjectURL(audioBlob);
-          }
-        }
-
-        if (pad.imagePath) {
-          const imageFile = zip.file(String(pad.imagePath));
-          if (imageFile) {
-            const imageBlob = await imageFile.async('blob');
-            imageStorageKey = await storeFile(
-              pad.id,
-              new File([imageBlob], `${pad.id}.image`, { type: imageBlob.type || 'application/octet-stream' }),
-              'image'
-            );
-            imageUrl = URL.createObjectURL(imageBlob);
-          }
-        }
-
-        restoredPads.push({
-          ...pad,
-          audioUrl,
-          imageUrl,
-          audioStorageKey,
-          imageStorageKey,
-          imageData: undefined,
-        } as PadData);
+      const backupPassword = await derivePassword(`backup-${effectiveUser.id}`);
+      const decryptedZipBlob = await decryptZip(file, backupPassword);
+      const zip = await new JSZip().loadAsync(await decryptedZipBlob.arrayBuffer());
+      const backupJsonFile = zip.file('backup.json');
+      if (!backupJsonFile) {
+        throw new Error('Invalid backup: backup.json missing.');
       }
 
-      restoredBanks.push({
-        ...bank,
-        createdAt: new Date(bank.createdAt || Date.now()),
-        pads: restoredPads
-      } as SamplerBank);
-    }
+      const backupPayload = JSON.parse(await backupJsonFile.async('string'));
+      if (!backupPayload || (backupPayload.version !== BACKUP_VERSION && backupPayload.version !== 1)) {
+        throw new Error('Unsupported backup version.');
+      }
+      if (backupPayload.userId !== effectiveUser.id) {
+        throw new Error('This backup belongs to a different account.');
+      }
 
-    setBanks(restoredBanks);
+      addOperationStage(diagnostics, 'clear-existing-media', { existingBanks: banks.length });
+      for (const bank of banks) {
+        await clearBankMedia(bank);
+      }
 
-    const restoredState = backupPayload.state || null;
-    if (restoredState) {
-      const bankIds = new Set(restoredBanks.map((b) => b.id));
-      setPrimaryBankIdState(bankIds.has(restoredState.primaryBankId) ? restoredState.primaryBankId : null);
-      setSecondaryBankIdState(bankIds.has(restoredState.secondaryBankId) ? restoredState.secondaryBankId : null);
-      if (bankIds.has(restoredState.currentBankId)) {
-        setCurrentBankIdState(restoredState.currentBankId);
+      const restoredBanks: SamplerBank[] = [];
+      let restoredMediaBytes = 0;
+
+      for (const bank of backupPayload.banks || []) {
+        const restoredPads: PadData[] = [];
+        for (const pad of bank.pads || []) {
+          let audioUrl = '';
+          let imageUrl: string | undefined;
+          let audioStorageKey: string | undefined;
+          let imageStorageKey: string | undefined;
+          let audioBackend: MediaBackend = (pad.audioBackend as MediaBackend | undefined) || (pad.audioStorageKey ? 'native' : 'idb');
+          let imageBackend: MediaBackend = (pad.imageBackend as MediaBackend | undefined) || (pad.imageStorageKey ? 'native' : 'idb');
+
+          if (pad.audioPath) {
+            const audioFile = zip.file(String(pad.audioPath));
+            if (audioFile) {
+              const audioBlob = await audioFile.async('blob');
+              const storedAudio = await storeFile(
+                pad.id,
+                new File([audioBlob], `${pad.id}.audio`, { type: audioBlob.type || 'application/octet-stream' }),
+                'audio'
+              );
+              audioStorageKey = storedAudio.storageKey;
+              audioBackend = storedAudio.backend;
+              audioUrl = URL.createObjectURL(audioBlob);
+              restoredMediaBytes += audioBlob.size;
+            }
+          }
+
+          if (pad.imagePath) {
+            const imageFile = zip.file(String(pad.imagePath));
+            if (imageFile) {
+              const imageBlob = await imageFile.async('blob');
+              const storedImage = await storeFile(
+                pad.id,
+                new File([imageBlob], `${pad.id}.image`, { type: imageBlob.type || 'application/octet-stream' }),
+                'image'
+              );
+              imageStorageKey = storedImage.storageKey;
+              imageBackend = storedImage.backend;
+              imageUrl = URL.createObjectURL(imageBlob);
+              restoredMediaBytes += imageBlob.size;
+            }
+          }
+
+          restoredPads.push({
+            ...pad,
+            audioUrl,
+            imageUrl,
+            audioStorageKey,
+            audioBackend,
+            imageStorageKey,
+            imageBackend,
+            imageData: undefined,
+          } as PadData);
+
+          if (restoredPads.length % 8 === 0) await yieldToMainThread();
+        }
+
+        restoredBanks.push({
+          ...bank,
+          createdAt: new Date(bank.createdAt || Date.now()),
+          pads: restoredPads,
+        } as SamplerBank);
+      }
+
+      diagnostics.metrics.processedBytes = restoredMediaBytes;
+      diagnostics.metrics.restoredBanks = restoredBanks.length;
+
+      setBanks(restoredBanks);
+
+      const restoredState = backupPayload.state || null;
+      if (restoredState) {
+        const bankIds = new Set(restoredBanks.map((b) => b.id));
+        setPrimaryBankIdState(bankIds.has(restoredState.primaryBankId) ? restoredState.primaryBankId : null);
+        setSecondaryBankIdState(bankIds.has(restoredState.secondaryBankId) ? restoredState.secondaryBankId : null);
+        if (bankIds.has(restoredState.currentBankId)) {
+          setCurrentBankIdState(restoredState.currentBankId);
+        } else {
+          setCurrentBankIdState(restoredBanks[0]?.id || null);
+        }
       } else {
+        setPrimaryBankIdState(null);
+        setSecondaryBankIdState(null);
         setCurrentBankIdState(restoredBanks[0]?.id || null);
       }
-    } else {
-      setPrimaryBankIdState(null);
-      setSecondaryBankIdState(null);
-      setCurrentBankIdState(restoredBanks[0]?.id || null);
-    }
 
-    return {
-      message: `Backup restored: ${restoredBanks.length} bank(s).`,
-      settings: (backupPayload.settings || null) as Record<string, unknown> | null,
-      mappings: (backupPayload.mappings || null) as Record<string, unknown> | null,
-      state: (backupPayload.state || null) as { primaryBankId: string | null; secondaryBankId: string | null; currentBankId: string | null } | null,
-    };
+      addOperationStage(diagnostics, 'complete', { restoredBanks: restoredBanks.length });
+      return {
+        message: `Backup restored: ${restoredBanks.length} bank(s).`,
+        settings: (backupPayload.settings || null) as Record<string, unknown> | null,
+        mappings: (backupPayload.mappings || null) as Record<string, unknown> | null,
+        state: (backupPayload.state || null) as { primaryBankId: string | null; secondaryBankId: string | null; currentBankId: string | null } | null,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const logPath = await writeOperationDiagnosticsLog(diagnostics, error);
+      throw new Error(logPath ? `${errorMessage} (Diagnostics log: ${logPath})` : errorMessage);
+    }
   }, [banks, clearBankMedia, user]);
 
   const recoverMissingMediaFromBanks = React.useCallback(async (files: File[]) => {
@@ -2384,13 +2788,14 @@ export function useSamplerStore(): SamplerStore {
         if (!nextPad.audioUrl && sourcePad?.audioUrl) {
           try {
             const audioBlob = await (await fetch(sourcePad.audioUrl)).blob();
-            const storageKey = await storeFile(
+            const storedAudio = await storeFile(
               nextPad.id,
               new File([audioBlob], `${nextPad.id}.audio`, { type: audioBlob.type || 'application/octet-stream' }),
               'audio'
             );
             nextPad.audioUrl = URL.createObjectURL(audioBlob);
-            if (storageKey) nextPad.audioStorageKey = storageKey;
+            if (storedAudio.storageKey) nextPad.audioStorageKey = storedAudio.storageKey;
+            nextPad.audioBackend = storedAudio.backend;
             recoveredPads += 1;
           } catch {}
         }
@@ -2398,13 +2803,14 @@ export function useSamplerStore(): SamplerStore {
         if (!nextPad.imageUrl && sourcePad?.imageUrl) {
           try {
             const imageBlob = await (await fetch(sourcePad.imageUrl)).blob();
-            const storageKey = await storeFile(
+            const storedImage = await storeFile(
               nextPad.id,
               new File([imageBlob], `${nextPad.id}.image`, { type: imageBlob.type || 'application/octet-stream' }),
               'image'
             );
             nextPad.imageUrl = URL.createObjectURL(imageBlob);
-            if (storageKey) nextPad.imageStorageKey = storageKey;
+            if (storedImage.storageKey) nextPad.imageStorageKey = storedImage.storageKey;
+            nextPad.imageBackend = storedImage.backend;
           } catch {}
         }
 
@@ -2576,3 +2982,6 @@ export function useSamplerStore(): SamplerStore {
     exportAppBackup, restoreAppBackup, recoverMissingMediaFromBanks,
   };
 }
+
+
+

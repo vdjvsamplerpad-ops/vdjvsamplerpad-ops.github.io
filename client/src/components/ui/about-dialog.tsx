@@ -1296,7 +1296,7 @@ export function AboutDialog({
               </div>
 
               <div className="rounded-lg border p-3 space-y-2">
-                <div className="text-xs uppercase tracking-wide text-gray-500">App Backup (Capacitor)</div>
+                <div className="text-xs uppercase tracking-wide text-gray-500">App Backup</div>
                 <p className="text-xs text-gray-500">
                   Encrypted account-bound full backup with banks, media, bank arrangement, settings, and mappings.
                 </p>
