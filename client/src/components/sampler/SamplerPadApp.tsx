@@ -171,7 +171,10 @@ export function SamplerPadApp() {
     moveBankDown,
     transferPad,
     exportAdminBank,
-    canTransferFromBank
+    canTransferFromBank,
+    exportAppBackup,
+    restoreAppBackup,
+    recoverMissingMediaFromBanks
   } = useSamplerStore();
 
   const playbackManager = useGlobalPlaybackManager() as ReturnType<typeof useGlobalPlaybackManager> & {
@@ -211,6 +214,13 @@ export function SamplerPadApp() {
   const [globalMuted, setGlobalMuted] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [showErrorDialog, setShowErrorDialog] = React.useState(false);
+  const [missingMediaSummary, setMissingMediaSummary] = React.useState<{
+    missingAudio: number;
+    missingImages: number;
+    affectedBanks: string[];
+  } | null>(null);
+  const restoreBackupInputRef = React.useRef<HTMLInputElement>(null);
+  const recoverBankInputRef = React.useRef<HTMLInputElement>(null);
   const [VolumeMixer, setVolumeMixer] = React.useState<React.ComponentType<any> | null>(null);
   const [editRequest, setEditRequest] = React.useState<{ padId: string; token: number } | null>(null);
   const [editBankRequest, setEditBankRequest] = React.useState<{ bankId: string; token: number } | null>(null);
@@ -303,6 +313,16 @@ export function SamplerPadApp() {
       }
     };
   }, [playbackManager]);
+
+  React.useEffect(() => {
+    const onMissingMediaDetected = (event: Event) => {
+      const detail = (event as CustomEvent<{ missingAudio: number; missingImages: number; affectedBanks: string[] }>).detail;
+      if (!detail || (detail.missingAudio <= 0 && detail.missingImages <= 0)) return;
+      setMissingMediaSummary(detail);
+    };
+    window.addEventListener('vdjv-missing-media-detected', onMissingMediaDetected as EventListener);
+    return () => window.removeEventListener('vdjv-missing-media-detected', onMissingMediaDetected as EventListener);
+  }, []);
 
   // Update individual settings
   const updateSetting = React.useCallback(<K extends keyof AppSettings>(
@@ -695,6 +715,54 @@ export function SamplerPadApp() {
     },
     [banks, settings.systemMappings, updateBank, updatePad, setSettings]
   );
+
+  const handleExportAppBackup = React.useCallback(async () => {
+    const payload = {
+      settings: settings as unknown as Record<string, unknown>,
+      mappings: buildMappingExport() as unknown as Record<string, unknown>,
+      state: {
+        primaryBankId,
+        secondaryBankId,
+        currentBankId
+      }
+    };
+    return exportAppBackup(payload);
+  }, [settings, buildMappingExport, primaryBankId, secondaryBankId, currentBankId, exportAppBackup]);
+
+  const handleRestoreAppBackup = React.useCallback(async (file: File) => {
+    const result = await restoreAppBackup(file);
+
+    if (result.settings) {
+      const restoredSettings = result.settings as Partial<AppSettings>;
+      setSettings((prev) => ({
+        ...prev,
+        ...restoredSettings,
+        systemMappings: {
+          ...DEFAULT_SYSTEM_MAPPINGS,
+          ...(restoredSettings.systemMappings || prev.systemMappings)
+        }
+      }));
+    }
+
+    if (result.mappings) {
+      const mappingsPayload = result.mappings as MappingExport;
+      if (mappingsPayload?.systemMappings) {
+        setSettings((prev) => ({
+          ...prev,
+          systemMappings: {
+            ...DEFAULT_SYSTEM_MAPPINGS,
+            ...mappingsPayload.systemMappings
+          }
+        }));
+      }
+    }
+
+    return result.message;
+  }, [restoreAppBackup, setSettings]);
+
+  const handleRecoverMissingMediaFromBanks = React.useCallback(async (files: File[]) => {
+    return recoverMissingMediaFromBanks(files);
+  }, [recoverMissingMediaFromBanks]);
 
   const normalizeMidiValue = React.useCallback((value: number) => {
     // Scale full MIDI CC range (0-127) to 0-1.
@@ -2186,6 +2254,44 @@ export function SamplerPadApp() {
     setError(null);
   };
 
+  const handleRestoreBackupPrompt = React.useCallback(() => {
+    restoreBackupInputRef.current?.click();
+  }, []);
+
+  const handleRecoverBankPrompt = React.useCallback(() => {
+    recoverBankInputRef.current?.click();
+  }, []);
+
+  const handleRestoreBackupFile = React.useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      const message = await handleRestoreAppBackup(file);
+      setMissingMediaSummary(null);
+      setError(message);
+      setShowErrorDialog(true);
+    } catch (restoreError) {
+      setError(restoreError instanceof Error ? restoreError.message : 'Backup restore failed.');
+      setShowErrorDialog(true);
+    }
+  }, [handleRestoreAppBackup]);
+
+  const handleRecoverBankFiles = React.useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (!files.length) return;
+    try {
+      const message = await handleRecoverMissingMediaFromBanks(files);
+      setMissingMediaSummary(null);
+      setError(message);
+      setShowErrorDialog(true);
+    } catch (recoverError) {
+      setError(recoverError instanceof Error ? recoverError.message : 'Recovery import failed.');
+      setShowErrorDialog(true);
+    }
+  }, [handleRecoverMissingMediaFromBanks]);
+
   // Get all pads from all banks for cross-bank controls
   const allPads = React.useMemo(() => {
     return banks.flatMap(bank => bank.pads);
@@ -2331,6 +2437,9 @@ export function SamplerPadApp() {
             onClearAllChannelMappings={handleClearAllChannelMappings}
             onExportMappings={handleExportMappings}
             onImportMappings={handleImportMappings}
+            onExportAppBackup={handleExportAppBackup}
+            onRestoreAppBackup={handleRestoreAppBackup}
+            onRecoverMissingMediaFromBanks={handleRecoverMissingMediaFromBanks}
             midiDeviceProfiles={midiDeviceProfiles}
             midiDeviceProfileId={settings.midiDeviceProfileId}
             onSelectMidiDeviceProfile={(id) => updateSetting('midiDeviceProfileId', id)}
@@ -2464,6 +2573,45 @@ export function SamplerPadApp() {
           )}
         </div>
       </div>
+
+      <input
+        ref={restoreBackupInputRef}
+        type="file"
+        accept=".vdjvbackup,application/octet-stream"
+        className="hidden"
+        onChange={handleRestoreBackupFile}
+      />
+      <input
+        ref={recoverBankInputRef}
+        type="file"
+        accept=".bank,application/zip,application/octet-stream,*/*"
+        multiple
+        className="hidden"
+        onChange={handleRecoverBankFiles}
+      />
+
+      <Dialog open={Boolean(missingMediaSummary)} onOpenChange={(open) => { if (!open) setMissingMediaSummary(null); }}>
+        <DialogContent className={`${theme === 'dark' ? 'bg-gray-800 border-amber-500' : 'bg-white border-amber-400'}`} aria-describedby={undefined}>
+          <DialogHeader>
+            <DialogTitle className="text-amber-500">Some pad files are missing</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className={`text-sm ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>
+              Missing audio: <span className="font-semibold">{missingMediaSummary?.missingAudio || 0}</span> | Missing images: <span className="font-semibold">{missingMediaSummary?.missingImages || 0}</span>
+            </p>
+            {missingMediaSummary?.affectedBanks?.length ? (
+              <p className={`text-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+                Affected banks: {missingMediaSummary.affectedBanks.join(', ')}
+              </p>
+            ) : null}
+            <div className="grid grid-cols-1 gap-2">
+              <Button onClick={handleRestoreBackupPrompt} variant="default">Restore from Backup</Button>
+              <Button onClick={handleRecoverBankPrompt} variant="outline">Import .bank files one by one</Button>
+              <Button onClick={() => setMissingMediaSummary(null)} variant="ghost">Continue</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Error Dialog */}
       <Dialog open={showErrorDialog} onOpenChange={setShowErrorDialog}>

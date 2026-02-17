@@ -69,6 +69,9 @@ interface AboutDialogProps {
   onSelectMidiDeviceProfile: (id: string | null) => void;
   onExportMappings: () => Promise<string>;
   onImportMappings: (file: File) => Promise<string>;
+  onExportAppBackup: () => Promise<string>;
+  onRestoreAppBackup: (file: File) => Promise<string>;
+  onRecoverMissingMediaFromBanks: (files: File[]) => Promise<string>;
   isAuthenticated?: boolean;
   onSignOut?: () => Promise<void> | void;
 }
@@ -113,6 +116,9 @@ export function AboutDialog({
   onSelectMidiDeviceProfile,
   onExportMappings,
   onImportMappings,
+  onExportAppBackup,
+  onRestoreAppBackup,
+  onRecoverMissingMediaFromBanks,
   isAuthenticated = false,
   onSignOut
 }: AboutDialogProps) {
@@ -125,14 +131,18 @@ export function AboutDialog({
   const [activePanel, setActivePanel] = React.useState<'general' | 'system' | 'channels' | 'backup'>('general');
   const [mappingError, setMappingError] = React.useState<string | null>(null);
   const [mappingNotice, setMappingNotice] = React.useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [backupNotice, setBackupNotice] = React.useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [isSigningOut, setIsSigningOut] = React.useState(false);
   const importInputRef = React.useRef<HTMLInputElement>(null);
+  const backupRestoreInputRef = React.useRef<HTMLInputElement>(null);
+  const recoveryImportInputRef = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
     if (!open) {
       setMidiLearnAction(null);
       setMappingError(null);
       setMappingNotice(null);
+      setBackupNotice(null);
       setActivePanel('general');
     }
   }, [open]);
@@ -474,6 +484,56 @@ export function AboutDialog({
     [onImportMappings]
   );
 
+  const handleExportBackup = React.useCallback(async () => {
+    try {
+      const message = await onExportAppBackup();
+      setBackupNotice({ type: 'success', message });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Backup export failed.';
+      setBackupNotice({ type: 'error', message });
+    }
+  }, [onExportAppBackup]);
+
+  const handleRestoreBackupClick = React.useCallback(() => {
+    backupRestoreInputRef.current?.click();
+  }, []);
+
+  const handleRestoreBackup = React.useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file) return;
+      try {
+        const message = await onRestoreAppBackup(file);
+        setBackupNotice({ type: 'success', message });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Backup restore failed.';
+        setBackupNotice({ type: 'error', message });
+      }
+    },
+    [onRestoreAppBackup]
+  );
+
+  const handleRecoverClick = React.useCallback(() => {
+    recoveryImportInputRef.current?.click();
+  }, []);
+
+  const handleRecoveryImport = React.useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files || []);
+      event.target.value = '';
+      if (!files.length) return;
+      try {
+        const message = await onRecoverMissingMediaFromBanks(files);
+        setBackupNotice({ type: 'success', message });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Recovery import failed.';
+        setBackupNotice({ type: 'error', message });
+      }
+    },
+    [onRecoverMissingMediaFromBanks]
+  );
+
   const handleSignOut = React.useCallback(async () => {
     if (!onSignOut || isSigningOut) return;
     setIsSigningOut(true);
@@ -676,7 +736,7 @@ export function AboutDialog({
                           onValueChange={(value) => onUpdateSystemColor(action, value === '__none__' ? undefined : value)}
                         >
                           <SelectTrigger className="h-8 text-xs">
-                            <SelectValue placeholder="—" />
+                            <SelectValue placeholder="-" />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="__none__">None</SelectItem>
@@ -723,7 +783,7 @@ export function AboutDialog({
                               ? `Note ${mapping.midiNote}`
                               : mapping.midiCC !== undefined
                                 ? `CC ${mapping.midiCC}`
-                                : '—'}
+                                : '-'}
                           </span>
                         </div>
                       </div>
@@ -772,7 +832,7 @@ export function AboutDialog({
                       onValueChange={(value) => onUpdateSystemColor(action, value === '__none__' ? undefined : value)}
                     >
                       <SelectTrigger className="h-7 text-xs">
-                        <SelectValue placeholder="—" />
+                        <SelectValue placeholder="-" />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="__none__">None</SelectItem>
@@ -794,7 +854,7 @@ export function AboutDialog({
                           className="h-7 px-2 text-[10px]"
                           onClick={() => setMidiLearnAction({ type: 'system', action })}
                         >
-                          {midiLearnAction?.type === 'system' && midiLearnAction.action === action ? 'Listening…' : 'Learn'}
+                          {midiLearnAction?.type === 'system' && midiLearnAction.action === action ? 'Listening...' : 'Learn'}
                         </Button>
                       )}
                       {hasMidi && (
@@ -816,7 +876,7 @@ export function AboutDialog({
                           ? `Note ${mapping.midiNote}`
                           : mapping.midiCC !== undefined
                             ? `CC ${mapping.midiCC}`
-                            : '—'}
+                            : '-'}
                       </span>
                     </div>
                   )}
@@ -848,7 +908,7 @@ export function AboutDialog({
                     <Input
                       value={mapping.keyUp || ''}
                       onKeyDown={handleChannelKeyAssign(index, 'keyUp')}
-                      placeholder="—"
+                      placeholder="-"
                       readOnly
                       className="h-8 text-xs"
                     />
@@ -858,7 +918,7 @@ export function AboutDialog({
                     <Input
                       value={mapping.keyDown || ''}
                       onKeyDown={handleChannelKeyAssign(index, 'keyDown')}
-                      placeholder="—"
+                      placeholder="-"
                       readOnly
                       className="h-8 text-xs"
                     />
@@ -868,7 +928,7 @@ export function AboutDialog({
                     <Input
                       value={mapping.keyStop || ''}
                       onKeyDown={handleChannelKeyAssign(index, 'keyStop')}
-                      placeholder="—"
+                      placeholder="-"
                       readOnly
                       className="h-8 text-xs"
                     />
@@ -925,7 +985,7 @@ export function AboutDialog({
                             Clear CC
                           </Button>
                         )}
-                        <span className="text-xs text-gray-500">Note: {mapping.midiNote ?? '—'} / CC: {mapping.midiCC ?? '—'}</span>
+                        <span className="text-xs text-gray-500">Note: {mapping.midiNote ?? '-'} / CC: {mapping.midiCC ?? '-'}</span>
                       </div>
                     </div>
                   )}
@@ -989,7 +1049,7 @@ export function AboutDialog({
                           Clear Note
                         </Button>
                       )}
-                      <span className="text-xs text-gray-500">Note: {systemMappings.mute.midiNote ?? '—'}</span>
+                      <span className="text-xs text-gray-500">Note: {systemMappings.mute.midiNote ?? '-'}</span>
                     </div>
                   )}
                 </div>
@@ -1017,7 +1077,7 @@ export function AboutDialog({
                       >
                         Clear
                       </Button>
-                      <span className="text-xs text-gray-500">CC: {systemMappings.masterVolumeCC ?? '—'}</span>
+                      <span className="text-xs text-gray-500">CC: {systemMappings.masterVolumeCC ?? '-'}</span>
                     </div>
                   </div>
                 )}
@@ -1040,14 +1100,14 @@ export function AboutDialog({
                 <Input
                   value={mapping.keyUp || ''}
                   onKeyDown={handleChannelKeyAssign(index, 'keyUp')}
-                  placeholder="—"
+                  placeholder="-"
                   readOnly
                   className="h-7 text-xs"
                 />
                 <Input
                   value={mapping.keyDown || ''}
                   onKeyDown={handleChannelKeyAssign(index, 'keyDown')}
-                  placeholder="—"
+                  placeholder="-"
                   readOnly
                   className="h-7 text-xs"
                 />
@@ -1055,7 +1115,7 @@ export function AboutDialog({
                   <Input
                     value={mapping.keyStop || ''}
                     onKeyDown={handleChannelKeyAssign(index, 'keyStop')}
-                    placeholder="—"
+                    placeholder="-"
                     readOnly
                     className="h-6 text-[10px] px-2"
                   />
@@ -1069,7 +1129,7 @@ export function AboutDialog({
                           className="h-6 px-1 text-[9px]"
                           onClick={() => setMidiLearnAction({ type: 'channel', channelIndex: index })}
                         >
-                          {midiLearnAction?.type === 'channel' && midiLearnAction.channelIndex === index ? 'Listening…' : 'Learn Note'}
+                          {midiLearnAction?.type === 'channel' && midiLearnAction.channelIndex === index ? 'Listening...' : 'Learn Note'}
                         </Button>
                       )}
                       {mapping.midiNote !== undefined && (
@@ -1086,7 +1146,7 @@ export function AboutDialog({
                           Clear
                         </Button>
                       )}
-                      <span className="text-[10px] text-gray-500">{mapping.midiNote ?? '—'}</span>
+                      <span className="text-[10px] text-gray-500">{mapping.midiNote ?? '-'}</span>
                     </div>
                   )}
                 </div>
@@ -1101,7 +1161,7 @@ export function AboutDialog({
                           className="h-6 px-1 text-[9px]"
                           onClick={() => setMidiLearnAction({ type: 'channel', channelIndex: index })}
                         >
-                          {midiLearnAction?.type === 'channel' && midiLearnAction.channelIndex === index ? 'Listening…' : 'Learn CC'}
+                          {midiLearnAction?.type === 'channel' && midiLearnAction.channelIndex === index ? 'Listening...' : 'Learn CC'}
                         </Button>
                       )}
                       {mapping.midiCC !== undefined && (
@@ -1119,7 +1179,7 @@ export function AboutDialog({
                         </Button>
                       )}
                       <span className="text-[10px] text-gray-500">
-                        {mapping.midiCC ?? '—'}
+                        {mapping.midiCC ?? '-'}
                       </span>
                     </div>
                   </div>
@@ -1158,7 +1218,7 @@ export function AboutDialog({
                     className="h-7 px-2 text-[10px]"
                     onClick={() => setMidiLearnAction({ type: 'system', action: 'mute' })}
                   >
-                    {midiLearnAction?.type === 'system' && midiLearnAction.action === 'mute' ? 'Listening…' : 'Learn Note'}
+                    {midiLearnAction?.type === 'system' && midiLearnAction.action === 'mute' ? 'Listening...' : 'Learn Note'}
                   </Button>
                 )}
                 {showMidiColumn && systemMappings.mute.midiNote !== undefined && (
@@ -1176,7 +1236,7 @@ export function AboutDialog({
                   </Button>
                 )}
                 {showMidiColumn && (
-                  <span className="text-xs text-gray-500">{systemMappings.mute.midiNote ?? '—'}</span>
+                  <span className="text-xs text-gray-500">{systemMappings.mute.midiNote ?? '-'}</span>
                 )}
               </div>
               {showMidiColumn && (
@@ -1189,7 +1249,7 @@ export function AboutDialog({
                       className="h-7 px-2 text-[10px]"
                       onClick={() => setMidiLearnAction({ type: 'masterVolume' })}
                     >
-                      {midiLearnAction?.type === 'masterVolume' ? 'Listening…' : 'Learn CC'}
+                      {midiLearnAction?.type === 'masterVolume' ? 'Listening...' : 'Learn CC'}
                     </Button>
                   )}
                   <Button
@@ -1202,7 +1262,7 @@ export function AboutDialog({
                     Clear
                   </Button>
                   <span className="text-xs text-gray-500">
-                    {systemMappings.masterVolumeCC ?? '—'}
+                    {systemMappings.masterVolumeCC ?? '-'}
                   </span>
                 </div>
               )}
@@ -1210,32 +1270,73 @@ export function AboutDialog({
           </div>
           )}
           {activePanel === 'backup' && (
-          <div className="rounded-lg border p-3 space-y-2">
-            <div className="text-xs uppercase tracking-wide text-gray-500">Mapping Backup</div>
-            {mappingNotice && (
-              <div className={`text-xs ${mappingNotice.type === 'success' ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
-                {mappingNotice.message}
+            <div className="space-y-3">
+              <div className="rounded-lg border p-3 space-y-2">
+                <div className="text-xs uppercase tracking-wide text-gray-500">Mapping Backup</div>
+                {mappingNotice && (
+                  <div className={`text-xs ${mappingNotice.type === 'success' ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                    {mappingNotice.message}
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={handleExportMappings}>
+                    Export Mappings
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={handleImportClick}>
+                    Import Mappings
+                  </Button>
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    accept="application/json"
+                    className="hidden"
+                    onChange={handleImportMappings}
+                  />
+                </div>
               </div>
-            )}
-            <div className="flex flex-wrap items-center gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={handleExportMappings}>
-                Export Mappings
-              </Button>
-              <Button type="button" variant="outline" size="sm" onClick={handleImportClick}>
-                Import Mappings
-              </Button>
-              <input
-                ref={importInputRef}
-                type="file"
-                accept="application/json"
-                className="hidden"
-                onChange={handleImportMappings}
-              />
+
+              <div className="rounded-lg border p-3 space-y-2">
+                <div className="text-xs uppercase tracking-wide text-gray-500">App Backup (Capacitor)</div>
+                <p className="text-xs text-gray-500">
+                  Encrypted account-bound full backup with banks, media, bank arrangement, settings, and mappings.
+                </p>
+                {backupNotice && (
+                  <div className={`text-xs ${backupNotice.type === 'success' ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                    {backupNotice.message}
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={handleExportBackup}>
+                    Export Full Backup
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={handleRestoreBackupClick}>
+                    Restore from Backup
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={handleRecoverClick}>
+                    Recover Missing Media (.bank)
+                  </Button>
+                </div>
+                <input
+                  ref={backupRestoreInputRef}
+                  type="file"
+                  accept=".vdjvbackup,application/octet-stream"
+                  className="hidden"
+                  onChange={handleRestoreBackup}
+                />
+                <input
+                  ref={recoveryImportInputRef}
+                  type="file"
+                  accept=".bank,application/zip,application/octet-stream,*/*"
+                  multiple
+                  className="hidden"
+                  onChange={handleRecoveryImport}
+                />
+              </div>
             </div>
-          </div>
           )}
         </div>
       </DialogContent>
     </Dialog>
   );
 }
+

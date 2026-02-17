@@ -65,6 +65,9 @@ interface HeaderControlsProps {
   onSelectMidiDeviceProfile: (id: string | null) => void;
   onExportMappings: () => Promise<string>;
   onImportMappings: (file: File) => Promise<string>;
+  onExportAppBackup: () => Promise<string>;
+  onRestoreAppBackup: (file: File) => Promise<string>;
+  onRecoverMissingMediaFromBanks: (files: File[]) => Promise<string>;
 }
 
 /** ---------- Slide-down notification system (local to header) ---------- */
@@ -195,7 +198,10 @@ export function HeaderControls({
   midiDeviceProfileId,
   onSelectMidiDeviceProfile,
   onExportMappings,
-  onImportMappings
+  onImportMappings,
+  onExportAppBackup,
+  onRestoreAppBackup,
+  onRecoverMissingMediaFromBanks
 }: HeaderControlsProps) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const { user, profile, loading, signOut } = useAuth();
@@ -568,6 +574,9 @@ export function HeaderControls({
         onSelectMidiDeviceProfile={onSelectMidiDeviceProfile}
         onExportMappings={onExportMappings}
         onImportMappings={onImportMappings}
+        onExportAppBackup={onExportAppBackup}
+        onRestoreAppBackup={onRestoreAppBackup}
+        onRecoverMissingMediaFromBanks={onRecoverMissingMediaFromBanks}
         isAuthenticated={Boolean(user)}
         onSignOut={handleSignOut}
       />

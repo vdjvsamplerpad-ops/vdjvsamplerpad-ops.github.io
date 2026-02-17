@@ -2,7 +2,9 @@ export interface PadData {
   id: string;
   name: string;
   audioUrl: string;
+  audioStorageKey?: string; // Persistent media key for native storage recovery
   imageUrl?: string; // For pad image display
+  imageStorageKey?: string; // Persistent image key for native storage recovery
   imageData?: string; // Base64 encoded image data for persistence
   shortcutKey?: string; // Optional keyboard shortcut
   midiNote?: number; // Optional MIDI note mapping
