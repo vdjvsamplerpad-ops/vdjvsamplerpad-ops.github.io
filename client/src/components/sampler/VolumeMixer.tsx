@@ -269,7 +269,10 @@ export function VolumeMixer({
             variant="ghost"
             size="sm"
             onClick={() => onOpenChange(false)}
-            className={theme === 'dark' ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'}
+            className={theme === 'dark'
+              ? 'h-8 w-8 p-0 border border-red-500/50 bg-red-900/40 text-red-300 hover:bg-red-800/60 hover:text-red-100'
+              : 'h-8 w-8 p-0 border border-red-300 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700'}
+            title="Close Mixer"
           >
             <X className="w-4 h-4" />
           </Button>

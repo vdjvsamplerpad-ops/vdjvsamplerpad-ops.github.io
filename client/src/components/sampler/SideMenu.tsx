@@ -2,12 +2,11 @@ import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { ProgressDialog } from '@/components/ui/progress-dialog';
-import { Plus, Settings, Upload, X, Crown, Minus, RotateCcw, ChevronUp, ChevronDown, Loader2 } from 'lucide-react';
-import { SamplerBank, StopMode, PadData } from './types/sampler';
+import { Plus, Upload, X, Crown, RotateCcw, ChevronUp, ChevronDown, Loader2, Settings } from 'lucide-react';
+import { SamplerBank, PadData } from './types/sampler';
 import { BankEditDialog } from './BankEditDialog';
 import { getCachedUser, useAuth } from '@/hooks/useAuth';
 import { createPortal } from 'react-dom';
@@ -31,10 +30,7 @@ interface SideMenuProps {
   secondaryBankId: string | null;
   currentBankId: string | null;
   isDualMode: boolean;
-  padSize: number;
-  stopMode: StopMode;
   theme: 'light' | 'dark';
-  windowWidth: number;
   editMode: boolean;
   onCreateBank: (name: string, defaultColor: string) => void;
   onSetPrimaryBank: (id: string | null) => void;
@@ -45,9 +41,6 @@ interface SideMenuProps {
   onDeleteBank: (id: string) => void;
   onImportBank: (file: File, onProgress?: (progress: number) => void) => Promise<SamplerBank | null>;
   onExportBank: (id: string, onProgress?: (progress: number) => void) => Promise<string>;
-  onPadSizeChange: (size: number) => void;
-  onResetPadSize: () => void;
-  onStopModeChange: (mode: StopMode) => void;
   onMoveBankUp: (id: string) => void;
   onMoveBankDown: (id: string) => void;
   onTransferPad: (padId: string, sourceBankId: string, targetBankId: string) => void;
@@ -69,10 +62,7 @@ export function SideMenu({
   secondaryBankId,
   currentBankId,
   isDualMode,
-  padSize,
-  stopMode,
   theme,
-  windowWidth,
   editMode,
   onCreateBank,
   onSetPrimaryBank,
@@ -83,9 +73,6 @@ export function SideMenu({
   onDeleteBank,
   onImportBank,
   onExportBank,
-  onPadSizeChange,
-  onResetPadSize,
-  onStopModeChange,
   onMoveBankUp,
   onMoveBankDown,
   onTransferPad,
@@ -182,15 +169,18 @@ export function SideMenu({
   }, [banks, editingBank, onUpdatePad, pushNotice]);
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const prevUserIdRef = React.useRef<string | null>(null);
   const requestLoginModal = React.useCallback(() => {
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new Event('vdjv-login-request'));
   }, []);
-
-  const isMobile = windowWidth < 768;
-  const maxPadSize = isMobile ? 6 : 14;
+  const requestAboutDialog = React.useCallback(() => {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new Event('vdjv-open-about'));
+  }, []);
+  const effectiveUser = user || getCachedUser();
+  const displayName = profile?.display_name?.trim() || effectiveUser?.email?.split('@')[0] || 'Guest';
 
   // Manage loading state - CHANGED
   // We removed the timeout. It will now keep loading indefinitely until at least one bank is detected.
@@ -549,26 +539,6 @@ export function SideMenu({
     }
   };
 
-  const handlePadSizeIncrease = React.useCallback(() => {
-    let newSize = padSize + 1;
-    if (isDualMode && newSize % 2 !== 0 && newSize < maxPadSize) {
-      newSize = newSize + 1;
-    }
-    if (newSize <= maxPadSize) {
-      onPadSizeChange(newSize);
-    }
-  }, [padSize, maxPadSize, onPadSizeChange, isDualMode]);
-
-  const handlePadSizeDecrease = React.useCallback(() => {
-    let newSize = padSize - 1;
-    if (isDualMode && newSize % 2 !== 0 && newSize > 1) {
-      newSize = newSize - 1;
-    }
-    if (newSize >= 1) {
-      onPadSizeChange(newSize);
-    }
-  }, [padSize, onPadSizeChange, isDualMode]);
-
   const handleBankDragOver = (e: React.DragEvent, bankId: string) => {
     if (!editMode) return;
 
@@ -677,6 +647,30 @@ export function SideMenu({
           } ${open ? 'translate-x-0' : '-translate-x-full'}`}
       >
         <div
+          className={`flex items-center gap-3 p-3 border-b ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'
+            }`}
+        >
+          <img src="/assets/logo.png" alt="VDJV Logo" className="w-9 h-9 object-contain shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div className={`text-sm font-semibold truncate ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+              VDJV Sampler Pad
+            </div>
+            <div className={`text-[11px] truncate ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>{displayName}</div>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={requestAboutDialog}
+            className={theme === 'dark'
+              ? 'h-8 w-8 p-0 text-cyan-300 hover:bg-cyan-900/40 hover:text-cyan-200'
+              : 'h-8 w-8 p-0 text-cyan-700 hover:bg-cyan-100 hover:text-cyan-800'}
+            title="About & Settings"
+          >
+            <Settings className="w-4 h-4" />
+          </Button>
+        </div>
+
+        <div
           className={`flex items-center justify-between p-2 border-b ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'
             }`}
         >
@@ -691,11 +685,10 @@ export function SideMenu({
             variant="ghost"
             size="sm"
             onClick={() => onOpenChange(false)}
-            className={
-              theme === 'dark'
-                ? 'text-gray-400 hover:text-white'
-                : 'text-gray-600 hover:text-gray-900'
-            }
+            className={theme === 'dark'
+              ? 'h-8 w-8 p-0 border border-red-500/50 bg-red-900/40 text-red-300 hover:bg-red-800/60 hover:text-red-100'
+              : 'h-8 w-8 p-0 border border-red-300 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700'}
+            title="Close Banks"
           >
             <X className="w-4 h-4" />
           </Button>
@@ -704,78 +697,11 @@ export function SideMenu({
         {renderContent && (
         <div className="p-2 max-h-[calc(100vh-80px)] overflow-y-auto">
           <div className="grid grid-cols-2 gap-2 mb-1">
-            <div className="space-y-2">
-              <Label
-                className={`font-medium ${theme === 'dark' ? 'text-white' : 'text-gray-900'
-                  }`}
-              >
-                Pad Size
-              </Label>
-              <div className="flex items-center gap-1">
-                <Button
-                  onClick={handlePadSizeDecrease}
-                  disabled={padSize <= (isDualMode ? 2 : 1)}
-                  variant="outline"
-                  size="sm"
-                  className={`w-10 h-10 p-0 ${theme === 'dark'
-                    ? 'bg-gray-700 border-gray-600'
-                    : 'bg-white border-gray-300'
-                    }`}
-                >
-                  <Minus className="w-3 h-3" />
-                </Button>
-                <span
-                  className={`flex-1 text-center text-xs ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                    }`}
-                >
-                  {padSize}/{maxPadSize}
-                </span>
-                <Button
-                  onClick={handlePadSizeIncrease}
-                  disabled={padSize >= maxPadSize}
-                  variant="outline"
-                  size="sm"
-                  className={`w-10 h-10 p-0 ${theme === 'dark'
-                    ? 'bg-gray-700 border-gray-600'
-                    : 'bg-white border-gray-300'
-                    }`}
-                >
-                  <Plus className="w-3 h-3" />
-                </Button>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label
-                className={`font-medium ${theme === 'dark' ? 'text-white' : 'text-gray-900'
-                  }`}
-              >
-                Stop Mode
-              </Label>
-              <Select
-                value={stopMode}
-                onValueChange={(value: StopMode) => onStopModeChange(value)}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="instant">Instant Stop</SelectItem>
-                  <SelectItem value="fadeout">Fade Out</SelectItem>
-                  <SelectItem value="brake">Brake</SelectItem>
-                  <SelectItem value="backspin">Backspin</SelectItem>
-                  <SelectItem value="filter">Filter Sweep</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 mb-1">
             <div className="flex mb-2">
               <Button
                 onClick={() => setShowCreateDialog(true)}
                 className={`flex-1 gap-0 transition-all duration-200 ${theme === 'dark'
-                  ? 'bg-blue-500 border-blue-400 text-blue-400 hover:bg-blue-600'
+                  ? 'bg-blue-600 border-blue-500 text-white hover:bg-blue-500'
                   : 'bg-blue-50 border-blue-300 text-blue-600 hover:bg-blue-100'
                   }`}
               >

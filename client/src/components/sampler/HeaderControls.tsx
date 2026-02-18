@@ -1,10 +1,10 @@
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { Upload, Menu, Pencil, Volume2, VolumeX, Square, Sliders, Shield, LogIn } from 'lucide-react';
-import { SamplerBank } from './types/sampler';
+import { SamplerBank, StopMode } from './types/sampler';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { createPortal } from 'react-dom'
-import { useAuth } from '@/hooks/useAuth';
+import { getCachedUser, useAuth } from '@/hooks/useAuth';
 import { LoginModal } from '@/components/auth/LoginModal';
 import { AboutDialog } from '@/components/ui/about-dialog';
 import { SystemAction, SystemMappings } from '@/lib/system-mappings';
@@ -16,6 +16,8 @@ interface HeaderControlsProps {
   secondaryBank: SamplerBank | null;
   currentBank: SamplerBank | null;
   isDualMode: boolean;
+  padSize: number;
+  stopMode: StopMode;
   editMode: boolean;
   globalMuted: boolean;
   sideMenuOpen: boolean;
@@ -30,6 +32,8 @@ interface HeaderControlsProps {
   onToggleMixer: () => void;
   onToggleTheme: () => void;
   onExitDualMode: () => void;
+  onPadSizeChange: (size: number) => void;
+  onStopModeChange: (mode: StopMode) => void;
   midiSupported: boolean;
   midiEnabled: boolean;
   midiAccessGranted: boolean;
@@ -54,6 +58,8 @@ interface HeaderControlsProps {
   midiNoteAssignments: Array<{ note: number; type: 'pad' | 'bank'; bankName: string; padName?: string }>;
   hideShortcutLabels: boolean;
   onToggleHideShortcutLabels: (hide: boolean) => void;
+  autoPadBankMapping: boolean;
+  onToggleAutoPadBankMapping: (enabled: boolean) => void;
   sidePanelMode: 'overlay' | 'reflow';
   onChangeSidePanelMode: (mode: 'overlay' | 'reflow') => void;
   onResetAllSystemMappings: () => void;
@@ -150,6 +156,8 @@ export function HeaderControls({
   secondaryBank,
   currentBank,
   isDualMode,
+  padSize,
+  stopMode,
   editMode,
   globalMuted,
   sideMenuOpen,
@@ -164,6 +172,8 @@ export function HeaderControls({
   onToggleMixer,
   onToggleTheme,
   onExitDualMode,
+  onPadSizeChange,
+  onStopModeChange,
   midiSupported,
   midiEnabled,
   midiAccessGranted,
@@ -188,6 +198,8 @@ export function HeaderControls({
   midiNoteAssignments,
   hideShortcutLabels,
   onToggleHideShortcutLabels,
+  autoPadBankMapping,
+  onToggleAutoPadBankMapping,
   sidePanelMode,
   onChangeSidePanelMode,
   onResetAllSystemMappings,
@@ -210,7 +222,6 @@ export function HeaderControls({
   const [AdminAccessDialog, setAdminAccessDialog] = React.useState<React.ComponentType<any> | null>(null);
   const [showLoginModal, setShowLoginModal] = React.useState(false);
   const [aboutOpen, setAboutOpen] = React.useState(false);
-  const [headerCompact, setHeaderCompact] = React.useState(false);
 
   // Dynamically load AdminAccessDialog only for admin users
   React.useEffect(() => {
@@ -236,34 +247,11 @@ export function HeaderControls({
   }, []);
 
   React.useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const HIDE_THRESHOLD = 40;
-    const SHOW_THRESHOLD = 8;
-    let rafId: number | null = null;
-
-    const applyCompactFromScroll = () => {
-      rafId = null;
-      const scrollY = Math.max(0, window.scrollY || window.pageYOffset || 0);
-      setHeaderCompact((prev) => {
-        if (!prev && scrollY > HIDE_THRESHOLD) return true;
-        if (prev && scrollY < SHOW_THRESHOLD) return false;
-        return prev;
-      });
-    };
-
-    const onScroll = () => {
-      if (rafId !== null) return;
-      rafId = window.requestAnimationFrame(applyCompactFromScroll);
-    };
-
-    applyCompactFromScroll();
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => {
-      window.removeEventListener('scroll', onScroll);
-      if (rafId !== null) window.cancelAnimationFrame(rafId);
-    };
+    const handleOpenAbout = () => setAboutOpen(true);
+    window.addEventListener('vdjv-open-about', handleOpenAbout as EventListener);
+    return () => window.removeEventListener('vdjv-open-about', handleOpenAbout as EventListener);
   }, []);
-  
+
   // Show greeting notification when user logs in
   React.useEffect(() => {
     const currentUserId = user?.id || null;
@@ -314,6 +302,10 @@ export function HeaderControls({
   }, [signOut, pushNotice]);
 
   const isMobileScreen = windowWidth < 1160;
+  const effectiveAuthUser = user || getCachedUser();
+  const isAuthenticated = Boolean(effectiveAuthUser);
+  const maxPadSize = windowWidth < 768 ? 6 : 14;
+  const minPadSize = isDualMode ? 2 : 1;
 
   const getTimeBasedGreeting = () => {
     const hour = new Date().getHours();
@@ -322,14 +314,16 @@ export function HeaderControls({
     return 'Good evening';
   };
 
-  const getTitleText = () => {
-    // Default title for all users
-    return isMobileScreen ? 'VDJV' : 'VDJV Sampler Pad';
-  };
-
-  const displayName = profile?.display_name || user?.email?.split('@')[0] || 'Guest';
+  const displayName = profile?.display_name || effectiveAuthUser?.email?.split('@')[0] || 'Guest';
   const appVersion = (import.meta as any).env?.VITE_APP_VERSION || 'unknown';
-  const showBranding = !headerCompact && !isDualMode;
+  const handlePadSizeFromDialog = React.useCallback((requestedSize: number) => {
+    let nextSize = Math.max(minPadSize, Math.min(maxPadSize, requestedSize));
+    if (isDualMode && nextSize % 2 !== 0) {
+      if (nextSize < maxPadSize) nextSize += 1;
+      else if (nextSize > minPadSize) nextSize -= 1;
+    }
+    onPadSizeChange(nextSize);
+  }, [isDualMode, maxPadSize, minPadSize, onPadSizeChange]);
 
   const getBankDisplayName = () => {
     if (isDualMode) {
@@ -359,54 +353,23 @@ export function HeaderControls({
           theme === 'dark' ? 'bg-gray-900/70' : 'bg-white/70'
         }`}
       >
-        <div
-          className={`grid overflow-hidden will-change-[grid-template-rows,opacity,transform] transition-[grid-template-rows,opacity,transform,margin] duration-300 ease-out ${
-            showBranding ? 'opacity-100 translate-y-0 mb-1' : 'opacity-0 -translate-y-1 mb-0 pointer-events-none'
-          }`}
-          style={{ gridTemplateRows: showBranding ? '1fr' : '0fr' }}
-        >
-          <div className="overflow-hidden">
-            <div className="flex items-center justify-center gap-4">
-              <button
-                type="button"
-                onClick={() => setAboutOpen(true)}
-                className="rounded-full transition-transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-                aria-label="About VDJV Sampler Pad"
-                tabIndex={showBranding ? 0 : -1}
-              >
-                <img
-                  src="./assets/logo.png"
-                  alt="VDJV Logo"
-                  className="w-12 h-12 object-contain"
-                />
-              </button>
-              <h1
-                className={`font-bold text-red-600 transition-opacity duration-200 ${showBranding ? 'opacity-100' : 'opacity-0'} ${isMobileScreen
-                  ? 'text-m'
-                  : isMobileScreen
-                    ? 'text-l'
-                    : windowWidth < 1024
-                      ? 'text-xl'
-                      : 'text-2xl xl:text-3xl'
-                  }`}
-              >
-                {getTitleText()}
-              </h1>
-            </div>
-          </div>
-        </div>
-
         <div className={`mb-1 text-sm ${theme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
           {isDualMode ? (
-            <div className="flex items-center justify-center gap-2">
-              <span className="text-blue-600 font-medium">Primary:</span>
-              <span>{primaryBank?.name || 'None'}</span>
+            <div className="flex items-center justify-center gap-2 min-w-0 px-2 whitespace-nowrap">
+              <span className="text-blue-600 font-medium shrink-0">Primary:</span>
+              <span className="min-w-0 max-w-[26vw] sm:max-w-[32vw] truncate" title={primaryBank?.name || 'None'}>
+                {primaryBank?.name || 'None'}
+              </span>
               <span className="text-gray-400">|</span>
-              <span className="text-purple-600 font-medium">Secondary (SHIFT):</span>
-              <span>{secondaryBank?.name || 'None'}</span>
+              <span className="text-purple-600 font-medium shrink-0">Secondary (SHIFT):</span>
+              <span className="min-w-0 max-w-[26vw] sm:max-w-[32vw] truncate" title={secondaryBank?.name || 'None'}>
+                {secondaryBank?.name || 'None'}
+              </span>
             </div>
           ) : (
-            <span>Bank: {getBankDisplayName()}</span>
+            <span className="inline-block max-w-[90vw] truncate align-middle" title={getBankDisplayName()}>
+              Bank: {getBankDisplayName()}
+            </span>
           )}
         </div>
 
@@ -516,7 +479,7 @@ export function HeaderControls({
           </Button>
 
           {/* Login Button (only shown when not logged in) */}
-          {!loading && !user && (
+          {!loading && !isAuthenticated && (
             <Button
               onClick={() => setShowLoginModal(true)}
               variant="outline"
@@ -587,6 +550,8 @@ export function HeaderControls({
         midiNoteAssignments={midiNoteAssignments}
         hideShortcutLabels={hideShortcutLabels}
         onToggleHideShortcutLabels={onToggleHideShortcutLabels}
+        autoPadBankMapping={autoPadBankMapping}
+        onToggleAutoPadBankMapping={onToggleAutoPadBankMapping}
         sidePanelMode={sidePanelMode}
         onChangeSidePanelMode={onChangeSidePanelMode}
         onResetAllSystemMappings={onResetAllSystemMappings}
@@ -601,7 +566,14 @@ export function HeaderControls({
         onExportAppBackup={onExportAppBackup}
         onRestoreAppBackup={onRestoreAppBackup}
         onRecoverMissingMediaFromBanks={onRecoverMissingMediaFromBanks}
-        isAuthenticated={Boolean(user)}
+        isDualMode={isDualMode}
+        padSize={padSize}
+        stopMode={stopMode}
+        padSizeMin={minPadSize}
+        padSizeMax={maxPadSize}
+        onPadSizeChange={handlePadSizeFromDialog}
+        onStopModeChange={onStopModeChange}
+        isAuthenticated={isAuthenticated}
         onSignOut={handleSignOut}
       />
 

@@ -29,6 +29,7 @@ interface AppSettings {
   editMode: boolean;
   padSize: number;
   hideShortcutLabels: boolean;
+  autoPadBankMapping: boolean;
   midiEnabled: boolean;
   midiDeviceProfileId: string | null;
   systemMappings: SystemMappings;
@@ -137,6 +138,7 @@ const defaultSettings: AppSettings = {
   editMode: false,
   padSize: 5,
   hideShortcutLabels: true,
+  autoPadBankMapping: true,
   midiEnabled: false,
   midiDeviceProfileId: null,
   systemMappings: DEFAULT_SYSTEM_MAPPINGS
@@ -233,6 +235,16 @@ export function SamplerPadApp() {
   const [VolumeMixer, setVolumeMixer] = React.useState<React.ComponentType<any> | null>(null);
   const [editRequest, setEditRequest] = React.useState<{ padId: string; token: number } | null>(null);
   const [editBankRequest, setEditBankRequest] = React.useState<{ bankId: string; token: number } | null>(null);
+  const bankScrollPositionsRef = React.useRef<Map<string, number>>(new Map());
+  const singleScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const primaryScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const secondaryScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const singleFallbackScrollRef = React.useRef(0);
+  const primaryFallbackScrollRef = React.useRef(0);
+  const secondaryFallbackScrollRef = React.useRef(0);
+  const lastSingleScrollBankRef = React.useRef<string | null>(null);
+  const lastPrimaryScrollBankRef = React.useRef<string | null>(null);
+  const lastSecondaryScrollBankRef = React.useRef<string | null>(null);
 
   // Dynamically load VolumeMixer only when mixer is open
   React.useEffect(() => {
@@ -386,6 +398,7 @@ export function SamplerPadApp() {
   }, [isMac]);
 
   const applyDefaultLayoutToBank = React.useCallback((bankId: string | null) => {
+    if (!settings.autoPadBankMapping) return;
     if (!bankId) return;
     const bank = banks.find((entry) => entry.id === bankId);
     if (!bank) return;
@@ -397,7 +410,7 @@ export function SamplerPadApp() {
         updatePad(bank.id, pad.id, { ...pad, shortcutKey: desiredKey });
       }
     });
-  }, [banks, defaultPadShortcutLayout, updatePad]);
+  }, [banks, defaultPadShortcutLayout, settings.autoPadBankMapping, updatePad]);
 
   const orderedBanks = React.useMemo(() => {
     return [...banks].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
@@ -405,6 +418,7 @@ export function SamplerPadApp() {
 
   const lastAppliedLayoutRef = React.useRef<{ primary?: string | null; secondary?: string | null; single?: string | null }>({});
   React.useEffect(() => {
+    if (!settings.autoPadBankMapping) return;
     if (isDualMode) {
       if (primaryBankId && lastAppliedLayoutRef.current.primary !== primaryBankId) {
         applyDefaultLayoutToBank(primaryBankId);
@@ -418,7 +432,7 @@ export function SamplerPadApp() {
       applyDefaultLayoutToBank(currentBankId);
       lastAppliedLayoutRef.current.single = currentBankId;
     }
-  }, [applyDefaultLayoutToBank, currentBankId, isDualMode, primaryBankId, secondaryBankId]);
+  }, [applyDefaultLayoutToBank, currentBankId, isDualMode, primaryBankId, secondaryBankId, settings.autoPadBankMapping]);
 
   const previousPadCountsRef = React.useRef<Map<string, number>>(new Map());
   React.useEffect(() => {
@@ -428,12 +442,12 @@ export function SamplerPadApp() {
       const currentCount = bank.pads.length;
       const previousCount = previousCounts.get(bank.id) ?? 0;
       nextCounts.set(bank.id, currentCount);
-      if (previousCount === 0 && currentCount > 0) {
+      if (settings.autoPadBankMapping && previousCount === 0 && currentCount > 0) {
         applyDefaultLayoutToBank(bank.id);
       }
     });
     previousPadCountsRef.current = nextCounts;
-  }, [banks, applyDefaultLayoutToBank]);
+  }, [banks, applyDefaultLayoutToBank, settings.autoPadBankMapping]);
 
   const updateSystemMapping = React.useCallback((action: SystemAction, updates: Partial<SystemMappings[SystemAction]>) => {
     setSettings(prev => ({
@@ -1424,6 +1438,7 @@ export function SamplerPadApp() {
   const blockedMidiCCs = React.useMemo(() => new Set([...systemMidiCCs, ...channelMidiCCs]), [systemMidiCCs, channelMidiCCs]);
 
   React.useEffect(() => {
+    if (!settings.autoPadBankMapping) return;
     if (orderedBanks.length === 0) return;
     const usedKeys = new Set<string>();
     systemKeys.forEach((key) => usedKeys.add(key));
@@ -1456,7 +1471,54 @@ export function SamplerPadApp() {
       updateBank(bank.id, { shortcutKey: nextKey });
       candidateIndex += 1;
     });
-  }, [orderedBanks, systemKeys, channelKeys, padBankShortcutKeys, defaultBankShortcutLayout, updateBank, normalizeStoredShortcutKey]);
+  }, [orderedBanks, systemKeys, channelKeys, padBankShortcutKeys, defaultBankShortcutLayout, settings.autoPadBankMapping, updateBank, normalizeStoredShortcutKey]);
+
+  const saveBankScroll = React.useCallback((bankId: string | null, scrollTop: number) => {
+    if (!bankId) return;
+    bankScrollPositionsRef.current.set(bankId, Math.max(0, scrollTop));
+  }, []);
+
+  const restoreBankScroll = React.useCallback((container: HTMLDivElement | null, bankId: string | null, fallback: number) => {
+    if (!container || !bankId) return;
+    const remembered = bankScrollPositionsRef.current.get(bankId);
+    container.scrollTop = typeof remembered === 'number' ? remembered : fallback;
+  }, []);
+
+  React.useEffect(() => {
+    const prev = lastSingleScrollBankRef.current;
+    if (prev && singleScrollRef.current) {
+      saveBankScroll(prev, singleScrollRef.current.scrollTop);
+    }
+    if (singleScrollRef.current && currentBankId) {
+      const fallback = singleScrollRef.current.scrollTop || singleFallbackScrollRef.current;
+      requestAnimationFrame(() => restoreBankScroll(singleScrollRef.current, currentBankId, fallback));
+    }
+    lastSingleScrollBankRef.current = currentBankId;
+  }, [currentBankId, restoreBankScroll, saveBankScroll]);
+
+  React.useEffect(() => {
+    const prev = lastPrimaryScrollBankRef.current;
+    if (prev && primaryScrollRef.current) {
+      saveBankScroll(prev, primaryScrollRef.current.scrollTop);
+    }
+    if (primaryScrollRef.current && primaryBankId) {
+      const fallback = primaryScrollRef.current.scrollTop || primaryFallbackScrollRef.current;
+      requestAnimationFrame(() => restoreBankScroll(primaryScrollRef.current, primaryBankId, fallback));
+    }
+    lastPrimaryScrollBankRef.current = primaryBankId;
+  }, [primaryBankId, restoreBankScroll, saveBankScroll]);
+
+  React.useEffect(() => {
+    const prev = lastSecondaryScrollBankRef.current;
+    if (prev && secondaryScrollRef.current) {
+      saveBankScroll(prev, secondaryScrollRef.current.scrollTop);
+    }
+    if (secondaryScrollRef.current && secondaryBankId) {
+      const fallback = secondaryScrollRef.current.scrollTop || secondaryFallbackScrollRef.current;
+      requestAnimationFrame(() => restoreBankScroll(secondaryScrollRef.current, secondaryBankId, fallback));
+    }
+    lastSecondaryScrollBankRef.current = secondaryBankId;
+  }, [secondaryBankId, restoreBankScroll, saveBankScroll]);
 
   const ensureRegisteredAndTrigger = React.useCallback(
     (pad: PadData, bankId: string, bankName: string, trigger: () => void) => {
@@ -2324,10 +2386,7 @@ export function SamplerPadApp() {
         secondaryBankId={secondaryBankId}
         currentBankId={currentBankId}
         isDualMode={isDualMode}
-        padSize={settings.padSize}
-        stopMode={settings.stopMode}
         theme={theme}
-        windowWidth={windowWidth}
         editMode={settings.editMode}
         onCreateBank={createBank}
         onSetPrimaryBank={setPrimaryBank}
@@ -2338,9 +2397,6 @@ export function SamplerPadApp() {
         onDeleteBank={handleDeleteBank}
         onImportBank={importBank}
         onExportBank={exportBank}
-        onPadSizeChange={handlePadSizeChange}
-        onResetPadSize={handleResetPadSize}
-        onStopModeChange={(mode) => updateSetting('stopMode', mode)}
         onMoveBankUp={moveBankUp}
         onMoveBankDown={moveBankDown}
         onTransferPad={handleTransferPad}
@@ -2380,6 +2436,8 @@ export function SamplerPadApp() {
             secondaryBank={displaySecondary}
             currentBank={singleBank}
             isDualMode={isDualMode}
+            padSize={settings.padSize}
+            stopMode={settings.stopMode}
             editMode={settings.editMode}
             globalMuted={globalMuted}
             sideMenuOpen={settings.sideMenuOpen}
@@ -2394,6 +2452,8 @@ export function SamplerPadApp() {
             onToggleMixer={() => handleMixerToggle(!settings.mixerOpen)}
             onToggleTheme={toggleTheme}
             onExitDualMode={() => setPrimaryBank(null)}
+            onPadSizeChange={handlePadSizeChange}
+            onStopModeChange={(mode) => updateSetting('stopMode', mode)}
             midiSupported={midi.supported}
             midiEnabled={midi.enabled}
             midiAccessGranted={midi.enabled && midi.accessGranted}
@@ -2418,6 +2478,8 @@ export function SamplerPadApp() {
             midiNoteAssignments={midiNoteAssignments}
             hideShortcutLabels={settings.hideShortcutLabels}
             onToggleHideShortcutLabels={handleToggleHideShortcutLabels}
+            autoPadBankMapping={settings.autoPadBankMapping}
+            onToggleAutoPadBankMapping={(enabled) => updateSetting('autoPadBankMapping', enabled)}
             sidePanelMode={settings.sidePanelMode}
             onChangeSidePanelMode={(mode) => updateSetting('sidePanelMode', mode)}
             onResetAllSystemMappings={handleResetAllSystemMappings}
@@ -2438,7 +2500,16 @@ export function SamplerPadApp() {
             <div className="flex gap-2 flex-1 min-h-0">
               {/* Primary Bank */}
               <div className="flex-1 min-h-0">
-                <div className="h-full overflow-y-auto overscroll-contain pr-1">
+                <div
+                  ref={primaryScrollRef}
+                  onScroll={() => {
+                    const container = primaryScrollRef.current;
+                    if (!container || !primaryBankId) return;
+                    primaryFallbackScrollRef.current = container.scrollTop;
+                    saveBankScroll(primaryBankId, container.scrollTop);
+                  }}
+                  className="h-full overflow-y-auto overscroll-contain pr-1"
+                >
                   <PadGrid
                     pads={displayPrimary?.pads || []}
                     bankId={primaryBankId || ''}
@@ -2474,7 +2545,16 @@ export function SamplerPadApp() {
               {/* Secondary Bank */}
               <div className="flex-1 min-h-0">
                 {displaySecondary ? (
-                  <div className="h-full overflow-y-auto overscroll-contain pl-1">
+                  <div
+                    ref={secondaryScrollRef}
+                    onScroll={() => {
+                      const container = secondaryScrollRef.current;
+                      if (!container || !secondaryBankId) return;
+                      secondaryFallbackScrollRef.current = container.scrollTop;
+                      saveBankScroll(secondaryBankId, container.scrollTop);
+                    }}
+                    className="h-full overflow-y-auto overscroll-contain pl-1"
+                  >
                     <PadGrid
                       pads={displaySecondary.pads || []}
                       bankId={secondaryBankId || ''}
@@ -2520,35 +2600,46 @@ export function SamplerPadApp() {
           ) : (
             // Single bank mode
             singleBank ? (
-              <PadGrid
-                pads={singleBank.pads || []}
-                bankId={currentBankId || ''}
-                bankName={singleBank.name || ''}
-                allBanks={banks}
-                allPads={allPads}
-                editMode={settings.editMode}
-                globalMuted={globalMuted}
-                masterVolume={settings.masterVolume}
-                padSize={getGridColumns}
-                theme={theme}
-                stopMode={settings.stopMode}
-                eqSettings={settings.eqSettings}
-                windowWidth={windowWidth}
-                onUpdatePad={handleUpdatePad}
-                onRemovePad={(id) => handleRemovePad(currentBankId || '', id)}
-                onReorderPads={(fromIndex, toIndex) => reorderPads(currentBankId || '', fromIndex, toIndex)}
-                onFileUpload={handleFileUpload}
-                onPadDragStart={handlePadDragStart}
-                onTransferPad={handleTransferPad}
-                availableBanks={availableBanks}
-                canTransferFromBank={canTransferFromBank}
-                midiEnabled={midi.enabled && midi.accessGranted}
-                hideShortcutLabel={settings.hideShortcutLabels}
-                editRequest={editRequest}
-                blockedShortcutKeys={blockedShortcutKeys}
-                blockedMidiNotes={blockedMidiNotes}
-                blockedMidiCCs={blockedMidiCCs}
-              />
+              <div
+                ref={singleScrollRef}
+                onScroll={() => {
+                  const container = singleScrollRef.current;
+                  if (!container || !currentBankId) return;
+                  singleFallbackScrollRef.current = container.scrollTop;
+                  saveBankScroll(currentBankId, container.scrollTop);
+                }}
+                className="flex-1 min-h-0 overflow-y-auto overscroll-contain"
+              >
+                <PadGrid
+                  pads={singleBank.pads || []}
+                  bankId={currentBankId || ''}
+                  bankName={singleBank.name || ''}
+                  allBanks={banks}
+                  allPads={allPads}
+                  editMode={settings.editMode}
+                  globalMuted={globalMuted}
+                  masterVolume={settings.masterVolume}
+                  padSize={getGridColumns}
+                  theme={theme}
+                  stopMode={settings.stopMode}
+                  eqSettings={settings.eqSettings}
+                  windowWidth={windowWidth}
+                  onUpdatePad={handleUpdatePad}
+                  onRemovePad={(id) => handleRemovePad(currentBankId || '', id)}
+                  onReorderPads={(fromIndex, toIndex) => reorderPads(currentBankId || '', fromIndex, toIndex)}
+                  onFileUpload={handleFileUpload}
+                  onPadDragStart={handlePadDragStart}
+                  onTransferPad={handleTransferPad}
+                  availableBanks={availableBanks}
+                  canTransferFromBank={canTransferFromBank}
+                  midiEnabled={midi.enabled && midi.accessGranted}
+                  hideShortcutLabel={settings.hideShortcutLabels}
+                  editRequest={editRequest}
+                  blockedShortcutKeys={blockedShortcutKeys}
+                  blockedMidiNotes={blockedMidiNotes}
+                  blockedMidiCCs={blockedMidiCCs}
+                />
+              </div>
             ) : (
               <div className={`flex items-center justify-center h-64 rounded-2xl border-2 border-dashed transition-all duration-300 ${theme === 'dark'
                 ? 'bg-gray-800 border-gray-600'
