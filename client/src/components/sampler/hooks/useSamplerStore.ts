@@ -41,16 +41,26 @@ const EXPORT_FOLDER_NAME = 'VDJV-Export';
 const ANDROID_DOWNLOAD_ROOT = '/storage/emulated/0/Download';
 const NATIVE_MEDIA_ROOT = `${EXPORT_FOLDER_NAME}/_media`;
 const EXPORT_LOGS_FOLDER = `${EXPORT_FOLDER_NAME}/logs`;
+// Keep bridge payloads small to avoid Android WebView/Capacitor OOM while JSON-encoding plugin calls.
+const CAPACITOR_EXPORT_SINGLE_WRITE_BYTES = 512 * 1024;
+const CAPACITOR_EXPORT_CHUNK_BYTES = 256 * 1024;
 const BACKUP_VERSION = 2;
 const BACKUP_EXT = '.vdjvbackup';
+const BACKUP_PART_EXT = '.vdjvpart';
+const BACKUP_MANIFEST_SCHEMA = 'vdjv-backup-manifest-v1';
+const BACKUP_MANIFEST_VERSION = 1;
 const MIN_FREE_STORAGE_BYTES = 200 * 1024 * 1024;
 const MAX_UNKNOWN_STORAGE_OPERATION_BYTES = 450 * 1024 * 1024;
 const MAX_UNKNOWN_STORAGE_IMPORT_BYTES = 3 * 1024 * 1024 * 1024;
-const MAX_NATIVE_BANK_EXPORT_BYTES = 350 * 1024 * 1024;
+const MAX_NATIVE_BANK_EXPORT_BYTES = 700 * 1024 * 1024;
 const MAX_NATIVE_APP_BACKUP_BYTES = 1700 * 1024 * 1024;
+const BACKUP_PART_SIZE_MOBILE_BYTES = 64 * 1024 * 1024;
+const BACKUP_PART_SIZE_DESKTOP_BYTES = 256 * 1024 * 1024;
+const MAX_BACKUP_PART_COUNT = 200;
 const MAX_NATIVE_STARTUP_RESTORE_PADS = 320;
 const MAX_CAPACITOR_NATIVE_AUDIO_WRITE_BYTES = 8 * 1024 * 1024;
 const MAX_CAPACITOR_NATIVE_IMAGE_WRITE_BYTES = 4 * 1024 * 1024;
+const MAX_CAPACITOR_BRIDGE_READ_BYTES = 6 * 1024 * 1024;
 const NATIVE_IMPORT_CONCURRENCY = 1;
 const WEB_IMPORT_CONCURRENCY = 4;
 const IMPORT_BATCH_FLUSH_COUNT = 12;
@@ -63,6 +73,25 @@ const BACKUP_FILE_ACCESS_DENIED_MESSAGE =
 type MediaBackend = 'native' | 'idb';
 type OperationName = 'bank_export' | 'admin_bank_export' | 'app_backup_export' | 'app_backup_restore';
 const nativeWriteFallbackLogged = new Set<'audio' | 'image'>();
+
+interface BackupPartManifestEntry {
+  index: number;
+  fileName: string;
+  size: number;
+  offset: number;
+}
+
+interface BackupArchiveManifest {
+  schema: string;
+  manifestVersion: number;
+  backupVersion: number;
+  backupId: string;
+  exportedAt: string;
+  userId: string;
+  encryptedSize: number;
+  partSize: number;
+  parts: BackupPartManifestEntry[];
+}
 
 const fnv1aHash = (input: string): string => {
   let hash = 0x811c9dc5;
@@ -121,6 +150,202 @@ const getRuntimePlatformLabel = (): string => {
   if (isNativeCapacitorPlatform()) return isNativeAndroid() ? 'capacitor-android' : 'capacitor-ios';
   if (window.navigator.userAgent.includes('Electron')) return 'electron';
   return 'web';
+};
+
+const isMobileBrowserRuntime = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+};
+
+const getBackupPartSizeBytes = (): number => {
+  if (isNativeCapacitorPlatform()) {
+    return BACKUP_PART_SIZE_MOBILE_BYTES;
+  }
+  // Mobile web has poor multi-file selection/download UX; prefer single backup file there.
+  if (isMobileBrowserRuntime()) {
+    return 1024 * 1024 * 1024;
+  }
+  return BACKUP_PART_SIZE_DESKTOP_BYTES;
+};
+
+const buildBackupBaseName = (backupId: string): string => `vdjv-full-backup-${backupId}`;
+
+const buildBackupManifestName = (backupId: string): string => `${buildBackupBaseName(backupId)}${BACKUP_EXT}`;
+
+const splitBlobIntoParts = (
+  blob: Blob,
+  partSize: number,
+  backupId: string
+): Array<{ fileName: string; blob: Blob; index: number; offset: number }> => {
+  const safePartSize = Math.max(1, partSize);
+  const totalParts = Math.max(1, Math.ceil(blob.size / safePartSize));
+  if (totalParts > MAX_BACKUP_PART_COUNT) {
+    throw new Error(
+      `Backup requires ${totalParts} parts, exceeding supported limit (${MAX_BACKUP_PART_COUNT}). Reduce library size and try again.`
+    );
+  }
+  const padWidth = Math.max(3, String(totalParts).length);
+  const parts: Array<{ fileName: string; blob: Blob; index: number; offset: number }> = [];
+
+  for (let index = 0; index < totalParts; index += 1) {
+    const offset = index * safePartSize;
+    const partBlob = blob.slice(offset, Math.min(blob.size, offset + safePartSize));
+    const fileName = `${buildBackupBaseName(backupId)}.part-${String(index + 1).padStart(padWidth, '0')}${BACKUP_PART_EXT}`;
+    parts.push({ fileName, blob: partBlob, index, offset });
+  }
+
+  return parts;
+};
+
+const isBackupManifestLike = (value: unknown): value is BackupArchiveManifest => {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<BackupArchiveManifest>;
+  if (candidate.schema !== BACKUP_MANIFEST_SCHEMA) return false;
+  if (!Array.isArray(candidate.parts)) return false;
+  if (typeof candidate.userId !== 'string' || !candidate.userId.trim()) return false;
+  return candidate.parts.every(
+    (part) =>
+      part &&
+      typeof part.index === 'number' &&
+      Number.isFinite(part.index) &&
+      typeof part.fileName === 'string' &&
+      part.fileName.trim().length > 0 &&
+      typeof part.size === 'number' &&
+      part.size >= 0
+  );
+};
+
+const tryParseBackupManifestFile = async (file: File): Promise<BackupArchiveManifest | null> => {
+  if (file.size > 8 * 1024 * 1024) return null;
+
+  try {
+    const preview = await file.slice(0, 128).text();
+    if (!preview.trimStart().startsWith('{')) return null;
+  } catch {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(await file.text()) as unknown;
+    if (!isBackupManifestLike(payload)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+};
+
+const readNativeExportBackupFileByName = async (fileName: string): Promise<File | null> => {
+  if (!isNativeCapacitorPlatform()) return null;
+
+  try {
+    const { Filesystem, Directory } = await import('@capacitor/filesystem');
+
+    const readAsFile = async (
+      read: () => Promise<{ data: string | Blob }>,
+      label: string
+    ): Promise<File | null> => {
+      try {
+        const result = await read();
+        if (result.data instanceof Blob) {
+          return new File([result.data], fileName, { type: 'application/octet-stream' });
+        }
+        const base64 = normalizeBase64Data(String(result.data || ''));
+        if (!base64) return null;
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return new File([bytes], fileName, { type: 'application/octet-stream' });
+      } catch (error) {
+        if ((label === 'android-download' || label === 'documents') && error) {
+          return null;
+        }
+        return null;
+      }
+    };
+
+    if (isNativeAndroid()) {
+      const androidAbsolutePath = `${ANDROID_DOWNLOAD_ROOT}/${EXPORT_FOLDER_NAME}/${fileName}`;
+      const fromDownload = await readAsFile(
+        () => Filesystem.readFile({ path: androidAbsolutePath }),
+        'android-download'
+      );
+      if (fromDownload) return fromDownload;
+    }
+
+    const fromDocuments = await readAsFile(
+      () => Filesystem.readFile({ path: `${EXPORT_FOLDER_NAME}/${fileName}`, directory: Directory.Documents }),
+      'documents'
+    );
+    if (fromDocuments) return fromDocuments;
+  } catch {
+    return null;
+  }
+
+  return null;
+};
+
+const resolveManifestBackupBlob = async (
+  manifest: BackupArchiveManifest,
+  manifestFile: File,
+  companionFiles: File[],
+  diagnostics?: OperationDiagnostics
+): Promise<{ encryptedBlob: Blob; resolvedParts: number; missingParts: string[] }> => {
+  const fileByLowerName = new Map<string, File>();
+  const allSelected = [manifestFile, ...companionFiles];
+  allSelected.forEach((selectedFile) => {
+    fileByLowerName.set(selectedFile.name.toLowerCase(), selectedFile);
+  });
+
+  const missing: string[] = [];
+  const resolvedParts: Array<{ entry: BackupPartManifestEntry; file: File }> = [];
+
+  const sortedParts = [...manifest.parts].sort((a, b) => a.index - b.index);
+  for (const entry of sortedParts) {
+    let partFile = fileByLowerName.get(entry.fileName.toLowerCase()) || null;
+    if (!partFile) {
+      partFile = await readNativeExportBackupFileByName(entry.fileName);
+      if (partFile) {
+        fileByLowerName.set(entry.fileName.toLowerCase(), partFile);
+      }
+    }
+
+    if (!partFile) {
+      missing.push(entry.fileName);
+      continue;
+    }
+
+    if (typeof entry.size === 'number' && entry.size >= 0 && partFile.size !== entry.size) {
+      throw new Error(
+        `Backup part "${entry.fileName}" size mismatch. Expected ${entry.size} bytes, got ${partFile.size} bytes.`
+      );
+    }
+
+    resolvedParts.push({ entry, file: partFile });
+  }
+
+  if (missing.length > 0) {
+    return { encryptedBlob: new Blob(), resolvedParts: resolvedParts.length, missingParts: missing };
+  }
+
+  if (diagnostics) {
+    addOperationStage(diagnostics, 'resolve-backup-parts', {
+      manifest: manifestFile.name,
+      expectedParts: sortedParts.length,
+      resolvedParts: resolvedParts.length,
+    });
+  }
+
+  const orderedFiles = resolvedParts
+    .sort((a, b) => a.entry.index - b.entry.index)
+    .map((part) => part.file);
+
+  return {
+    encryptedBlob: new Blob(orderedFiles, { type: 'application/octet-stream' }),
+    resolvedParts: orderedFiles.length,
+    missingParts: [],
+  };
 };
 
 const createOperationDiagnostics = (operation: OperationName, userId?: string | null): OperationDiagnostics => ({
@@ -200,26 +425,60 @@ const saveExportFile = async (
 
     try {
       const { Filesystem, Directory } = await import('@capacitor/filesystem');
-      const base64Data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const result = String(reader.result || '');
-          const base64 = result.includes(',') ? result.split(',')[1] : result;
-          resolve(base64);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
+      const writeBlobInChunks = async (
+        path: string,
+        directory?: typeof Directory[keyof typeof Directory]
+      ): Promise<void> => {
+        const writeOptions = directory ? { path, directory, recursive: true } : { path, recursive: true };
+        if (blob.size <= CAPACITOR_EXPORT_SINGLE_WRITE_BYTES) {
+          const base64Data = await blobToBase64(blob);
+          await Filesystem.writeFile({
+            ...writeOptions,
+            data: base64Data
+          });
+          return;
+        }
+
+        let offset = 0;
+        let isFirstChunk = true;
+        while (offset < blob.size) {
+          const nextOffset = Math.min(blob.size, offset + CAPACITOR_EXPORT_CHUNK_BYTES);
+          const chunk = blob.slice(offset, nextOffset);
+          const base64Data = await blobToBase64(chunk);
+
+          if (isFirstChunk) {
+            await Filesystem.writeFile({
+              ...writeOptions,
+              data: base64Data
+            });
+            isFirstChunk = false;
+          } else {
+            if (directory) {
+              await Filesystem.appendFile({
+                path,
+                directory,
+                data: base64Data
+              });
+            } else {
+              await Filesystem.appendFile({
+                path,
+                data: base64Data
+              });
+            }
+          }
+
+          offset = nextOffset;
+          if (offset < blob.size) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          }
+        }
+      };
 
       if (isNativeAndroid()) {
         const downloadRelativePath = `Download/${normalizedFolder}/${fileName}`;
         const downloadAbsolutePath = `${ANDROID_DOWNLOAD_ROOT}/${normalizedFolder}/${fileName}`;
         try {
-          await Filesystem.writeFile({
-            path: downloadAbsolutePath,
-            data: base64Data,
-            recursive: true
-          });
+          await writeBlobInChunks(downloadAbsolutePath);
           return {
             success: true,
             message: `Successfully saved to ${downloadRelativePath}`,
@@ -230,12 +489,7 @@ const saveExportFile = async (
         }
       }
 
-      await Filesystem.writeFile({
-        path: `${normalizedFolder}/${fileName}`,
-        data: base64Data,
-        directory: Directory.Documents,
-        recursive: true
-      });
+      await writeBlobInChunks(`${normalizedFolder}/${fileName}`, Directory.Documents);
       return {
         success: true,
         message: `Successfully saved to Documents/${normalizedFolder}/${fileName}`,
@@ -254,10 +508,26 @@ const saveExportFile = async (
     const a = document.createElement('a');
     a.href = url;
     a.download = fileName;
+    a.rel = 'noopener';
+    a.style.display = 'none';
+    if (isMobileBrowserRuntime()) {
+      a.target = '_blank';
+    }
     document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    try {
+      a.click();
+    } catch (clickError) {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+    const cleanupDelayMs = isMobileBrowserRuntime() ? 120000 : 15000;
+    window.setTimeout(() => {
+      try {
+        URL.revokeObjectURL(url);
+        if (a.parentNode) a.parentNode.removeChild(a);
+      } catch {
+        // ignore cleanup errors
+      }
+    }, cleanupDelayMs);
     return {
       success: true,
       message: `Successfully downloaded ${fileName}`,
@@ -321,8 +591,8 @@ interface SamplerStore {
     settings: Record<string, unknown>;
     mappings: Record<string, unknown>;
     state: { primaryBankId: string | null; secondaryBankId: string | null; currentBankId: string | null };
-  }) => Promise<string>;
-  restoreAppBackup: (file: File) => Promise<{
+  }, options?: { riskMode?: boolean }) => Promise<string>;
+  restoreAppBackup: (file: File, companionFiles?: File[]) => Promise<{
     message: string;
     settings: Record<string, unknown> | null;
     mappings: Record<string, unknown> | null;
@@ -649,6 +919,27 @@ const writeNativeMediaBlob = async (padId: string, blob: Blob, type: 'audio' | '
 const readNativeMediaBlob = async (storageKey: string, type: 'audio' | 'image'): Promise<Blob | null> => {
   if (!isNativeCapacitorPlatform()) return null;
   try {
+    const uri = await getNativeMediaPlaybackUrl(storageKey);
+    if (uri) {
+      try {
+        const response = await fetch(uri, { cache: 'no-store' });
+        if (response.ok) {
+          const blob = await response.blob();
+          if (blob.size > 0) {
+            if (blob.type) return blob;
+            return new Blob([blob], { type: mimeFromExt(parseStorageKeyExt(storageKey), type) });
+          }
+        }
+      } catch {
+        // Fall through to readFile fallback.
+      }
+    }
+
+    const nativeSize = await readNativeMediaSize(storageKey);
+    if (nativeSize > MAX_CAPACITOR_BRIDGE_READ_BYTES) {
+      return null;
+    }
+
     const { Filesystem, Directory } = await import('@capacitor/filesystem');
     const result = await Filesystem.readFile({
       path: `${NATIVE_MEDIA_ROOT}/${storageKey}`,
@@ -2950,7 +3241,7 @@ export function useSamplerStore(): SamplerStore {
     settings: Record<string, unknown>;
     mappings: Record<string, unknown>;
     state: { primaryBankId: string | null; secondaryBankId: string | null; currentBankId: string | null };
-  }) => {
+  }, options?: { riskMode?: boolean }) => {
     const effectiveUser = user || getCachedUser();
     if (!effectiveUser?.id) {
       throw new Error('Please sign in before creating a backup.');
@@ -2958,6 +3249,7 @@ export function useSamplerStore(): SamplerStore {
 
     const diagnostics = createOperationDiagnostics('app_backup_export', effectiveUser.id);
     addOperationStage(diagnostics, 'start', { bankCount: banks.length });
+    const riskMode = options?.riskMode === true;
 
     try {
       await ensureExportPermission();
@@ -2975,7 +3267,13 @@ export function useSamplerStore(): SamplerStore {
         );
       }
 
-      await ensureStorageHeadroom(Math.ceil(Math.max(estimatedBytes, 1) * 0.45), 'backup export');
+      const requiredBytes = Math.ceil(Math.max(estimatedBytes, 1) * 0.45);
+      addOperationStage(diagnostics, 'preflight', { estimatedBytes, requiredBytes, riskMode });
+      if (!riskMode) {
+        await ensureStorageHeadroom(requiredBytes, 'backup export');
+      } else {
+        addOperationStage(diagnostics, 'preflight-skipped', { reason: 'risk-mode-enabled' });
+      }
 
       const zip = new JSZip();
       const backupBanks: any[] = [];
@@ -3002,7 +3300,7 @@ export function useSamplerStore(): SamplerStore {
             imageBackend: pad.imageBackend || (pad.imageStorageKey ? 'native' : 'idb'),
           };
 
-          const audioBlob = pad.audioUrl ? await loadPadMediaBlob(pad, 'audio') : null;
+          const audioBlob = await loadPadMediaBlob(pad, 'audio');
           if (audioBlob) {
             const audioPath = `media/audio/${bank.id}/${pad.id}.audio`;
             zip.file(audioPath, audioBlob);
@@ -3060,15 +3358,69 @@ export function useSamplerStore(): SamplerStore {
       const backupPassword = await derivePassword(`backup-${effectiveUser.id}`);
       const encrypted = await encryptZip(zip, backupPassword);
 
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const fileName = `vdjv-full-backup-${timestamp}${BACKUP_EXT}`;
-      const saveResult = await saveExportFile(encrypted, fileName);
-      if (!saveResult.success) {
-        throw new Error(saveResult.message || 'Failed to save backup file.');
+      const backupId = new Date().toISOString().replace(/[:.]/g, '-');
+      const splitParts = splitBlobIntoParts(encrypted, getBackupPartSizeBytes(), backupId);
+      addOperationStage(diagnostics, 'split', {
+        encryptedBytes: encrypted.size,
+        partCount: splitParts.length,
+        partSizeBytes: getBackupPartSizeBytes(),
+      });
+
+      if (splitParts.length <= 1) {
+        const legacyFileName = buildBackupManifestName(backupId);
+        const saveResult = await saveExportFile(encrypted, legacyFileName);
+        if (!saveResult.success) {
+          throw new Error(saveResult.message || 'Failed to save backup file.');
+        }
+        addOperationStage(diagnostics, 'saved', { path: saveResult.savedPath || legacyFileName, mode: 'legacy-single-file' });
+        return saveResult.message || 'Backup exported successfully.';
       }
 
-      addOperationStage(diagnostics, 'saved', { path: saveResult.savedPath || fileName });
-      return saveResult.message || 'Backup exported successfully.';
+      for (const part of splitParts) {
+        const partResult = await saveExportFile(part.blob, part.fileName);
+        if (!partResult.success) {
+          throw new Error(partResult.message || `Failed to save backup part ${part.fileName}.`);
+        }
+        addOperationStage(diagnostics, 'save-part', {
+          fileName: part.fileName,
+          size: part.blob.size,
+          path: partResult.savedPath || part.fileName,
+        });
+        await yieldToMainThread();
+      }
+
+      const manifest: BackupArchiveManifest = {
+        schema: BACKUP_MANIFEST_SCHEMA,
+        manifestVersion: BACKUP_MANIFEST_VERSION,
+        backupVersion: BACKUP_VERSION,
+        backupId,
+        exportedAt: new Date().toISOString(),
+        userId: effectiveUser.id,
+        encryptedSize: encrypted.size,
+        partSize: getBackupPartSizeBytes(),
+        parts: splitParts.map((part) => ({
+          index: part.index,
+          fileName: part.fileName,
+          size: part.blob.size,
+          offset: part.offset,
+        })),
+      };
+
+      const manifestName = buildBackupManifestName(backupId);
+      const manifestResult = await saveExportFile(
+        new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/octet-stream' }),
+        manifestName
+      );
+      if (!manifestResult.success) {
+        throw new Error(manifestResult.message || 'Failed to save backup manifest file.');
+      }
+
+      addOperationStage(diagnostics, 'saved', {
+        path: manifestResult.savedPath || manifestName,
+        mode: 'manifest+parts',
+        partCount: splitParts.length,
+      });
+      return `Backup exported in ${splitParts.length} parts. Restore using "${manifestName}" with all "${BACKUP_PART_EXT}" files.`;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       const logPath = await writeOperationDiagnosticsLog(diagnostics, error);
@@ -3076,21 +3428,51 @@ export function useSamplerStore(): SamplerStore {
     }
   }, [banks, user]);
 
-  const restoreAppBackup = React.useCallback(async (file: File) => {
+  const restoreAppBackup = React.useCallback(async (file: File, companionFiles: File[] = []) => {
     const effectiveUser = user || getCachedUser();
     if (!effectiveUser?.id) {
       throw new Error('Please sign in before restoring a backup.');
     }
 
     const diagnostics = createOperationDiagnostics('app_backup_restore', effectiveUser.id);
-    addOperationStage(diagnostics, 'start', { inputBytes: file.size, bankCount: banks.length });
+    addOperationStage(diagnostics, 'start', {
+      inputBytes: file.size,
+      bankCount: banks.length,
+      companionFiles: companionFiles.length,
+    });
 
     try {
       await ensureExportPermission();
-      await ensureStorageHeadroom(Math.ceil(file.size * 1.2), 'backup restore');
+
+      let encryptedInputBlob: Blob = file;
+      let resolvedManifest: BackupArchiveManifest | null = null;
+      const parsedManifest = await tryParseBackupManifestFile(file);
+      if (parsedManifest) {
+        if (parsedManifest.userId !== effectiveUser.id) {
+          throw new Error('This backup manifest belongs to a different account.');
+        }
+        const resolved = await resolveManifestBackupBlob(parsedManifest, file, companionFiles, diagnostics);
+        if (resolved.missingParts.length > 0) {
+          const preview = resolved.missingParts.slice(0, 6).join(', ');
+          const moreCount = Math.max(0, resolved.missingParts.length - 6);
+          const moreSuffix = moreCount > 0 ? ` and ${moreCount} more` : '';
+          throw new Error(
+            `Missing backup part files: ${preview}${moreSuffix}. Select "${file.name}" together with all "${BACKUP_PART_EXT}" files.`
+          );
+        }
+        encryptedInputBlob = resolved.encryptedBlob;
+        resolvedManifest = parsedManifest;
+        addOperationStage(diagnostics, 'manifest-resolved', {
+          manifest: file.name,
+          resolvedParts: resolved.resolvedParts,
+          encryptedBytes: encryptedInputBlob.size,
+        });
+      }
+
+      await ensureStorageHeadroom(Math.ceil(encryptedInputBlob.size * 1.2), 'backup restore');
 
       try {
-        await file.slice(0, 64).arrayBuffer();
+        await encryptedInputBlob.slice(0, 64).arrayBuffer();
       } catch (error) {
         if (isFileAccessDeniedError(error)) {
           throw new Error(BACKUP_FILE_ACCESS_DENIED_MESSAGE);
@@ -3099,7 +3481,7 @@ export function useSamplerStore(): SamplerStore {
       }
 
       const backupPassword = await derivePassword(`backup-${effectiveUser.id}`);
-      const decryptedZipBlob = await decryptZip(file, backupPassword);
+      const decryptedZipBlob = await decryptZip(encryptedInputBlob, backupPassword);
       const zip = await new JSZip().loadAsync(await decryptedZipBlob.arrayBuffer());
       const backupJsonFile = zip.file('backup.json');
       if (!backupJsonFile) {
@@ -3211,7 +3593,9 @@ export function useSamplerStore(): SamplerStore {
 
       addOperationStage(diagnostics, 'complete', { restoredBanks: restoredBanks.length });
       return {
-        message: `Backup restored: ${restoredBanks.length} bank(s).`,
+        message: resolvedManifest
+          ? `Backup restored: ${restoredBanks.length} bank(s) from ${resolvedManifest.parts.length} part file(s).`
+          : `Backup restored: ${restoredBanks.length} bank(s).`,
         settings: (backupPayload.settings || null) as Record<string, unknown> | null,
         mappings: (backupPayload.mappings || null) as Record<string, unknown> | null,
         state: (backupPayload.state || null) as { primaryBankId: string | null; secondaryBankId: string | null; currentBankId: string | null } | null,
@@ -3674,6 +4058,3 @@ export function useSamplerStore(): SamplerStore {
     exportAppBackup, restoreAppBackup, recoverMissingMediaFromBanks,
   };
 }
-
-
-

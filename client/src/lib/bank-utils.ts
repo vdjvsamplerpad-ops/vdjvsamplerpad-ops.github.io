@@ -196,23 +196,28 @@ async function xorTransformBlob(
   mimeType: string
 ): Promise<Blob | null> {
   try {
-    if (typeof sourceBlob.stream !== 'function') return null;
-
-    const reader = sourceBlob.stream().getReader();
+    const chunkBytes = 1024 * 1024;
+    const yieldEveryChunks = 8;
     const chunks: Uint8Array[] = [];
     let globalOffset = 0;
+    let processedChunks = 0;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value || value.length === 0) continue;
+    while (globalOffset < sourceBlob.size) {
+      const nextOffset = Math.min(sourceBlob.size, globalOffset + chunkBytes);
+      const input = new Uint8Array(await sourceBlob.slice(globalOffset, nextOffset).arrayBuffer());
+      if (input.length === 0) break;
 
-      const out = new Uint8Array(value.length);
-      for (let i = 0; i < value.length; i++) {
-        out[i] = value[i] ^ passwordBytes[(globalOffset + i) % passwordBytes.length];
+      const out = new Uint8Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        out[i] = input[i] ^ passwordBytes[(globalOffset + i) % passwordBytes.length];
       }
-      globalOffset += value.length;
+      globalOffset = nextOffset;
       chunks.push(out);
+      processedChunks += 1;
+
+      if (processedChunks % yieldEveryChunks === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
     }
 
     return new Blob(chunks, { type: mimeType });

@@ -65,8 +65,8 @@ interface HeaderControlsProps {
   onSelectMidiDeviceProfile: (id: string | null) => void;
   onExportMappings: () => Promise<string>;
   onImportMappings: (file: File) => Promise<string>;
-  onExportAppBackup: () => Promise<string>;
-  onRestoreAppBackup: (file: File) => Promise<string>;
+  onExportAppBackup: (options?: { riskMode?: boolean }) => Promise<string>;
+  onRestoreAppBackup: (file: File, companionFiles?: File[]) => Promise<string>;
   onRecoverMissingMediaFromBanks: (files: File[]) => Promise<string>;
 }
 
@@ -561,6 +561,8 @@ export function HeaderControls({
         onOpenChange={setAboutOpen}
         displayName={displayName}
         version={appVersion}
+        theme={theme}
+        onToggleTheme={onToggleTheme}
         midiSupported={midiSupported}
         midiEnabled={midiEnabled}
         midiAccessGranted={midiAccessGranted}

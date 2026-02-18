@@ -1,9 +1,11 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { execSync } from 'node:child_process';
+import fs from 'node:fs';
 
 export const vitePort = 3000;
+const devCertDir = path.resolve(process.cwd(), '.cert');
 
 const fallbackVersion = () => {
   const now = new Date();
@@ -25,11 +27,71 @@ const getCommitBasedVersion = () => {
   return process.env.VITE_APP_VERSION || fallbackVersion();
 };
 
+const resolveDevHttps = (env) => {
+  const wantsHttps = env.VITE_DEV_HTTPS === 'true' || env.HTTPS === 'true';
+  if (!wantsHttps) return undefined;
+
+  const resolveExistingPath = (rawPath) => {
+    if (!rawPath) return null;
+    const absolutePath = path.isAbsolute(rawPath) ? rawPath : path.resolve(process.cwd(), rawPath);
+    return fs.existsSync(absolutePath) ? absolutePath : null;
+  };
+
+  const envKeyPath = resolveExistingPath(env.VITE_DEV_HTTPS_KEY);
+  const envCertPath = resolveExistingPath(env.VITE_DEV_HTTPS_CERT);
+  if (envKeyPath && envCertPath) {
+    return {
+      key: fs.readFileSync(envKeyPath),
+      cert: fs.readFileSync(envCertPath),
+    };
+  }
+
+  if (fs.existsSync(devCertDir)) {
+    const certFiles = fs.readdirSync(devCertDir);
+    const preferredPairs = [
+      ['localhost-key.pem', 'localhost.pem'],
+      ['dev-key.pem', 'dev.pem'],
+    ];
+
+    for (const [keyFile, certFile] of preferredPairs) {
+      const keyPath = path.join(devCertDir, keyFile);
+      const certPath = path.join(devCertDir, certFile);
+      if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+        return {
+          key: fs.readFileSync(keyPath),
+          cert: fs.readFileSync(certPath),
+        };
+      }
+    }
+
+    for (const fileName of certFiles) {
+      if (!fileName.endsWith('-key.pem')) continue;
+      const baseName = fileName.slice(0, -'-key.pem'.length);
+      const certName = `${baseName}.pem`;
+      const certPath = path.join(devCertDir, certName);
+      if (!fs.existsSync(certPath)) continue;
+      const keyPath = path.join(devCertDir, fileName);
+      return {
+        key: fs.readFileSync(keyPath),
+        cert: fs.readFileSync(certPath),
+      };
+    }
+  }
+
+  console.warn(
+    '[vite] HTTPS requested but certs were not found. ' +
+      'Set VITE_DEV_HTTPS_KEY and VITE_DEV_HTTPS_CERT, or place a key/cert pair in .cert/.'
+  );
+  return undefined;
+};
+
 export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '');
   // Use relative paths for Electron, absolute for web
-  const isElectron = process.env.ELECTRON === 'true';
+  const isElectron = env.ELECTRON === 'true';
   const base = isElectron ? './' : '/';
   const appVersion = getCommitBasedVersion();
+  const devHttps = resolveDevHttps(env);
   
   return {
     // 1. TELL VITE WHERE YOUR APP LIVES
@@ -111,6 +173,7 @@ export default defineConfig(({ mode }) => {
       hmr: { overlay: false },
       host: true,
       port: vitePort,
+      https: devHttps,
       allowedHosts: true,
       cors: true,
       proxy: {

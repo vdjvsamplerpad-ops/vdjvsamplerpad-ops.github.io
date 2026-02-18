@@ -12,7 +12,6 @@ export type SystemAction =
   | 'padSizeUp'
   | 'padSizeDown'
   | 'importBank'
-  | 'toggleTheme'
   | 'activateSecondary'
   | 'midiShift';
 
@@ -45,7 +44,6 @@ export interface SystemMappings {
   padSizeUp: SystemMapping;
   padSizeDown: SystemMapping;
   importBank: SystemMapping;
-  toggleTheme: SystemMapping;
   activateSecondary: SystemMapping;
   midiShift: SystemMapping;
   channelMappings: ChannelMapping[];
@@ -66,7 +64,6 @@ export const DEFAULT_SYSTEM_MAPPINGS: SystemMappings = {
   padSizeUp: { key: '=' },
   padSizeDown: { key: '-' },
   importBank: { key: 'V' },
-  toggleTheme: { key: '`' },
   activateSecondary: { key: 'C' },
   midiShift: { key: '' },
   channelMappings: Array.from({ length: 8 }, () => ({
@@ -93,7 +90,6 @@ export const SYSTEM_ACTION_LABELS: Record<SystemAction, string> = {
   padSizeUp: 'Pad Size +',
   padSizeDown: 'Pad Size -',
   importBank: 'Import Bank',
-  toggleTheme: 'Dark/Light Mode',
   activateSecondary: 'Activate Secondary Page',
   midiShift: 'MIDI Shift'
 };
@@ -112,7 +108,6 @@ export const SYSTEM_ACTIONS: SystemAction[] = [
   'padSizeUp',
   'padSizeDown',
   'importBank',
-  'toggleTheme',
   'activateSecondary',
   'midiShift'
 ];

@@ -125,7 +125,6 @@ type ExtendedSystemAction =
   | 'padSizeUp'
   | 'padSizeDown'
   | 'importBank'
-  | 'toggleTheme'
   | 'activateSecondary';
 
 const defaultSettings: AppSettings = {
@@ -141,6 +140,19 @@ const defaultSettings: AppSettings = {
   midiEnabled: false,
   midiDeviceProfileId: null,
   systemMappings: DEFAULT_SYSTEM_MAPPINGS
+};
+
+const mergeSystemMappings = (incoming?: Partial<SystemMappings> | null): SystemMappings => {
+  const merged = {
+    ...DEFAULT_SYSTEM_MAPPINGS,
+    ...(incoming || {})
+  } as SystemMappings & { toggleTheme?: unknown };
+
+  if ('toggleTheme' in merged) {
+    delete (merged as Record<string, unknown>).toggleTheme;
+  }
+
+  return merged as SystemMappings;
 };
 
 export function SamplerPadApp() {
@@ -199,10 +211,7 @@ export function SamplerPadApp() {
       const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        const mergedMappings = {
-          ...DEFAULT_SYSTEM_MAPPINGS,
-          ...(parsed.systemMappings || {})
-        } as SystemMappings;
+        const mergedMappings = mergeSystemMappings(parsed.systemMappings || {});
         return { ...defaultSettings, ...parsed, systemMappings: mergedMappings };
       }
     } catch (error) {
@@ -606,10 +615,7 @@ export function SamplerPadApp() {
           ? (incomingSystemMappings as SystemMappings & { channelMappings?: ChannelMappingEntry[] }).channelMappings || []
           : (settings.systemMappings as SystemMappings & { channelMappings?: ChannelMappingEntry[] }).channelMappings || []);
 
-      const mergedSystemMappings = {
-        ...DEFAULT_SYSTEM_MAPPINGS,
-        ...(incomingSystemMappings || {})
-      } as SystemMappings;
+      const mergedSystemMappings = mergeSystemMappings((incomingSystemMappings || {}) as Partial<SystemMappings>);
 
       (mergedSystemMappings as SystemMappings & { channelMappings?: ChannelMappingEntry[] }).channelMappings = incomingChannelMappings;
 
@@ -716,7 +722,7 @@ export function SamplerPadApp() {
     [banks, settings.systemMappings, updateBank, updatePad, setSettings]
   );
 
-  const handleExportAppBackup = React.useCallback(async () => {
+  const handleExportAppBackup = React.useCallback(async (options?: { riskMode?: boolean }) => {
     const payload = {
       settings: settings as unknown as Record<string, unknown>,
       mappings: buildMappingExport() as unknown as Record<string, unknown>,
@@ -726,21 +732,18 @@ export function SamplerPadApp() {
         currentBankId
       }
     };
-    return exportAppBackup(payload);
+    return exportAppBackup(payload, options);
   }, [settings, buildMappingExport, primaryBankId, secondaryBankId, currentBankId, exportAppBackup]);
 
-  const handleRestoreAppBackup = React.useCallback(async (file: File) => {
-    const result = await restoreAppBackup(file);
+  const handleRestoreAppBackup = React.useCallback(async (file: File, companionFiles: File[] = []) => {
+    const result = await restoreAppBackup(file, companionFiles);
 
     if (result.settings) {
       const restoredSettings = result.settings as Partial<AppSettings>;
       setSettings((prev) => ({
         ...prev,
         ...restoredSettings,
-        systemMappings: {
-          ...DEFAULT_SYSTEM_MAPPINGS,
-          ...(restoredSettings.systemMappings || prev.systemMappings)
-        }
+        systemMappings: mergeSystemMappings((restoredSettings.systemMappings || prev.systemMappings) as Partial<SystemMappings>)
       }));
     }
 
@@ -749,10 +752,7 @@ export function SamplerPadApp() {
       if (mappingsPayload?.systemMappings) {
         setSettings((prev) => ({
           ...prev,
-          systemMappings: {
-            ...DEFAULT_SYSTEM_MAPPINGS,
-            ...mappingsPayload.systemMappings
-          }
+          systemMappings: mergeSystemMappings(mappingsPayload.systemMappings)
         }));
       }
     }
@@ -898,12 +898,11 @@ export function SamplerPadApp() {
       padSizeUp: '#ffffff',
       padSizeDown: '#ffffff',
       importBank: '#ffffff',
-      toggleTheme: '#ffffff',
       activateSecondary: '#7f00ff',
       midiShift: '#00a9ff'
     };
 
-    (Object.keys(settings.systemMappings) as Array<keyof SystemMappings>)
+    (Object.keys(DEFAULT_SYSTEM_MAPPINGS) as Array<keyof SystemMappings>)
       .filter((key) => key !== 'masterVolumeCC' && key !== 'channelMappings')
       .forEach((key) => {
         const action = key as SystemAction;
@@ -924,7 +923,6 @@ export function SamplerPadApp() {
         if (action === 'mixer') channel = settings.mixerOpen ? solidChannel : midChannel;
         if (action === 'banksMenu') channel = settings.sideMenuOpen ? solidChannel : midChannel;
         if (action === 'editMode') channel = settings.editMode ? solidChannel : midChannel;
-        if (action === 'toggleTheme') channel = theme === 'light' ? solidChannel : midChannel;
         if (action === 'activateSecondary') channel = isDualMode ? solidChannel : midChannel;
         if (action === 'midiShift') {
           const shiftEnabled = isDualMode && Boolean(secondaryBankId);
@@ -1361,7 +1359,7 @@ export function SamplerPadApp() {
 
   const systemKeys = React.useMemo(() => {
     const keys = new Set<string>();
-    (Object.keys(settings.systemMappings) as Array<keyof SystemMappings>)
+    (Object.keys(DEFAULT_SYSTEM_MAPPINGS) as Array<keyof SystemMappings>)
       .filter((key) => key !== 'masterVolumeCC' && key !== 'channelMappings')
       .forEach((key) => {
         const mapping = settings.systemMappings[key as SystemAction];
@@ -1372,7 +1370,7 @@ export function SamplerPadApp() {
 
   const systemMidiNotes = React.useMemo(() => {
     const notes = new Set<number>();
-    (Object.keys(settings.systemMappings) as Array<keyof SystemMappings>)
+    (Object.keys(DEFAULT_SYSTEM_MAPPINGS) as Array<keyof SystemMappings>)
       .filter((key) => key !== 'masterVolumeCC' && key !== 'channelMappings')
       .forEach((key) => {
         const mapping = settings.systemMappings[key as SystemAction];
@@ -1383,7 +1381,7 @@ export function SamplerPadApp() {
 
   const systemMidiCCs = React.useMemo(() => {
     const ccs = new Set<number>();
-    (Object.keys(settings.systemMappings) as Array<keyof SystemMappings>)
+    (Object.keys(DEFAULT_SYSTEM_MAPPINGS) as Array<keyof SystemMappings>)
       .filter((key) => key !== 'masterVolumeCC' && key !== 'channelMappings')
       .forEach((key) => {
         const mapping = settings.systemMappings[key as SystemAction];
@@ -1550,7 +1548,7 @@ export function SamplerPadApp() {
       });
       if (!normalized) return;
 
-      const systemAction = (Object.keys(settings.systemMappings) as Array<keyof SystemMappings>)
+      const systemAction = (Object.keys(DEFAULT_SYSTEM_MAPPINGS) as Array<keyof SystemMappings>)
         .filter((key) => key !== 'masterVolumeCC' && key !== 'channelMappings' && key !== 'midiShift')
         .find((key) => settings.systemMappings[key as SystemAction]?.key === normalized) as ExtendedSystemAction | undefined;
 
@@ -1608,9 +1606,6 @@ export function SamplerPadApp() {
           case 'importBank':
             window.dispatchEvent(new Event('vdjv-import-bank'));
             flashSystemLed(settings.systemMappings.importBank?.midiNote, '#ffffff', 6);
-            return;
-          case 'toggleTheme':
-            toggleTheme();
             return;
           case 'activateSecondary': {
             const targetBankId = currentBankId || banks[0]?.id || null;
@@ -1782,7 +1777,6 @@ export function SamplerPadApp() {
     handlePadSizeIncrease,
     handlePadSizeDecrease,
     handleCycleBank,
-    toggleTheme,
     currentBankId,
     banks,
     handleBankShortcut,
@@ -1875,9 +1869,6 @@ export function SamplerPadApp() {
           window.dispatchEvent(new Event('vdjv-import-bank'));
           flashSystemLed(settings.systemMappings.importBank?.midiNote, '#ffffff', 6);
           return true;
-        case 'toggleTheme':
-          toggleTheme();
-          return true;
         case 'activateSecondary': {
           const targetBankId = currentBankId || banks[0]?.id || null;
           if (isDualMode) {
@@ -1924,7 +1915,7 @@ export function SamplerPadApp() {
         return;
       }
 
-        const systemAction = (Object.keys(settings.systemMappings) as ExtendedSystemAction[]).find(
+        const systemAction = (Object.keys(DEFAULT_SYSTEM_MAPPINGS) as ExtendedSystemAction[]).find(
           (action) => action !== 'midiShift' && settings.systemMappings[action]?.midiNote === message.note
         );
         if (systemAction && handleSystemAction(systemAction)) {
@@ -2026,7 +2017,7 @@ export function SamplerPadApp() {
         return;
       }
 
-      const systemAction = (Object.keys(settings.systemMappings) as ExtendedSystemAction[]).find(
+      const systemAction = (Object.keys(DEFAULT_SYSTEM_MAPPINGS) as ExtendedSystemAction[]).find(
         (action) => action !== 'midiShift' && settings.systemMappings[action]?.midiCC === message.cc
       );
       if (systemAction && handleSystemAction(systemAction)) {
@@ -2108,7 +2099,6 @@ export function SamplerPadApp() {
     handlePadSizeIncrease,
     handlePadSizeDecrease,
     handleCycleBank,
-    toggleTheme,
     currentBankId,
     primaryBankId,
     secondaryBankId,
@@ -2351,7 +2341,6 @@ export function SamplerPadApp() {
         onPadSizeChange={handlePadSizeChange}
         onResetPadSize={handleResetPadSize}
         onStopModeChange={(mode) => updateSetting('stopMode', mode)}
-        onToggleTheme={toggleTheme}
         onMoveBankUp={moveBankUp}
         onMoveBankDown={moveBankDown}
         onTransferPad={handleTransferPad}

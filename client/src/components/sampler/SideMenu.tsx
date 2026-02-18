@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { ProgressDialog } from '@/components/ui/progress-dialog';
-import { Plus, Settings, Upload, X, Crown, Minus, RotateCcw, Sun, Moon, ChevronUp, ChevronDown, Loader2 } from 'lucide-react';
+import { Plus, Settings, Upload, X, Crown, Minus, RotateCcw, ChevronUp, ChevronDown, Loader2 } from 'lucide-react';
 import { SamplerBank, StopMode, PadData } from './types/sampler';
 import { BankEditDialog } from './BankEditDialog';
 import { getCachedUser, useAuth } from '@/hooks/useAuth';
@@ -48,7 +48,6 @@ interface SideMenuProps {
   onPadSizeChange: (size: number) => void;
   onResetPadSize: () => void;
   onStopModeChange: (mode: StopMode) => void;
-  onToggleTheme: () => void;
   onMoveBankUp: (id: string) => void;
   onMoveBankDown: (id: string) => void;
   onTransferPad: (padId: string, sourceBankId: string, targetBankId: string) => void;
@@ -87,7 +86,6 @@ export function SideMenu({
   onPadSizeChange,
   onResetPadSize,
   onStopModeChange,
-  onToggleTheme,
   onMoveBankUp,
   onMoveBankDown,
   onTransferPad,
@@ -682,20 +680,6 @@ export function SideMenu({
           className={`flex items-center justify-between p-2 border-b ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'
             }`}
         >
-          <div className="space-y-2">
-            <Button
-              onClick={onToggleTheme}
-              variant="outline"
-              size="sm"
-              className={`w-full ${theme === 'dark'
-                ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
-                : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
-                }`}
-            >
-              {theme === 'dark' ? <Sun className="w-3 h-3" /> : <Moon className="w-3 h-3" />}
-            </Button>
-          </div>
-
           <h2
             className={`text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-900'
               }`}
