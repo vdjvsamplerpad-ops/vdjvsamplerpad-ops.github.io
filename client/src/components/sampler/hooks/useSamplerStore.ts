@@ -52,6 +52,33 @@ const MAX_NATIVE_STARTUP_RESTORE_PADS = 320;
 type MediaBackend = 'native' | 'idb';
 type OperationName = 'bank_export' | 'admin_bank_export' | 'app_backup_export' | 'app_backup_restore';
 
+const fnv1aHash = (input: string): string => {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
+
+const buildBankDuplicateSignature = (name: string, padNames: string[]): string => {
+  const normalizedName = name.trim().toLowerCase();
+  const normalizedPadNames = padNames
+    .map((padName) => padName.trim().toLowerCase())
+    .join('|');
+  return `sig:${fnv1aHash(`${normalizedName}::${padNames.length}::${normalizedPadNames}`)}:${padNames.length}`;
+};
+
+const getBankDuplicateSignature = (
+  bankLike: { name?: string; pads?: Array<{ name?: string }> } | null | undefined
+): string | null => {
+  const name = typeof bankLike?.name === 'string' ? bankLike.name : '';
+  const pads = Array.isArray(bankLike?.pads) ? bankLike.pads : [];
+  if (!name || !pads.length) return null;
+  const padNames = pads.map((pad) => (typeof pad?.name === 'string' ? pad.name : ''));
+  return buildBankDuplicateSignature(name, padNames);
+};
+
 interface OperationStage {
   stage: string;
   at: string;
@@ -281,11 +308,71 @@ const DEFAULT_BANK_LOADING_LOCK_KEY = 'vdjv-default-bank-loading-lock';
 const DEFAULT_BANK_SOURCE_ID = 'vdjv-default-bank-source';
 const SESSION_ENFORCEMENT_EVENT_KEY = 'vdjv-session-enforcement-event';
 const HIDE_PROTECTED_BANKS_KEY = 'vdjv-hide-protected-banks';
+const HIDDEN_PROTECTED_BANKS_CACHE_KEY = 'vdjv-hidden-protected-banks-by-user';
 
 // Shared encryption password for banks with "Allow Export" disabled
 // This provides security layer without requiring Supabase or user purchase
 // All users (logged in or not) can import these banks
 const SHARED_EXPORT_DISABLED_PASSWORD = 'vdjv-export-disabled-2024-secure';
+
+const normalizeIdentityToken = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+};
+
+const isDefaultBankIdentity = (bank: Pick<SamplerBank, 'name' | 'sourceBankId'>): boolean =>
+  bank.name === 'Default Bank' || bank.sourceBankId === DEFAULT_BANK_SOURCE_ID;
+
+const getBankIdentityToken = (bank: SamplerBank): string | null => {
+  if (isDefaultBankIdentity(bank)) return `default:${DEFAULT_BANK_SOURCE_ID}`;
+
+  const sourceId = normalizeIdentityToken(bank.sourceBankId);
+  if (sourceId) return `source:${sourceId}`;
+
+  const metadataBankId = normalizeIdentityToken(bank.bankMetadata?.bankId);
+  if (metadataBankId) return `meta:${metadataBankId}`;
+
+  return null;
+};
+
+const pickPreferredBank = (group: SamplerBank[]): SamplerBank => {
+  return [...group].sort((a, b) => {
+    const padDiff = (b.pads?.length || 0) - (a.pads?.length || 0);
+    if (padDiff !== 0) return padDiff;
+    return (a.sortOrder || 0) - (b.sortOrder || 0);
+  })[0];
+};
+
+const dedupeBanksByIdentity = (inputBanks: SamplerBank[]) => {
+  const grouped = new Map<string, SamplerBank[]>();
+  inputBanks.forEach((bank) => {
+    const token = getBankIdentityToken(bank);
+    if (!token) return;
+    const list = grouped.get(token) || [];
+    list.push(bank);
+    grouped.set(token, list);
+  });
+
+  const removedIdToKeptId = new Map<string, string>();
+  grouped.forEach((group) => {
+    if (group.length <= 1) return;
+    const keepBank = pickPreferredBank(group);
+    group.forEach((bank) => {
+      if (bank.id === keepBank.id) return;
+      removedIdToKeptId.set(bank.id, keepBank.id);
+    });
+  });
+
+  if (removedIdToKeptId.size === 0) {
+    return { banks: inputBanks, removedIdToKeptId };
+  }
+
+  return {
+    banks: inputBanks.filter((bank) => !removedIdToKeptId.has(bank.id)),
+    removedIdToKeptId
+  };
+};
 
 const getLocalStorageItemSafe = (key: string): string | null => {
   if (typeof window === 'undefined') return null;
@@ -305,6 +392,67 @@ const setLocalStorageItemSafe = (key: string, value: string): boolean => {
   } catch (error) {
     console.warn(`localStorage.setItem failed for key "${key}"`, error);
     return false;
+  }
+};
+
+const sanitizePadForPersistentCache = (pad: PadData, padIndex: number): PadData => ({
+  ...pad,
+  audioUrl: null,
+  imageUrl: null,
+  imageData: undefined,
+  fadeInMs: pad.fadeInMs || 0,
+  fadeOutMs: pad.fadeOutMs || 0,
+  startTimeMs: pad.startTimeMs || 0,
+  endTimeMs: pad.endTimeMs || 0,
+  pitch: pad.pitch || 0,
+  position: pad.position ?? padIndex,
+});
+
+const sanitizeBankForPersistentCache = (bank: SamplerBank): SamplerBank => ({
+  ...bank,
+  pads: (bank.pads || []).map((pad, padIndex) => sanitizePadForPersistentCache(pad, padIndex)),
+});
+
+const reviveCachedPad = (pad: any, padIndex: number): PadData => ({
+  ...pad,
+  fadeInMs: pad.fadeInMs || 0,
+  fadeOutMs: pad.fadeOutMs || 0,
+  startTimeMs: pad.startTimeMs || 0,
+  endTimeMs: pad.endTimeMs || 0,
+  pitch: pad.pitch || 0,
+  position: pad.position ?? padIndex,
+});
+
+const reviveCachedBank = (bank: any, index: number): SamplerBank => ({
+  ...bank,
+  createdAt: bank?.createdAt ? new Date(bank.createdAt) : new Date(),
+  sortOrder: bank?.sortOrder ?? index,
+  pads: Array.isArray(bank?.pads) ? bank.pads.map((pad: any, padIndex: number) => reviveCachedPad(pad, padIndex)) : [],
+});
+
+const readHiddenProtectedBanksCache = (): Record<string, SamplerBank[]> => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(HIDDEN_PROTECTED_BANKS_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, any[]>;
+    const revived: Record<string, SamplerBank[]> = {};
+    Object.entries(parsed || {}).forEach(([userId, banks]) => {
+      if (!Array.isArray(banks) || !userId) return;
+      revived[userId] = banks.map((bank, index) => reviveCachedBank(bank, index));
+    });
+    return revived;
+  } catch {
+    return {};
+  }
+};
+
+const writeHiddenProtectedBanksCache = (cache: Record<string, SamplerBank[]>): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(HIDDEN_PROTECTED_BANKS_CACHE_KEY, JSON.stringify(cache));
+  } catch (error) {
+    console.warn('Failed to persist hidden protected banks cache:', error);
   }
 };
 
@@ -957,8 +1105,43 @@ export function useSamplerStore(): SamplerStore {
   const secondaryBank = React.useMemo(() => banks.find(b => b.id === secondaryBankId) || null, [banks, secondaryBankId]);
   const currentBank = React.useMemo(() => banks.find(b => b.id === currentBankId) || null, [banks, currentBankId]);
   const isDualMode = React.useMemo(() => primaryBankId !== null, [primaryBankId]);
-  const hiddenProtectedBanksRef = React.useRef<SamplerBank[]>([]);
+  const hiddenProtectedBanksByUserRef = React.useRef<Record<string, SamplerBank[]>>({});
+  const hiddenProtectedBanksFallbackRef = React.useRef<SamplerBank[]>([]);
+  const lastAuthenticatedUserIdRef = React.useRef<string | null>(null);
   const attemptedDefaultLoadUserRef = React.useRef<string | null>(null);
+
+  const setHiddenProtectedBanks = React.useCallback((ownerId: string | null, hiddenBanks: SamplerBank[]) => {
+    if (ownerId) {
+      const nextHiddenBanks = hiddenBanks.map((bank) => sanitizeBankForPersistentCache(bank));
+      if (hiddenBanks.length) {
+        hiddenProtectedBanksByUserRef.current[ownerId] = nextHiddenBanks;
+      } else {
+        delete hiddenProtectedBanksByUserRef.current[ownerId];
+      }
+      const persisted = readHiddenProtectedBanksCache();
+      if (nextHiddenBanks.length) {
+        persisted[ownerId] = nextHiddenBanks;
+      } else {
+        delete persisted[ownerId];
+      }
+      writeHiddenProtectedBanksCache(persisted);
+      return;
+    }
+    hiddenProtectedBanksFallbackRef.current = hiddenBanks;
+  }, []);
+
+  const getHiddenProtectedBanks = React.useCallback((ownerId: string | null): SamplerBank[] => {
+    if (ownerId) {
+      const inMemory = hiddenProtectedBanksByUserRef.current[ownerId];
+      if (inMemory?.length) return inMemory;
+      const persisted = readHiddenProtectedBanksCache()[ownerId] || [];
+      if (persisted.length) {
+        hiddenProtectedBanksByUserRef.current[ownerId] = persisted;
+      }
+      return persisted;
+    }
+    return hiddenProtectedBanksFallbackRef.current;
+  }, []);
 
   const isProtectedBanksLockActive = React.useCallback(() => {
     if (typeof window === 'undefined') return false;
@@ -981,6 +1164,12 @@ export function useSamplerStore(): SamplerStore {
   React.useEffect(() => {
     ensureActivityRuntime();
   }, []);
+
+  React.useEffect(() => {
+    if (user?.id) {
+      lastAuthenticatedUserIdRef.current = user.id;
+    }
+  }, [user?.id]);
 
   const logExportActivity = React.useCallback((input: {
     status: 'success' | 'failed';
@@ -1041,8 +1230,9 @@ export function useSamplerStore(): SamplerStore {
     setBanks((prev) => {
       const next = pruneProtectedBanksFromCache(prev);
       if (next.length === prev.length) return prev;
+      const ownerId = user?.id || getCachedUser()?.id || lastAuthenticatedUserIdRef.current || null;
       const visibleIds = new Set(next.map((bank) => bank.id));
-      hiddenProtectedBanksRef.current = prev.filter((bank) => !visibleIds.has(bank.id));
+      setHiddenProtectedBanks(ownerId, prev.filter((bank) => !visibleIds.has(bank.id)));
       const nextIds = new Set(next.map((bank) => bank.id));
       setPrimaryBankIdState((current) => (current && nextIds.has(current) ? current : null));
       setSecondaryBankIdState((current) => (current && nextIds.has(current) ? current : null));
@@ -1052,22 +1242,48 @@ export function useSamplerStore(): SamplerStore {
       });
       return next;
     });
-  }, []);
+  }, [user?.id, setHiddenProtectedBanks]);
 
-  const restoreHiddenProtectedBanks = React.useCallback(() => {
-    const hidden = hiddenProtectedBanksRef.current;
+  const restoreHiddenProtectedBanks = React.useCallback((currentUserId: string | null) => {
+    const hidden = getHiddenProtectedBanks(currentUserId);
     if (!hidden.length) return;
+
     setBanks((prev) => {
       const existing = new Set(prev.map((bank) => bank.id));
-      const toRestore = hidden.filter((bank) => !existing.has(bank.id));
+      const existingSourceIds = new Set(
+        prev
+          .map((bank) => bank.sourceBankId)
+          .filter((id): id is string => Boolean(id))
+      );
+      const existingMetadataBankIds = new Set(
+        prev
+          .map((bank) => bank.bankMetadata?.bankId)
+          .filter((id): id is string => Boolean(id))
+      );
+      const hasDefaultLikeBank = prev.some(
+        (bank) => bank.sourceBankId === DEFAULT_BANK_SOURCE_ID || bank.name === 'Default Bank'
+      );
+
+      const toRestore = hidden.filter((bank) => {
+        if (existing.has(bank.id)) return false;
+        if (bank.sourceBankId && existingSourceIds.has(bank.sourceBankId)) return false;
+        if (bank.bankMetadata?.bankId && existingMetadataBankIds.has(bank.bankMetadata.bankId)) return false;
+        if (
+          hasDefaultLikeBank &&
+          (bank.sourceBankId === DEFAULT_BANK_SOURCE_ID || bank.name === 'Default Bank')
+        ) {
+          return false;
+        }
+        return true;
+      });
       if (!toRestore.length) {
-        hiddenProtectedBanksRef.current = [];
+        setHiddenProtectedBanks(currentUserId, []);
         return prev;
       }
-      hiddenProtectedBanksRef.current = [];
+      setHiddenProtectedBanks(currentUserId, []);
       return [...prev, ...toRestore].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
     });
-  }, []);
+  }, [getHiddenProtectedBanks, setHiddenProtectedBanks]);
 
   const restoreAllFiles = React.useCallback(async () => {
     setIsBanksHydrated(false);
@@ -1147,14 +1363,16 @@ export function useSamplerStore(): SamplerStore {
           position: pad.position ?? padIndex,
         })),
       }));
+      restoredBanks = dedupeBanksByIdentity(restoredBanks).banks;
 
       const hideProtectedLock =
         typeof window !== 'undefined' && localStorage.getItem(HIDE_PROTECTED_BANKS_KEY) === '1';
       if (hideProtectedLock) {
+        const ownerId = getCachedUser()?.id || lastAuthenticatedUserIdRef.current || null;
         const visible = pruneProtectedBanksFromCache(restoredBanks);
-        hiddenProtectedBanksRef.current = restoredBanks.filter(
+        setHiddenProtectedBanks(ownerId, restoredBanks.filter(
           (bank) => !visible.some((visibleBank) => visibleBank.id === bank.id)
-        );
+        ));
         restoredBanks = visible;
       }
 
@@ -1210,7 +1428,7 @@ export function useSamplerStore(): SamplerStore {
        const defaultBank: SamplerBank = { id: generateId(), name: 'Default Bank', defaultColor: '#3b82f6', pads: [], createdAt: new Date(), sortOrder: 0 };
        setBanks([defaultBank]); setCurrentBankIdState(defaultBank.id); setIsBanksHydrated(true);
     }
-  }, []);
+  }, [setHiddenProtectedBanks]);
 
   React.useEffect(() => { restoreAllFiles(); }, [restoreAllFiles]);
 
@@ -1224,7 +1442,7 @@ export function useSamplerStore(): SamplerStore {
     if (loading) return;
     if (!user) return;
     if (isProtectedBanksLockActive()) return;
-    restoreHiddenProtectedBanks();
+    restoreHiddenProtectedBanks(user.id);
   }, [user?.id, loading, isProtectedBanksLockActive, restoreHiddenProtectedBanks]);
 
   React.useEffect(() => {
@@ -1947,13 +2165,11 @@ export function useSamplerStore(): SamplerStore {
         throw error;
       }
 
-      if (
-        !options?.allowDuplicateImport &&
-        bankData?.id &&
-        banks.some((bank) => bank.id === bankData.id || bank.sourceBankId === bankData.id)
-      ) {
-        throw new Error('This bank is already imported.');
-      }
+      const bankDataId =
+        typeof bankData?.id === 'string' && bankData.id.trim().length > 0
+          ? bankData.id.trim()
+          : undefined;
+      const importSignature = getBankDuplicateSignature(bankData);
       
       let metadata: BankMetadata | null = await extractBankMetadata(contents);
       if (metadata) {
@@ -1981,17 +2197,29 @@ export function useSamplerStore(): SamplerStore {
       }
 
       includePadList = !(metadata?.password === true || !!metadataBankId);
-      if (
-        !options?.allowDuplicateImport &&
-        metadataBankId &&
-        banks.some(
-          (bank) =>
-            bank.bankMetadata?.bankId === metadataBankId ||
-            bank.sourceBankId === metadataBankId ||
-            bank.id === metadataBankId
-        )
-      ) {
-        throw new Error('This bank has already been imported.');
+      const duplicateTokens = new Set<string>();
+      const addDuplicateToken = (value: unknown) => {
+        const normalized = normalizeIdentityToken(value);
+        if (normalized) duplicateTokens.add(normalized);
+      };
+
+      addDuplicateToken(bankDataId);
+      addDuplicateToken(metadataBankId);
+      addDuplicateToken(importSignature);
+
+      if (!options?.allowDuplicateImport && duplicateTokens.size > 0) {
+        const isDuplicate = banks.some((bank) => {
+          const bankSignature = getBankDuplicateSignature(bank);
+          return [bank.id, bank.sourceBankId, bank.bankMetadata?.bankId, bankSignature]
+            .some((token) => {
+              const normalized = normalizeIdentityToken(token);
+              return normalized ? duplicateTokens.has(normalized) : false;
+            });
+        });
+
+        if (isDuplicate) {
+          throw new Error('This bank is already imported.');
+        }
       }
       const isAdminBank = metadata?.password === true;
       
@@ -2042,7 +2270,7 @@ export function useSamplerStore(): SamplerStore {
         createdAt: bankData.createdAt ? new Date(bankData.createdAt) : new Date(),
         sortOrder: maxSortOrder + 1,
         pads: [],
-        sourceBankId: metadataBankId || bankData.id,
+        sourceBankId: metadataBankId || bankDataId || importSignature,
         isAdminBank,
         transferable: isTransferable, // Set explicit flag
         exportable: metadata?.exportable ?? true,
@@ -2207,19 +2435,28 @@ export function useSamplerStore(): SamplerStore {
       }
 
       newBank.pads = newPads;
-      setBanks(prev => [...prev, newBank]);
+      let importedBankRef: SamplerBank = newBank;
+      setBanks((prev) => {
+        const deduped = dedupeBanksByIdentity([...prev, newBank]);
+        const replacementId = deduped.removedIdToKeptId.get(newBank.id);
+        if (replacementId) {
+          const replacementBank = prev.find((bank) => bank.id === replacementId);
+          if (replacementBank) importedBankRef = replacementBank;
+        }
+        return deduped.banks;
+      });
       onProgress && onProgress(100);
-      console.log(`ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Import complete: ${newPads.length} pads loaded from "${newBank.name}"`);
+      console.log(`ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Import complete: ${newPads.length} pads loaded from "${importedBankRef.name}"`);
       if (!options?.skipActivityLog) {
         logImportActivity({
           status: 'success',
           bankName: importBankName,
-          bankId: newBank.sourceBankId || newBank.id,
+          bankId: importedBankRef.sourceBankId || importedBankRef.id,
           padNames: importPadNames,
           includePadList
         });
       }
-      return newBank;
+      return importedBankRef;
 
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : 'Unknown import error';
@@ -2863,6 +3100,37 @@ export function useSamplerStore(): SamplerStore {
       return;
     }
 
+    const userDefaultBankKey = `${DEFAULT_BANK_LOADED_KEY}_${currentUserId}`;
+    const isDefaultBankLike = (bank: SamplerBank) =>
+      bank.name === 'Default Bank' || bank.sourceBankId === DEFAULT_BANK_SOURCE_ID;
+    const hasPads = (bank: SamplerBank) => Array.isArray(bank.pads) && bank.pads.length > 0;
+    const hiddenOwnedByCurrentUser = getHiddenProtectedBanks(currentUserId);
+    const hiddenHasDefaultBank = hiddenOwnedByCurrentUser.some(
+      (bank) => isDefaultBankLike(bank) && hasPads(bank)
+    );
+
+    const dedupedBanks = dedupeBanksByIdentity(banks);
+    if (dedupedBanks.removedIdToKeptId.size > 0) {
+      setBanks(dedupedBanks.banks);
+      setCurrentBankIdState((current) => {
+        if (!current) return current;
+        return dedupedBanks.removedIdToKeptId.get(current) || current;
+      });
+      setPrimaryBankIdState((current) => {
+        if (!current) return current;
+        return dedupedBanks.removedIdToKeptId.get(current) || current;
+      });
+      setSecondaryBankIdState((current) => {
+        if (!current) return current;
+        return dedupedBanks.removedIdToKeptId.get(current) || current;
+      });
+      const hasDefaultAfterDedupe = dedupedBanks.banks.some((bank) => isDefaultBankLike(bank) && hasPads(bank));
+      if (hasDefaultAfterDedupe) {
+        setLocalStorageItemSafe(userDefaultBankKey, 'true');
+      }
+      return;
+    }
+
     const justLoggedIn = currentUserId && prevUserIdRef.current !== currentUserId;
     if (!justLoggedIn) {
       prevUserIdRef.current = currentUserId;
@@ -2873,14 +3141,12 @@ export function useSamplerStore(): SamplerStore {
     if (attemptedDefaultLoadUserRef.current === currentUserId) return;
     attemptedDefaultLoadUserRef.current = currentUserId;
 
-    const userDefaultBankKey = `${DEFAULT_BANK_LOADED_KEY}_${currentUserId}`;
     const alreadyLoaded = getLocalStorageItemSafe(userDefaultBankKey);
     const hasExistingDefaultBank = banks.some(
       (bank) =>
-        (bank.name === 'Default Bank' || bank.sourceBankId === DEFAULT_BANK_SOURCE_ID) &&
-        Array.isArray(bank.pads) &&
-        bank.pads.length > 0
+        isDefaultBankLike(bank) && hasPads(bank)
     );
+    const hasEffectiveDefaultBank = hasExistingDefaultBank || hiddenHasDefaultBank;
     if (alreadyLoaded && hasExistingDefaultBank) {
       return;
     }
@@ -2888,6 +3154,10 @@ export function useSamplerStore(): SamplerStore {
       try {
         localStorage.removeItem(userDefaultBankKey);
       } catch {}
+    }
+    if (hasEffectiveDefaultBank) {
+      setLocalStorageItemSafe(userDefaultBankKey, 'true');
+      return;
     }
 
     const lockKey = `${DEFAULT_BANK_LOADING_LOCK_KEY}_${currentUserId}`;
@@ -2903,11 +3173,15 @@ export function useSamplerStore(): SamplerStore {
       try {
         const hasNonEmptyDefault = banks.some(
           (bank) =>
-            (bank.name === 'Default Bank' || bank.sourceBankId === DEFAULT_BANK_SOURCE_ID) &&
-            Array.isArray(bank.pads) &&
-            bank.pads.length > 0
+            isDefaultBankLike(bank) && hasPads(bank)
         );
+        const hiddenStillHasDefault = getHiddenProtectedBanks(currentUserId)
+          .some((bank) => isDefaultBankLike(bank) && hasPads(bank));
         if (hasNonEmptyDefault) {
+          setLocalStorageItemSafe(userDefaultBankKey, 'true');
+          return;
+        }
+        if (hiddenStillHasDefault) {
           setLocalStorageItemSafe(userDefaultBankKey, 'true');
           return;
         }
@@ -2915,8 +3189,7 @@ export function useSamplerStore(): SamplerStore {
         // Find and delete empty "Default Bank" if it exists
         const emptyDefaultBank = banks.find(
           (b) =>
-            (b.name === 'Default Bank' || b.sourceBankId === DEFAULT_BANK_SOURCE_ID) &&
-            (!b.pads || b.pads.length === 0)
+            isDefaultBankLike(b) && (!b.pads || b.pads.length === 0)
         );
         if (emptyDefaultBank) {
           setBanks((prev) => prev.filter((b) => b.id !== emptyDefaultBank.id));
@@ -2954,9 +3227,29 @@ export function useSamplerStore(): SamplerStore {
         // Import the bank
         const importedBank = await importBank(file);
         if (importedBank) {
-          // Keep a stable source id so default bank isn't imported twice per device cache.
-          updateBank(importedBank.id, { name: 'Default Bank', sourceBankId: DEFAULT_BANK_SOURCE_ID });
-          setCurrentBankIdState(importedBank.id);
+          // Keep a stable source id and collapse races where another default bank appears in parallel.
+          let resolvedDefaultId = importedBank.id;
+          setBanks((prev) => {
+            const tagged = prev.map((bank) =>
+              bank.id === importedBank.id
+                ? { ...bank, name: 'Default Bank', sourceBankId: DEFAULT_BANK_SOURCE_ID }
+                : bank
+            );
+            const defaultLikeBanks = tagged.filter(
+              (bank) => bank.name === 'Default Bank' || bank.sourceBankId === DEFAULT_BANK_SOURCE_ID
+            );
+            if (defaultLikeBanks.length <= 1) return tagged;
+            const keepBank =
+              defaultLikeBanks.find((bank) => hasPads(bank)) ||
+              defaultLikeBanks.find((bank) => bank.id === importedBank.id) ||
+              defaultLikeBanks[0];
+            resolvedDefaultId = keepBank.id;
+            const removeIds = new Set(
+              defaultLikeBanks.filter((bank) => bank.id !== keepBank.id).map((bank) => bank.id)
+            );
+            return tagged.filter((bank) => !removeIds.has(bank.id));
+          });
+          setCurrentBankIdState(resolvedDefaultId);
           setLocalStorageItemSafe(userDefaultBankKey, 'true');
         } else {
           throw new Error('Import returned null');
@@ -2973,7 +3266,7 @@ export function useSamplerStore(): SamplerStore {
     };
 
     loadDefaultBank();
-  }, [user?.id, importBank, updateBank, getDefaultBankPath, banks, currentBankId, isBanksHydrated]);
+  }, [user?.id, importBank, getDefaultBankPath, banks, currentBankId, isBanksHydrated, getHiddenProtectedBanks]);
 
 
   return {
