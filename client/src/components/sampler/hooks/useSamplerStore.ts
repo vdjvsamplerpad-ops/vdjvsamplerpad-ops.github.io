@@ -45,12 +45,24 @@ const BACKUP_VERSION = 2;
 const BACKUP_EXT = '.vdjvbackup';
 const MIN_FREE_STORAGE_BYTES = 200 * 1024 * 1024;
 const MAX_UNKNOWN_STORAGE_OPERATION_BYTES = 450 * 1024 * 1024;
+const MAX_UNKNOWN_STORAGE_IMPORT_BYTES = 3 * 1024 * 1024 * 1024;
 const MAX_NATIVE_BANK_EXPORT_BYTES = 350 * 1024 * 1024;
-const MAX_NATIVE_APP_BACKUP_BYTES = 600 * 1024 * 1024;
+const MAX_NATIVE_APP_BACKUP_BYTES = 1700 * 1024 * 1024;
 const MAX_NATIVE_STARTUP_RESTORE_PADS = 320;
+const MAX_CAPACITOR_NATIVE_AUDIO_WRITE_BYTES = 8 * 1024 * 1024;
+const MAX_CAPACITOR_NATIVE_IMAGE_WRITE_BYTES = 4 * 1024 * 1024;
+const NATIVE_IMPORT_CONCURRENCY = 1;
+const WEB_IMPORT_CONCURRENCY = 4;
+const IMPORT_BATCH_FLUSH_COUNT = 12;
+const IMPORT_BATCH_FLUSH_BYTES = 48 * 1024 * 1024;
+const IMPORT_FILE_ACCESS_DENIED_MESSAGE =
+  'Cannot read the selected file. Android denied storage access. Please import via the in-app picker and allow file access when prompted.';
+const BACKUP_FILE_ACCESS_DENIED_MESSAGE =
+  'Cannot read the selected backup file. Please pick it again from the in-app file picker and allow file access.';
 
 type MediaBackend = 'native' | 'idb';
 type OperationName = 'bank_export' | 'admin_bank_export' | 'app_backup_export' | 'app_backup_restore';
+const nativeWriteFallbackLogged = new Set<'audio' | 'image'>();
 
 const fnv1aHash = (input: string): string => {
   let hash = 0x811c9dc5;
@@ -139,6 +151,24 @@ const sanitizeOperationError = (error: unknown): { message: string; stack?: stri
     };
   }
   return { message: String(error) };
+};
+
+const extractErrorText = (error: unknown): string => {
+  if (error instanceof Error) return `${error.name} ${error.message}`.toLowerCase();
+  return String(error || '').toLowerCase();
+};
+
+const isFileAccessDeniedError = (error: unknown): boolean => {
+  const text = extractErrorText(error);
+  return (
+    text.includes('permission to access file') ||
+    text.includes('notreadableerror') ||
+    text.includes('requested file could not be read') ||
+    text.includes('securityerror') ||
+    text.includes('permission denied') ||
+    text.includes('not allowed to read local resource') ||
+    text.includes('operation not permitted')
+  );
 };
 
 const ensureExportPermission = async (): Promise<void> => {
@@ -516,9 +546,52 @@ const parseStorageKeyExt = (storageKey: string): string => {
   return storageKey.slice(idx + 1);
 };
 
+const hasZipMagicHeader = async (file: Blob): Promise<boolean> => {
+  try {
+    const bytes = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    if (bytes.length < 4) return false;
+    const isPk = bytes[0] === 0x50 && bytes[1] === 0x4b;
+    if (!isPk) return false;
+    return (
+      (bytes[2] === 0x03 && bytes[3] === 0x04) ||
+      (bytes[2] === 0x05 && bytes[3] === 0x06) ||
+      (bytes[2] === 0x07 && bytes[3] === 0x08)
+    );
+  } catch {
+    return false;
+  }
+};
+
+const normalizePadNameToken = (value: unknown): string => {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
+};
+
+const getPadPositionOrFallback = (pad: Partial<PadData>, fallbackIndex: number): number => {
+  if (typeof pad.position === 'number' && Number.isFinite(pad.position) && pad.position >= 0) {
+    return Math.floor(pad.position);
+  }
+  return fallbackIndex;
+};
+
+const padHasExpectedImageAsset = (pad: Partial<PadData>): boolean => {
+  return Boolean(
+    pad.hasImageAsset === true ||
+    pad.imageStorageKey ||
+    pad.imageData ||
+    (typeof pad.imageUrl === 'string' && pad.imageUrl.trim().length > 0) ||
+    pad.imageBackend === 'native'
+  );
+};
+
 const ensureStorageHeadroom = async (requiredBytes: number, operation: string): Promise<void> => {
+  const unknownStorageLimitBytes =
+    operation === 'bank import' || operation === 'backup restore'
+      ? MAX_UNKNOWN_STORAGE_IMPORT_BYTES
+      : MAX_UNKNOWN_STORAGE_OPERATION_BYTES;
+
   if (typeof navigator === 'undefined' || typeof navigator.storage?.estimate !== 'function') {
-    if (requiredBytes > MAX_UNKNOWN_STORAGE_OPERATION_BYTES) {
+    if (requiredBytes > unknownStorageLimitBytes) {
       const requiredMb = Math.ceil(requiredBytes / (1024 * 1024));
       throw new Error(`Unable to verify free storage for ${operation}. Operation is too large (${requiredMb}MB) without quota support.`);
     }
@@ -544,6 +617,17 @@ const yieldToMainThread = () => new Promise<void>((resolve) => setTimeout(resolv
 
 const writeNativeMediaBlob = async (padId: string, blob: Blob, type: 'audio' | 'image'): Promise<string | null> => {
   if (!isNativeCapacitorPlatform()) return null;
+  const nativeWriteLimitBytes =
+    type === 'audio' ? MAX_CAPACITOR_NATIVE_AUDIO_WRITE_BYTES : MAX_CAPACITOR_NATIVE_IMAGE_WRITE_BYTES;
+  if (blob.size > nativeWriteLimitBytes) {
+    if (!nativeWriteFallbackLogged.has(type)) {
+      nativeWriteFallbackLogged.add(type);
+      console.warn(
+        `[storage] Native ${type} write fallback enabled for large blobs (> ${Math.round(nativeWriteLimitBytes / (1024 * 1024))}MB). Using IndexedDB for stability.`
+      );
+    }
+    return null;
+  }
   try {
     const { Filesystem, Directory } = await import('@capacitor/filesystem');
     const ext = extFromMime(blob.type, type);
@@ -577,6 +661,22 @@ const readNativeMediaBlob = async (storageKey: string, type: 'audio' | 'image'):
       bytes[i] = binary.charCodeAt(i);
     }
     return new Blob([bytes], { type: mimeFromExt(parseStorageKeyExt(storageKey), type) });
+  } catch {
+    return null;
+  }
+};
+
+const getNativeMediaPlaybackUrl = async (storageKey: string): Promise<string | null> => {
+  if (!isNativeCapacitorPlatform()) return null;
+  try {
+    const { Filesystem, Directory } = await import('@capacitor/filesystem');
+    const uriResult = await Filesystem.getUri({
+      path: `${NATIVE_MEDIA_ROOT}/${storageKey}`,
+      directory: Directory.Data
+    });
+    const capacitor = (window as any).Capacitor;
+    const convertFileSrc = capacitor?.convertFileSrc;
+    return convertFileSrc ? convertFileSrc(uriResult.uri) : uriResult.uri;
   } catch {
     return null;
   }
@@ -898,10 +998,10 @@ const encodeAudioBufferToMP3 = (audioBuffer: AudioBuffer, bitrate: number = 128)
     const result = new Uint8Array(totalLength);
     let offset = 0;
     for (const chunk of mp3Data) { result.set(chunk, offset); offset += chunk.length; }
-    console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ MP3 encoding successful');
+    console.log('[audio] MP3 encoding successful');
     return { blob: new Blob([result], { type: 'audio/mp3' }), format: 'mp3' };
   } catch (error) {
-    console.warn('ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â MP3 encoding failed, falling back to WAV:', error);
+    console.warn('[audio] MP3 encoding failed, falling back to WAV:', error);
     return { blob: audioBufferToWavBlob(audioBuffer), format: 'wav' };
   }
 };
@@ -912,7 +1012,7 @@ const trimAudio = async (
   endTimeMs: number,
   originalFormat: 'mp3' | 'wav' | 'ogg' | 'unknown'
 ): Promise<{ blob: Blob; newDurationMs: number }> => {
-  console.log(`ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â§ trimAudio() called: startMs=${startTimeMs}, endMs=${endTimeMs}, format=${originalFormat}`);
+  console.log(`[audio] trimAudio startMs=${startTimeMs} endMs=${endTimeMs} format=${originalFormat}`);
   const arrayBuffer = await audioBlob.arrayBuffer();
   const arrayBufferCopy = arrayBuffer.slice(0);
   const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -1049,6 +1149,20 @@ const loadPadMediaBlob = async (pad: PadData, type: 'audio' | 'image'): Promise<
   return null;
 };
 
+const loadPadMediaBlobWithUrlFallback = async (pad: PadData, type: 'audio' | 'image'): Promise<Blob | null> => {
+  const stored = await loadPadMediaBlob(pad, type);
+  if (stored) return stored;
+  const mediaUrl = type === 'audio' ? pad.audioUrl : pad.imageUrl;
+  if (!mediaUrl) return null;
+  try {
+    const response = await fetch(mediaUrl);
+    if (!response.ok) return null;
+    return await response.blob();
+  } catch {
+    return null;
+  }
+};
+
 const estimatePadMediaBytes = async (pad: PadData, type: 'audio' | 'image'): Promise<number> => {
   const storageId = `${type}_${pad.id}`;
   const storageKey = type === 'audio' ? pad.audioStorageKey : pad.imageStorageKey;
@@ -1095,6 +1209,7 @@ const shouldAttemptTrim = (pad: PadData): boolean => {
 export function useSamplerStore(): SamplerStore {
   const { user, profile, loading, sessionConflictReason } = useAuth();
   const [banks, setBanks] = React.useState<SamplerBank[]>([]);
+  const banksRef = React.useRef<SamplerBank[]>([]);
   const [isBanksHydrated, setIsBanksHydrated] = React.useState(false);
   const [primaryBankId, setPrimaryBankIdState] = React.useState<string | null>(null);
   const [secondaryBankId, setSecondaryBankIdState] = React.useState<string | null>(null);
@@ -1109,6 +1224,7 @@ export function useSamplerStore(): SamplerStore {
   const hiddenProtectedBanksFallbackRef = React.useRef<SamplerBank[]>([]);
   const lastAuthenticatedUserIdRef = React.useRef<string | null>(null);
   const attemptedDefaultLoadUserRef = React.useRef<string | null>(null);
+  const attemptedDefaultMediaRecoveryUserRef = React.useRef<string | null>(null);
 
   const setHiddenProtectedBanks = React.useCallback((ownerId: string | null, hiddenBanks: SamplerBank[]) => {
     if (ownerId) {
@@ -1170,6 +1286,10 @@ export function useSamplerStore(): SamplerStore {
       lastAuthenticatedUserIdRef.current = user.id;
     }
   }, [user?.id]);
+
+  React.useEffect(() => {
+    banksRef.current = banks;
+  }, [banks]);
 
   const logExportActivity = React.useCallback((input: {
     status: 'success' | 'failed';
@@ -1327,7 +1447,7 @@ export function useSamplerStore(): SamplerStore {
               missingAudio += 1;
               affectedBanks.add(bank.name);
             }
-            const expectsImage = Boolean(pad.imageStorageKey || pad.imageBackend === 'idb' || pad.imageData);
+            const expectsImage = padHasExpectedImageAsset(pad);
             if (expectsImage && !pad.imageUrl) {
               missingImages += 1;
               affectedBanks.add(bank.name);
@@ -1354,7 +1474,10 @@ export function useSamplerStore(): SamplerStore {
           audioUrl: null,
           imageUrl: null,
           audioBackend: (pad.audioBackend as MediaBackend | undefined) || (pad.audioStorageKey ? 'native' : 'idb'),
-          imageBackend: (pad.imageBackend as MediaBackend | undefined) || (pad.imageStorageKey ? 'native' : 'idb'),
+          imageBackend: (pad.imageBackend as MediaBackend | undefined) || (pad.imageStorageKey ? 'native' : undefined),
+          hasImageAsset: typeof pad.hasImageAsset === 'boolean'
+            ? pad.hasImageAsset
+            : Boolean(pad.imageStorageKey || pad.imageData || (typeof pad.imageUrl === 'string' && pad.imageUrl.length > 0)),
           fadeInMs: pad.fadeInMs || 0,
           fadeOutMs: pad.fadeOutMs || 0,
           startTimeMs: pad.startTimeMs || 0,
@@ -1410,10 +1533,12 @@ export function useSamplerStore(): SamplerStore {
             if (restoredImage.url) restoredPad.imageUrl = restoredImage.url;
             if (restoredImage.storageKey) restoredPad.imageStorageKey = restoredImage.storageKey;
             restoredPad.imageBackend = restoredImage.backend;
+            if (restoredImage.url) restoredPad.hasImageAsset = true;
             if (!restoredPad.imageUrl && pad.imageData) {
               try {
                 restoredPad.imageUrl = URL.createObjectURL(base64ToBlob(pad.imageData));
                 restoredPad.imageBackend = 'idb';
+                restoredPad.hasImageAsset = true;
               } catch {}
             }
           } catch {}
@@ -1483,6 +1608,7 @@ export function useSamplerStore(): SamplerStore {
                 audioBackend: pad.audioBackend,
                 imageStorageKey: pad.imageStorageKey,
                 imageBackend: pad.imageBackend,
+                hasImageAsset: pad.hasImageAsset,
                 color: pad.color,
                 shortcutKey: pad.shortcutKey,
                 midiNote: pad.midiNote,
@@ -1534,6 +1660,7 @@ export function useSamplerStore(): SamplerStore {
         audioUrl,
         audioStorageKey: storedAudio.storageKey,
         audioBackend: storedAudio.backend,
+        hasImageAsset: false,
         color: targetBank.defaultColor,
         triggerMode: 'toggle',
         playbackMode: 'once',
@@ -1593,6 +1720,7 @@ export function useSamplerStore(): SamplerStore {
           audioUrl,
           audioStorageKey,
           audioBackend,
+          hasImageAsset: false,
           color: targetBank.defaultColor,
           triggerMode: 'toggle',
           playbackMode: 'once',
@@ -1625,6 +1753,10 @@ export function useSamplerStore(): SamplerStore {
   }, [banks, getTargetBankId, trimPadName]);
 
   const updatePad = React.useCallback(async (bankId: string, id: string, updatedPad: PadData) => {
+    const existingBank = banks.find((bank) => bank.id === bankId);
+    const existingPad = existingBank?.pads.find((pad) => pad.id === id);
+    const hadVisibleImage = Boolean(existingPad?.imageUrl || existingPad?.imageData);
+
     if (updatedPad.imageData && updatedPad.imageData.startsWith('data:')) {
       try {
         const imageBlob = base64ToBlob(updatedPad.imageData);
@@ -1635,13 +1767,35 @@ export function useSamplerStore(): SamplerStore {
         if (storedImage.storageKey) updatedPad.imageStorageKey = storedImage.storageKey;
         updatedPad.imageBackend = storedImage.backend;
         updatedPad.imageData = undefined;
+        updatedPad.hasImageAsset = true;
       } catch (e) {}
     }
+
+    const requestedImageRemoval =
+      hadVisibleImage &&
+      (!updatedPad.imageUrl || updatedPad.imageUrl.trim().length === 0) &&
+      (!updatedPad.imageData || updatedPad.imageData.trim().length === 0);
+
+    if (requestedImageRemoval) {
+      try {
+        await Promise.all([
+          deleteBlobFromDB(`image_${id}`, true),
+          deleteFileHandle(`image_${id}`, 'image'),
+          deleteNativeMediaBlob(existingPad?.imageStorageKey),
+        ]);
+      } catch {}
+      updatedPad.imageStorageKey = undefined;
+      updatedPad.imageBackend = undefined;
+      updatedPad.hasImageAsset = false;
+    } else {
+      updatedPad.hasImageAsset = padHasExpectedImageAsset(updatedPad) || Boolean(existingPad?.hasImageAsset);
+    }
+
     setBanks(prev =>
       prev.map((bank) => {
         if (bank.id !== bankId) return bank;
-        const existingPad = bank.pads.find((pad) => pad.id === id);
-        const removedShortcut = Boolean(existingPad?.shortcutKey) && !updatedPad.shortcutKey;
+        const currentPad = bank.pads.find((pad) => pad.id === id);
+        const removedShortcut = Boolean(currentPad?.shortcutKey) && !updatedPad.shortcutKey;
         return {
           ...bank,
           disableDefaultPadShortcutLayout: removedShortcut ? true : bank.disableDefaultPadShortcutLayout,
@@ -1649,7 +1803,7 @@ export function useSamplerStore(): SamplerStore {
         };
       })
     );
-  }, []);
+  }, [banks]);
 
   const removePad = React.useCallback(async (bankId: string, id: string) => {
     const existingBank = banks.find((bank) => bank.id === bankId);
@@ -1810,7 +1964,7 @@ export function useSamplerStore(): SamplerStore {
 
       const totalMediaItems = Math.max(
         1,
-        bank.pads.reduce((count, pad) => count + (pad.audioUrl ? 1 : 0) + (pad.imageUrl ? 1 : 0), 0)
+        bank.pads.reduce((count, pad) => count + (pad.audioUrl ? 1 : 0) + (padHasExpectedImageAsset(pad) ? 1 : 0), 0)
       );
       let processedItems = 0;
       let exportedAudio = 0;
@@ -1865,7 +2019,7 @@ export function useSamplerStore(): SamplerStore {
           if (processedItems % 8 === 0) await yieldToMainThread();
         }
 
-        if (pad.imageUrl) {
+        if (padHasExpectedImageAsset(pad)) {
           const exportPad = exportPadMap.get(pad.id);
           const imageBlob = await loadPadMediaBlob(pad, 'image');
           if (imageBlob) {
@@ -1958,6 +2112,15 @@ export function useSamplerStore(): SamplerStore {
         throw new Error('Invalid file type: File must have .bank extension');
       }
 
+      try {
+        await file.slice(0, 64).arrayBuffer();
+      } catch (error) {
+        if (isFileAccessDeniedError(error)) {
+          throw new Error(IMPORT_FILE_ACCESS_DENIED_MESSAGE);
+        }
+        throw error;
+      }
+
       await ensureStorageHeadroom(Math.ceil(file.size * 1.2), 'bank import');
       
       const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
@@ -1986,17 +2149,27 @@ export function useSamplerStore(): SamplerStore {
       const maxTimeoutMs = 10 * 60_000;
       const sizeIn100Mb = Math.max(1, Math.ceil(file.size / (100 * 1024 * 1024)));
       const adaptiveTimeoutMs = Math.min(maxTimeoutMs, baseTimeoutMs + (sizeIn100Mb * per100MbMs));
+      const looksLikePlainZip = await hasZipMagicHeader(file);
       
       onProgress && onProgress(10);
       
       let contents: JSZip;
 
       try {
-        // Try to load as regular zip with timeout
+        // Fast-path unencrypted banks only if file starts with ZIP magic bytes.
+        if (!looksLikePlainZip) {
+          throw new Error('zip_magic_mismatch');
+        }
         contents = await loadZipFromBlob(file, 'Zip load');
-        console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Bank file loaded successfully (unencrypted)');
+        console.log('[import] Bank file loaded successfully (unencrypted)');
       } catch (error) {
-        console.log('ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ¢â‚¬â„¢ Attempting to decrypt bank file...');
+        if (isFileAccessDeniedError(error)) {
+          throw new Error(IMPORT_FILE_ACCESS_DENIED_MESSAGE);
+        }
+        if (!looksLikePlainZip) {
+          console.log('[import] Encrypted bank detected, skipping plain ZIP parse');
+        }
+        console.log('[import] Attempting to decrypt bank file...');
         
         let decrypted = false;
         let lastError: Error | null = null;
@@ -2017,19 +2190,22 @@ export function useSamplerStore(): SamplerStore {
             );
             contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
             decrypted = true;
-            console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Decrypted using shared password (export disabled encryption)');
+            console.log('[import] Decrypted using shared password (export-disabled encryption)');
           } else {
             throw new Error('Shared password mismatch');
           }
         } catch (e) {
+          if (isFileAccessDeniedError(e)) {
+            throw new Error(IMPORT_FILE_ACCESS_DENIED_MESSAGE);
+          }
           lastError = e instanceof Error ? e : new Error(String(e));
-          console.log('ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â Shared password decryption failed, trying user-specific keys...');
+          console.log('[import] Shared password decryption failed; trying user-specific keys...');
         }
         
         // If shared password didn't work, try user-specific keys (requires login)
         if (!decrypted) {
           // Use cached user if auth state not yet synced
-          console.log('ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â Auth check:', { user: !!user, cachedUser: !!getCachedUser(), effectiveUser: !!effectiveUser });
+          console.log('[import] Auth check:', { user: !!user, cachedUser: !!getCachedUser(), effectiveUser: !!effectiveUser });
           
           if (!effectiveUser) {
             throw new Error('Login required to import encrypted banks. Please sign in and try again.');
@@ -2054,10 +2230,13 @@ export function useSamplerStore(): SamplerStore {
                 const decryptedBlob = await withTimeout(decryptZip(file, derivedKey), adaptiveTimeoutMs, 'Decrypt');
                 contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
                 decrypted = true;
-                console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Decrypted using cached key');
+                console.log('[import] Decrypted using cached key');
                 break;
               }
             } catch (e) {
+              if (isFileAccessDeniedError(e)) {
+                throw new Error(IMPORT_FILE_ACCESS_DENIED_MESSAGE);
+              }
               lastError = e instanceof Error ? e : new Error(String(e));
               console.warn('Decryption attempt failed with cached key:', e);
             }
@@ -2079,12 +2258,15 @@ export function useSamplerStore(): SamplerStore {
                     const decryptedBlob = await withTimeout(decryptZip(file, d), adaptiveTimeoutMs, 'Decrypt');
                     contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
                     decrypted = true;
-                    console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Decrypted using hinted bank ID');
+                    console.log('[import] Decrypted using hinted bank ID');
                   } else {
                     throw new Error('Hinted ID password mismatch');
                   }
                 }
               } catch (e) {
+                if (isFileAccessDeniedError(e)) {
+                  throw new Error(IMPORT_FILE_ACCESS_DENIED_MESSAGE);
+                }
                 lastError = e instanceof Error ? e : new Error(String(e));
                 console.warn('Decryption attempt failed with hinted ID:', e);
               }
@@ -2095,25 +2277,33 @@ export function useSamplerStore(): SamplerStore {
         if (!decrypted) {
             try {
               const accessible = await listAccessibleBankIds(effectiveUser.id);
-              console.log(`ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â Trying ${accessible.length} accessible banks...`);
-           for (const bankId of accessible) {
+              console.log(`[import] Trying ${accessible.length} accessible banks...`);
+              const derivedByBank = await Promise.all(
+                accessible.map(async (bankId) => ({
+                  bankId,
+                  key: await getDerivedKey(bankId, effectiveUser.id)
+                }))
+              );
+           for (const { bankId, key } of derivedByBank) {
                 try {
-                  const d = await getDerivedKey(bankId, effectiveUser.id);
-                  if (d) {
+                  if (key) {
                     const headerMatch = await withTimeout(
-                      isZipPasswordMatch(file, d),
+                      isZipPasswordMatch(file, key),
                       Math.min(adaptiveTimeoutMs, 10_000),
                       'Header check'
                     );
                     if (headerMatch) {
-                      const decryptedBlob = await withTimeout(decryptZip(file, d), adaptiveTimeoutMs, 'Decrypt');
+                      const decryptedBlob = await withTimeout(decryptZip(file, key), adaptiveTimeoutMs, 'Decrypt');
                       contents = await loadZipFromBlob(decryptedBlob, 'Zip load');
                       decrypted = true;
-                      console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Decrypted using accessible bank ID:', bankId);
+                      console.log('[import] Decrypted using accessible bank ID:', bankId);
                       break;
                     }
                   }
                 } catch (e) {
+                  if (isFileAccessDeniedError(e)) {
+                    throw new Error(IMPORT_FILE_ACCESS_DENIED_MESSAGE);
+                  }
                   // Continue to next bank
                 }
               }
@@ -2124,6 +2314,9 @@ export function useSamplerStore(): SamplerStore {
         }
         
         if (!decrypted) {
+          if (lastError && isFileAccessDeniedError(lastError)) {
+            throw new Error(IMPORT_FILE_ACCESS_DENIED_MESSAGE);
+          }
           const errorMsg = lastError?.message || 'Unknown decryption error';
           throw new Error(`Cannot decrypt bank file. ${errorMsg}. Please ensure you have access to this bank.`);
         }
@@ -2155,7 +2348,7 @@ export function useSamplerStore(): SamplerStore {
           throw new Error('Invalid bank file format: Missing required fields');
         }
         
-        console.log('ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Bank data parsed:', { name: bankData.name, padCount: bankData.pads.length });
+        console.log('[import] Bank data parsed:', { name: bankData.name, padCount: bankData.pads.length });
         importBankName = bankData.name;
         importPadNames = bankData.pads.map((pad: any) => pad?.name || 'Untitled Pad');
       } catch (error) {
@@ -2297,140 +2490,171 @@ export function useSamplerStore(): SamplerStore {
 
       const newPads: PadData[] = [];
       const totalPads = bankData.pads.length;
-      const BATCH_SIZE = 10;
-      
-      for (let i = 0; i < totalPads; i += BATCH_SIZE) {
-        const batchPads = bankData.pads.slice(i, i + BATCH_SIZE);
-        const batchFilesToStore: BatchFileItem[] = [];
-        const nativeMode = isNativeCapacitorPlatform();
-        
-        const processedBatch = await Promise.all(batchPads.map(async (padData: any, padIndex: number) => {
-          try {
-             const newPadId = generateId();
-             const audioFile = contents.file(`audio/${padData.id}.audio`);
-             const imageFile = contents.file(`images/${padData.id}.image`);
-             let audioUrl: string | null = null;
-             let imageUrl: string | null = null;
-             let audioStorageKey: string | undefined;
-             let imageStorageKey: string | undefined;
-             let audioBackend: MediaBackend = 'idb';
-             let imageBackend: MediaBackend = 'idb';
+      const nativeMode = isNativeCapacitorPlatform();
+      const concurrentPadCount = nativeMode ? NATIVE_IMPORT_CONCURRENCY : WEB_IMPORT_CONCURRENCY;
+      const pendingBatchFilesToStore: BatchFileItem[] = [];
+      let pendingBatchBytes = 0;
 
-             if (audioFile) {
-               try {
-                const audioBlob = await withTimeout(
-                  audioFile.async('blob'),
-                  adaptiveTimeoutMs,
-                  'Audio load'
-                );
-                 
-                 if (!audioBlob || audioBlob.size === 0) {
-                   console.warn(`ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â Audio file for pad "${padData.name || padData.id}" is empty`);
-                 } else {
-                   if (nativeMode) {
-                     const storedAudio = await storeFile(
-                       newPadId,
-                       new File([audioBlob], `${newPadId}.audio`, { type: audioBlob.type || 'application/octet-stream' }),
-                       'audio'
-                     );
-                     audioStorageKey = storedAudio.storageKey;
-                     audioBackend = storedAudio.backend;
-                   } else {
-                     batchFilesToStore.push({ id: newPadId, blob: audioBlob, type: 'audio' });
-                   }
-                   audioUrl = await createFastIOSBlobURL(audioBlob);
-             }
-               } catch (e) {
-                 console.error(`ÃƒÂ¢Ã‚ÂÃ…â€™ Failed to load audio for pad "${padData.name || padData.id}":`, e);
-                 // Continue without audio - pad will be imported but won't play
-               }
-             }
-             
-             if (imageFile) {
-               try {
-                const imageBlob = await withTimeout(
-                  imageFile.async('blob'),
-                  adaptiveTimeoutMs,
-                  'Image load'
-                );
-                 
-                 if (!imageBlob || imageBlob.size === 0) {
-                   console.warn(`ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â Image file for pad "${padData.name || padData.id}" is empty`);
-                 } else {
-                   if (nativeMode) {
-                     const storedImage = await storeFile(
-                       newPadId,
-                       new File([imageBlob], `${newPadId}.image`, { type: imageBlob.type || 'application/octet-stream' }),
-                       'image'
-                     );
-                     imageStorageKey = storedImage.storageKey;
-                     imageBackend = storedImage.backend;
-                   } else {
-                     batchFilesToStore.push({ id: newPadId, blob: imageBlob, type: 'image' });
-                   }
-                   imageUrl = await createFastIOSBlobURL(imageBlob);
-                 }
-               } catch (e) {
-                 console.error(`ÃƒÂ¢Ã‚ÂÃ…â€™ Failed to load image for pad "${padData.name || padData.id}":`, e);
-                 // Continue without image
-               }
-             }
+      const flushPendingBatchFiles = async () => {
+        if (nativeMode || pendingBatchFilesToStore.length === 0) return;
+        const items = pendingBatchFilesToStore.splice(0, pendingBatchFilesToStore.length);
+        pendingBatchBytes = 0;
+        try {
+          await withTimeout(
+            saveBatchBlobsToDB(items),
+            adaptiveTimeoutMs,
+            'Save batch'
+          );
+        } catch (e) {
+          console.error('[import] Failed to save batch files to database:', e);
+          throw new Error(`Failed to save files to storage: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      };
 
-             if (audioUrl) {
-               return {
-                 ...padData,
-                 id: newPadId,
-                 audioUrl,
-                 imageUrl,
-                 audioStorageKey,
-                 audioBackend,
-                 imageStorageKey,
-                 imageBackend,
-                 imageData: undefined,
-                shortcutKey: padData.shortcutKey || undefined,
-                midiNote: typeof padData.midiNote === 'number' ? padData.midiNote : undefined,
-                midiCC: typeof padData.midiCC === 'number' ? padData.midiCC : undefined,
-                ignoreChannel: !!padData.ignoreChannel,
-                 fadeInMs: padData.fadeInMs || 0,
-                 fadeOutMs: padData.fadeOutMs || 0,
-                 startTimeMs: padData.startTimeMs || 0,
-                 endTimeMs: padData.endTimeMs || 0,
-                 pitch: padData.pitch || 0,
-                 position: padData.position ?? (newPads.length + padIndex),
-               };
-             } else {
-               console.warn(`ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â Skipping pad "${padData.name || padData.id}" - no audio file found`);
-             return null;
-             }
-          } catch (e) {
-            const errorMsg = e instanceof Error ? e.message : String(e);
-            console.error(`ÃƒÂ¢Ã‚ÂÃ…â€™ Pad import error for pad at index ${padIndex}:`, errorMsg);
+      const processPad = async (padData: any, globalPadIndex: number): Promise<PadData | null> => {
+        try {
+          const newPadId = generateId();
+          const audioFile = contents.file(`audio/${padData.id}.audio`);
+          const imageFile = contents.file(`images/${padData.id}.image`);
+          let audioUrl: string | null = null;
+          let imageUrl: string | null = null;
+          let audioStorageKey: string | undefined;
+          let imageStorageKey: string | undefined;
+          let audioBackend: MediaBackend = 'idb';
+          let imageBackend: MediaBackend = 'idb';
+          let hasImageAsset = false;
+
+          if (audioFile) {
+            try {
+              const audioBlob = await withTimeout(
+                audioFile.async('blob'),
+                adaptiveTimeoutMs,
+                'Audio load'
+              );
+
+              if (!audioBlob || audioBlob.size === 0) {
+                console.warn(`[import] Audio file for pad "${padData.name || padData.id}" is empty`);
+              } else {
+                if (nativeMode) {
+                  const storedAudio = await storeFile(
+                    newPadId,
+                    new File([audioBlob], `${newPadId}.audio`, { type: audioBlob.type || 'application/octet-stream' }),
+                    'audio'
+                  );
+                  audioStorageKey = storedAudio.storageKey;
+                  audioBackend = storedAudio.backend;
+                  if (storedAudio.storageKey) {
+                    audioUrl = await getNativeMediaPlaybackUrl(storedAudio.storageKey);
+                  }
+                } else {
+                  pendingBatchFilesToStore.push({ id: newPadId, blob: audioBlob, type: 'audio' });
+                  pendingBatchBytes += audioBlob.size;
+                }
+                if (!audioUrl) {
+                  audioUrl = await createFastIOSBlobURL(audioBlob);
+                }
+              }
+            } catch (e) {
+              console.error(`[import] Failed to load audio for pad "${padData.name || padData.id}":`, e);
+            }
+          }
+
+          if (imageFile) {
+            try {
+              const imageBlob = await withTimeout(
+                imageFile.async('blob'),
+                adaptiveTimeoutMs,
+                'Image load'
+              );
+
+              if (!imageBlob || imageBlob.size === 0) {
+                console.warn(`[import] Image file for pad "${padData.name || padData.id}" is empty`);
+              } else {
+                hasImageAsset = true;
+                if (nativeMode) {
+                  const storedImage = await storeFile(
+                    newPadId,
+                    new File([imageBlob], `${newPadId}.image`, { type: imageBlob.type || 'application/octet-stream' }),
+                    'image'
+                  );
+                  imageStorageKey = storedImage.storageKey;
+                  imageBackend = storedImage.backend;
+                  if (storedImage.storageKey) {
+                    imageUrl = await getNativeMediaPlaybackUrl(storedImage.storageKey);
+                  }
+                } else {
+                  pendingBatchFilesToStore.push({ id: newPadId, blob: imageBlob, type: 'image' });
+                  pendingBatchBytes += imageBlob.size;
+                }
+                if (!imageUrl) {
+                  imageUrl = await createFastIOSBlobURL(imageBlob);
+                }
+              }
+            } catch (e) {
+              console.error(`[import] Failed to load image for pad "${padData.name || padData.id}":`, e);
+            }
+          }
+
+          if (!audioUrl) {
+            console.warn(`[import] Skipping pad "${padData.name || padData.id}" - no audio file found`);
             return null;
           }
-        }));
 
-        if (!nativeMode && batchFilesToStore.length > 0) {
-          try {
-            await withTimeout(
-              saveBatchBlobsToDB(batchFilesToStore),
-              adaptiveTimeoutMs,
-              'Save batch'
-            );
-          } catch (e) {
-            console.error('ÃƒÂ¢Ã‚ÂÃ…â€™ Failed to save batch files to database:', e);
-            throw new Error(`Failed to save files to storage: ${e instanceof Error ? e.message : String(e)}`);
-          }
+          return {
+            ...padData,
+            id: newPadId,
+            audioUrl,
+            imageUrl,
+            audioStorageKey,
+            audioBackend,
+            imageStorageKey,
+            imageBackend,
+            hasImageAsset,
+            imageData: undefined,
+            shortcutKey: padData.shortcutKey || undefined,
+            midiNote: typeof padData.midiNote === 'number' ? padData.midiNote : undefined,
+            midiCC: typeof padData.midiCC === 'number' ? padData.midiCC : undefined,
+            ignoreChannel: !!padData.ignoreChannel,
+            fadeInMs: padData.fadeInMs || 0,
+            fadeOutMs: padData.fadeOutMs || 0,
+            startTimeMs: padData.startTimeMs || 0,
+            endTimeMs: padData.endTimeMs || 0,
+            pitch: padData.pitch || 0,
+            position: padData.position ?? globalPadIndex,
+          };
+        } catch (e) {
+          const errorMsg = e instanceof Error ? e.message : String(e);
+          console.error(`[import] Pad import error at index ${globalPadIndex}:`, errorMsg);
+          return null;
         }
+      };
 
-        const validPads = processedBatch.filter(p => p !== null);
-        newPads.push(...validPads);
-        
-        const currentProgress = 30 + ((i + BATCH_SIZE) / totalPads * 60);
-        onProgress && onProgress(Math.min(95, currentProgress));
+      for (let i = 0; i < totalPads; i += concurrentPadCount) {
+        const chunk = bankData.pads.slice(i, i + concurrentPadCount);
+        for (let localIndex = 0; localIndex < chunk.length; localIndex += 1) {
+          const globalPadIndex = i + localIndex;
+          const processedPad = await processPad(chunk[localIndex], globalPadIndex);
+          if (processedPad) {
+            newPads.push(processedPad);
+          }
+
+          if (!nativeMode && (
+            pendingBatchFilesToStore.length >= IMPORT_BATCH_FLUSH_COUNT ||
+            pendingBatchBytes >= IMPORT_BATCH_FLUSH_BYTES
+          )) {
+            await flushPendingBatchFiles();
+          }
+
+          const currentProgress = 30 + (((globalPadIndex + 1) / totalPads) * 60);
+          onProgress && onProgress(Math.min(95, currentProgress));
+          await yieldToMainThread();
+        }
       }
 
+      await flushPendingBatchFiles();
+
       if (newPads.length === 0) {
-        console.warn('ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â No valid pads were imported from the bank file');
+        console.warn('[import] No valid pads were imported from the bank file');
         throw new Error('No valid pads found in bank file. The bank may be corrupted or empty.');
       }
 
@@ -2446,7 +2670,7 @@ export function useSamplerStore(): SamplerStore {
         return deduped.banks;
       });
       onProgress && onProgress(100);
-      console.log(`ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Import complete: ${newPads.length} pads loaded from "${importedBankRef.name}"`);
+      console.log(`[import] Import complete: ${newPads.length} pads loaded from "${importedBankRef.name}"`);
       if (!options?.skipActivityLog) {
         logImportActivity({
           status: 'success',
@@ -2460,7 +2684,7 @@ export function useSamplerStore(): SamplerStore {
 
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : 'Unknown import error';
-      console.error('ÃƒÂ¢Ã‚ÂÃ…â€™ Import failed:', errorMessage, e);
+      console.error('[import] Import failed:', errorMessage, e);
       if (!options?.skipActivityLog) {
         logImportActivity({
           status: 'failed',
@@ -2472,7 +2696,9 @@ export function useSamplerStore(): SamplerStore {
       }
       
       // Provide more specific error messages
-      if (errorMessage.includes('timeout')) {
+      if (isFileAccessDeniedError(e) || errorMessage.toLowerCase().includes('cannot read the selected file')) {
+        throw new Error(IMPORT_FILE_ACCESS_DENIED_MESSAGE);
+      } else if (errorMessage.includes('timeout')) {
         throw new Error('Import timed out. The file may be too large or corrupted. Please try again.');
       } else if (errorMessage.includes('decrypt') || errorMessage.includes('encryption')) {
         throw new Error('Cannot decrypt bank file. Please ensure you have access to this bank and are signed in.');
@@ -2533,7 +2759,7 @@ export function useSamplerStore(): SamplerStore {
 
       const totalMediaItems = Math.max(
         1,
-        bank.pads.reduce((count, pad) => count + (pad.audioUrl ? 1 : 0) + (pad.imageUrl ? 1 : 0), 0)
+        bank.pads.reduce((count, pad) => count + (pad.audioUrl ? 1 : 0) + (padHasExpectedImageAsset(pad) ? 1 : 0), 0)
       );
       let processedItems = 0;
       let totalExportBytes = 0;
@@ -2588,7 +2814,7 @@ export function useSamplerStore(): SamplerStore {
           if (processedItems % 8 === 0) await yieldToMainThread();
         }
 
-        if (pad.imageUrl) {
+        if (padHasExpectedImageAsset(pad)) {
           const exportPad = exportPadMap.get(pad.id);
           const imageBlob = await loadPadMediaBlob(pad, 'image');
           if (imageBlob) {
@@ -2745,7 +2971,7 @@ export function useSamplerStore(): SamplerStore {
 
       if (isNativeCapacitorPlatform() && estimatedBytes > MAX_NATIVE_APP_BACKUP_BYTES) {
         throw new Error(
-          `Full backup is too large for mobile export (${Math.ceil(estimatedBytes / (1024 * 1024))}MB). Export banks individually.`
+          `Full backup is too large for reliable mobile export (${Math.ceil(estimatedBytes / (1024 * 1024))}MB). Use desktop full backup or export banks individually.`
         );
       }
 
@@ -2784,7 +3010,7 @@ export function useSamplerStore(): SamplerStore {
             totalMediaBytes += audioBlob.size;
           }
 
-          const imageBlob = pad.imageUrl ? await loadPadMediaBlob(pad, 'image') : null;
+          const imageBlob = padHasExpectedImageAsset(pad) ? await loadPadMediaBlob(pad, 'image') : null;
           if (imageBlob) {
             const imagePath = `media/images/${bank.id}/${pad.id}.image`;
             zip.file(imagePath, imageBlob);
@@ -2793,7 +3019,7 @@ export function useSamplerStore(): SamplerStore {
           }
 
           if (isNativeCapacitorPlatform() && totalMediaBytes > MAX_NATIVE_APP_BACKUP_BYTES) {
-            throw new Error('Backup exceeded mobile size limit during packaging. Export banks individually.');
+            throw new Error('Backup exceeded reliable mobile size limit during packaging. Use desktop full backup or export banks individually.');
           }
 
           bankClone.pads.push(padClone);
@@ -2863,6 +3089,15 @@ export function useSamplerStore(): SamplerStore {
       await ensureExportPermission();
       await ensureStorageHeadroom(Math.ceil(file.size * 1.2), 'backup restore');
 
+      try {
+        await file.slice(0, 64).arrayBuffer();
+      } catch (error) {
+        if (isFileAccessDeniedError(error)) {
+          throw new Error(BACKUP_FILE_ACCESS_DENIED_MESSAGE);
+        }
+        throw error;
+      }
+
       const backupPassword = await derivePassword(`backup-${effectiveUser.id}`);
       const decryptedZipBlob = await decryptZip(file, backupPassword);
       const zip = await new JSZip().loadAsync(await decryptedZipBlob.arrayBuffer());
@@ -2895,7 +3130,8 @@ export function useSamplerStore(): SamplerStore {
           let audioStorageKey: string | undefined;
           let imageStorageKey: string | undefined;
           let audioBackend: MediaBackend = (pad.audioBackend as MediaBackend | undefined) || (pad.audioStorageKey ? 'native' : 'idb');
-          let imageBackend: MediaBackend = (pad.imageBackend as MediaBackend | undefined) || (pad.imageStorageKey ? 'native' : 'idb');
+          let imageBackend: MediaBackend | undefined = (pad.imageBackend as MediaBackend | undefined) || (pad.imageStorageKey ? 'native' : undefined);
+          let hasImageAsset = Boolean(pad.hasImageAsset || pad.imagePath || pad.imageStorageKey || pad.imageData);
 
           if (pad.audioPath) {
             const audioFile = zip.file(String(pad.audioPath));
@@ -2925,6 +3161,7 @@ export function useSamplerStore(): SamplerStore {
               imageStorageKey = storedImage.storageKey;
               imageBackend = storedImage.backend;
               imageUrl = URL.createObjectURL(imageBlob);
+              hasImageAsset = true;
               restoredMediaBytes += imageBlob.size;
             }
           }
@@ -2937,6 +3174,7 @@ export function useSamplerStore(): SamplerStore {
             audioBackend,
             imageStorageKey,
             imageBackend,
+            hasImageAsset,
             imageData: undefined,
           } as PadData);
 
@@ -2979,18 +3217,151 @@ export function useSamplerStore(): SamplerStore {
         state: (backupPayload.state || null) as { primaryBankId: string | null; secondaryBankId: string | null; currentBankId: string | null } | null,
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const normalizedError = isFileAccessDeniedError(error)
+        ? new Error(BACKUP_FILE_ACCESS_DENIED_MESSAGE)
+        : error;
+      const errorMessage = normalizedError instanceof Error ? normalizedError.message : String(normalizedError);
       const logPath = await writeOperationDiagnosticsLog(diagnostics, error);
       throw new Error(logPath ? `${errorMessage} (Diagnostics log: ${logPath})` : errorMessage);
     }
   }, [banks, clearBankMedia, user]);
 
+  const mergeImportedBankMissingMedia = React.useCallback(async (
+    imported: SamplerBank,
+    options?: { ownerId?: string | null; addAsNewWhenNoTarget?: boolean }
+  ): Promise<{ merged: boolean; recoveredItems: number; addedBank: boolean }> => {
+    const ownerId = options?.ownerId ?? user?.id ?? getCachedUser()?.id ?? lastAuthenticatedUserIdRef.current ?? null;
+    const addAsNewWhenNoTarget = options?.addAsNewWhenNoTarget !== false;
+    let recoveredItems = 0;
+
+    const visibleBanks = banksRef.current;
+    let hiddenProtected = getHiddenProtectedBanks(ownerId);
+    const combinedBanks = [
+      ...visibleBanks,
+      ...hiddenProtected.filter((hiddenBank) => !visibleBanks.some((visibleBank) => visibleBank.id === hiddenBank.id)),
+    ];
+    const target = combinedBanks.find((bank) => {
+      if (bank.id === imported.id) return false;
+      if (imported.sourceBankId && (bank.sourceBankId === imported.sourceBankId || bank.id === imported.sourceBankId)) return true;
+      return bank.name === imported.name;
+    });
+
+    if (!target) {
+      if (!addAsNewWhenNoTarget) {
+        await clearBankMedia(imported);
+        setBanks((prev) => prev.filter((bank) => bank.id !== imported.id));
+        if (ownerId) {
+          hiddenProtected = hiddenProtected.filter((bank) => bank.id !== imported.id);
+          setHiddenProtectedBanks(ownerId, hiddenProtected);
+        }
+      }
+      return { merged: false, recoveredItems: 0, addedBank: addAsNewWhenNoTarget };
+    }
+
+    const sourceById = new Map(imported.pads.map((pad) => [pad.id, pad] as const));
+    const sourceByPosition = new Map<number, PadData>();
+    const sourceByName = new Map<string, PadData[]>();
+    imported.pads.forEach((pad, sourceIndex) => {
+      const position = getPadPositionOrFallback(pad, sourceIndex);
+      if (!sourceByPosition.has(position)) sourceByPosition.set(position, pad);
+      const nameToken = normalizePadNameToken(pad.name);
+      if (!nameToken) return;
+      const bucket = sourceByName.get(nameToken) || [];
+      bucket.push(pad);
+      sourceByName.set(nameToken, bucket);
+    });
+
+    const updatedPads: PadData[] = [];
+    for (let targetIndex = 0; targetIndex < target.pads.length; targetIndex += 1) {
+      const targetPad = target.pads[targetIndex];
+      const targetPosition = getPadPositionOrFallback(targetPad, targetIndex);
+      const targetNameToken = normalizePadNameToken(targetPad.name);
+      const bucket = targetNameToken ? sourceByName.get(targetNameToken) : undefined;
+      const sourcePad =
+        sourceById.get(targetPad.id) ||
+        (bucket && bucket.length > 0 ? bucket.shift() : undefined) ||
+        sourceByPosition.get(targetPosition) ||
+        imported.pads[targetIndex] ||
+        imported.pads[targetPosition];
+      let nextPad = { ...targetPad };
+
+      const existingAudioBlob = await loadPadMediaBlob(nextPad, 'audio');
+      if (existingAudioBlob && !nextPad.audioUrl) {
+        nextPad.audioUrl = URL.createObjectURL(existingAudioBlob);
+        nextPad.audioBackend = nextPad.audioStorageKey ? 'native' : (nextPad.audioBackend || 'idb');
+      }
+
+      if (!existingAudioBlob && sourcePad) {
+        try {
+          const audioBlob = await loadPadMediaBlobWithUrlFallback(sourcePad, 'audio');
+          if (!audioBlob) throw new Error('Missing source audio blob');
+          const storedAudio = await storeFile(
+            nextPad.id,
+            new File([audioBlob], `${nextPad.id}.audio`, { type: audioBlob.type || 'application/octet-stream' }),
+            'audio'
+          );
+          nextPad.audioUrl = URL.createObjectURL(audioBlob);
+          if (storedAudio.storageKey) nextPad.audioStorageKey = storedAudio.storageKey;
+          nextPad.audioBackend = storedAudio.backend;
+          recoveredItems += 1;
+        } catch (error) {
+          console.warn('Failed recovering audio for pad:', nextPad.id, error);
+        }
+      }
+
+      const expectsImage = padHasExpectedImageAsset(nextPad);
+      const existingImageBlob = expectsImage ? await loadPadMediaBlob(nextPad, 'image') : null;
+      if (existingImageBlob && !nextPad.imageUrl) {
+        nextPad.imageUrl = URL.createObjectURL(existingImageBlob);
+        nextPad.imageBackend = nextPad.imageStorageKey ? 'native' : (nextPad.imageBackend || 'idb');
+        nextPad.hasImageAsset = true;
+      }
+
+      if (expectsImage && !existingImageBlob && sourcePad) {
+        try {
+          const imageBlob = await loadPadMediaBlobWithUrlFallback(sourcePad, 'image');
+          if (!imageBlob) throw new Error('Missing source image blob');
+          const storedImage = await storeFile(
+            nextPad.id,
+            new File([imageBlob], `${nextPad.id}.image`, { type: imageBlob.type || 'application/octet-stream' }),
+            'image'
+          );
+          nextPad.imageUrl = URL.createObjectURL(imageBlob);
+          if (storedImage.storageKey) nextPad.imageStorageKey = storedImage.storageKey;
+          nextPad.imageBackend = storedImage.backend;
+          nextPad.hasImageAsset = true;
+          recoveredItems += 1;
+        } catch (error) {
+          console.warn('Failed recovering image for pad:', nextPad.id, error);
+        }
+      }
+
+      updatedPads.push(nextPad);
+    }
+
+    await clearBankMedia(imported);
+    setBanks((prev) =>
+      prev
+        .map((bank) => (bank.id === target.id ? { ...bank, pads: updatedPads } : bank))
+        .filter((bank) => bank.id !== imported.id)
+    );
+    if (ownerId) {
+      const hiddenUpdated = hiddenProtected
+        .map((bank) => (bank.id === target.id ? { ...bank, pads: updatedPads } : bank))
+        .filter((bank) => bank.id !== imported.id);
+      setHiddenProtectedBanks(ownerId, hiddenUpdated);
+    }
+
+    return { merged: true, recoveredItems, addedBank: false };
+  }, [clearBankMedia, getHiddenProtectedBanks, setHiddenProtectedBanks, user?.id]);
+
   const recoverMissingMediaFromBanks = React.useCallback(async (files: File[]) => {
     if (!files.length) throw new Error('No bank files selected.');
 
-    let recoveredPads = 0;
+    let recoveredItems = 0;
     let mergedBanks = 0;
     let addedBanks = 0;
+    const ownerId = user?.id || getCachedUser()?.id || lastAuthenticatedUserIdRef.current || null;
 
     for (const file of files) {
       if (!file.name.endsWith('.bank')) continue;
@@ -3002,69 +3373,17 @@ export function useSamplerStore(): SamplerStore {
         continue;
       }
       if (!imported) continue;
-
-      const target = banks.find((bank) => {
-        if (bank.id === imported!.id) return false;
-        if (imported!.sourceBankId && (bank.sourceBankId === imported!.sourceBankId || bank.id === imported!.sourceBankId)) return true;
-        return bank.name === imported!.name;
+      const mergeResult = await mergeImportedBankMissingMedia(imported, {
+        ownerId,
+        addAsNewWhenNoTarget: true,
       });
-
-      if (!target) {
-        addedBanks += 1;
-        continue;
-      }
-
-      const updatedPads: PadData[] = [];
-      for (const targetPad of target.pads) {
-        const sourcePad =
-          imported.pads.find((pad) => pad.id === targetPad.id) ||
-          imported.pads.find((pad) => pad.name === targetPad.name) ||
-          imported.pads[targetPad.position || 0];
-        let nextPad = { ...targetPad };
-
-        if (!nextPad.audioUrl && sourcePad?.audioUrl) {
-          try {
-            const audioBlob = await (await fetch(sourcePad.audioUrl)).blob();
-            const storedAudio = await storeFile(
-              nextPad.id,
-              new File([audioBlob], `${nextPad.id}.audio`, { type: audioBlob.type || 'application/octet-stream' }),
-              'audio'
-            );
-            nextPad.audioUrl = URL.createObjectURL(audioBlob);
-            if (storedAudio.storageKey) nextPad.audioStorageKey = storedAudio.storageKey;
-            nextPad.audioBackend = storedAudio.backend;
-            recoveredPads += 1;
-          } catch {}
-        }
-
-        if (!nextPad.imageUrl && sourcePad?.imageUrl) {
-          try {
-            const imageBlob = await (await fetch(sourcePad.imageUrl)).blob();
-            const storedImage = await storeFile(
-              nextPad.id,
-              new File([imageBlob], `${nextPad.id}.image`, { type: imageBlob.type || 'application/octet-stream' }),
-              'image'
-            );
-            nextPad.imageUrl = URL.createObjectURL(imageBlob);
-            if (storedImage.storageKey) nextPad.imageStorageKey = storedImage.storageKey;
-            nextPad.imageBackend = storedImage.backend;
-          } catch {}
-        }
-
-        updatedPads.push(nextPad);
-      }
-
-      await clearBankMedia(imported);
-      setBanks((prev) =>
-        prev
-          .map((bank) => (bank.id === target.id ? { ...bank, pads: updatedPads } : bank))
-          .filter((bank) => bank.id !== imported!.id)
-      );
-      mergedBanks += 1;
+      if (mergeResult.merged) mergedBanks += 1;
+      if (mergeResult.addedBank) addedBanks += 1;
+      recoveredItems += mergeResult.recoveredItems;
     }
 
-    return `Recovery complete. Merged ${mergedBanks} bank(s), restored ${recoveredPads} missing pad media item(s), added ${addedBanks} new bank(s).`;
-  }, [banks, clearBankMedia, importBank]);
+    return `Recovery complete. Merged ${mergedBanks} bank(s), restored ${recoveredItems} missing pad media item(s), added ${addedBanks} new bank(s).`;
+  }, [importBank, mergeImportedBankMissingMedia, user?.id]);
 
   // Detect environment for asset path resolution
   const getDefaultBankPath = React.useCallback(() => {
@@ -3093,6 +3412,7 @@ export function useSamplerStore(): SamplerStore {
     if (!currentUserId) {
       prevUserIdRef.current = null;
       attemptedDefaultLoadUserRef.current = null;
+      attemptedDefaultMediaRecoveryUserRef.current = null;
       return;
     }
 
@@ -3267,6 +3587,85 @@ export function useSamplerStore(): SamplerStore {
 
     loadDefaultBank();
   }, [user?.id, importBank, getDefaultBankPath, banks, currentBankId, isBanksHydrated, getHiddenProtectedBanks]);
+
+  React.useEffect(() => {
+    const currentUser = user || getCachedUser();
+    const currentUserId = currentUser?.id || null;
+    if (!currentUserId || !isBanksHydrated) {
+      if (!currentUserId) attemptedDefaultMediaRecoveryUserRef.current = null;
+      return;
+    }
+    if (attemptedDefaultMediaRecoveryUserRef.current === currentUserId) return;
+
+    const defaultBank = banks.find(
+      (bank) => bank.sourceBankId === DEFAULT_BANK_SOURCE_ID || bank.name === 'Default Bank'
+    );
+    if (!defaultBank || !defaultBank.pads.length) return;
+
+    const hasLikelyMissingMedia = defaultBank.pads.some((pad) => {
+      if (!pad.audioUrl) return true;
+      const expectsImage = padHasExpectedImageAsset(pad);
+      return expectsImage && !pad.imageUrl;
+    });
+    if (!hasLikelyMissingMedia) {
+      attemptedDefaultMediaRecoveryUserRef.current = currentUserId;
+      return;
+    }
+
+    attemptedDefaultMediaRecoveryUserRef.current = currentUserId;
+    let cancelled = false;
+    const recoverDefaultMedia = async () => {
+      try {
+        const basePath = getDefaultBankPath();
+        let response = await fetch(basePath);
+        if (!response.ok && /Android/.test(navigator.userAgent) && basePath.startsWith('/')) {
+          response = await fetch('./assets/DEFAULT_BANK.bank');
+        }
+        if (!response.ok && window.navigator.userAgent.includes('Electron') && basePath.startsWith('./')) {
+          response = await fetch('/assets/DEFAULT_BANK.bank');
+        }
+        if (!response.ok) {
+          throw new Error(`Default bank file not found: ${response.status} ${response.statusText}`);
+        }
+        const blob = await response.blob();
+        if (blob.size === 0) throw new Error('Default bank file is empty');
+
+        const file = new File([blob], 'DEFAULT_BANK.bank', { type: 'application/zip' });
+        const importedBank = await importBank(file, undefined, {
+          allowDuplicateImport: true,
+          skipActivityLog: true,
+        });
+        if (!importedBank || cancelled) return;
+
+        const importedDefault = {
+          ...importedBank,
+          name: 'Default Bank',
+          sourceBankId: DEFAULT_BANK_SOURCE_ID,
+        };
+        const result = await mergeImportedBankMissingMedia(importedDefault, {
+          ownerId: currentUserId,
+          addAsNewWhenNoTarget: false,
+        });
+        if (result.merged && result.recoveredItems > 0) {
+          console.log(`[default-recovery] Restored ${result.recoveredItems} missing media item(s) from embedded default bank.`);
+        }
+      } catch (error) {
+        console.warn('Default bank media auto-recovery failed:', error);
+      }
+    };
+
+    void recoverDefaultMedia();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    user?.id,
+    banks,
+    isBanksHydrated,
+    getDefaultBankPath,
+    importBank,
+    mergeImportedBankMissingMedia,
+  ]);
 
 
   return {

@@ -291,15 +291,18 @@ export function SideMenu({
   const createCompatibleFileInput = React.useCallback((): HTMLInputElement => {
     const input = document.createElement('input');
     input.type = 'file';
-    // Android file picker is strict about MIME types
-    // Use wildcard to allow all files, then validate .bank extension in code
-    // This ensures .bank files are visible in the file picker
-    input.accept = '*/*';
+    // Keep bank-focused MIME hints, but include wildcard fallback for Android pickers.
+    input.accept = '.bank,application/zip,application/x-zip-compressed,application/octet-stream,*/*';
     input.setAttribute('capture', 'none');
     input.setAttribute('autocomplete', 'off');
     input.setAttribute('autocorrect', 'off');
     input.setAttribute('autocapitalize', 'off');
     input.setAttribute('spellcheck', 'false');
+    input.style.position = 'fixed';
+    input.style.left = '-9999px';
+    input.style.top = '-9999px';
+    input.style.opacity = '0';
+    document.body.appendChild(input);
     return input;
   }, []);
 
@@ -329,7 +332,7 @@ export function SideMenu({
         
         // Clean up
         compatibleInput.removeEventListener('change', handleChange);
-        compatibleInput.remove();
+        if (compatibleInput.parentNode) compatibleInput.remove();
       };
 
       compatibleInput.addEventListener('change', handleChange);
@@ -342,7 +345,7 @@ export function SideMenu({
           message: 'File picker did not respond. Please try selecting the file again or use Google Drive to import.' 
         });
         compatibleInput.removeEventListener('change', handleChange);
-        compatibleInput.remove();
+        if (compatibleInput.parentNode) compatibleInput.remove();
       }, 60000);
 
       compatibleInput.addEventListener('change', () => clearTimeout(timeoutId), { once: true });
@@ -357,6 +360,7 @@ export function SideMenu({
           message: 'Failed to open file picker. Please try again or use Google Drive to import.' 
         });
         clearTimeout(timeoutId);
+        if (compatibleInput.parentNode) compatibleInput.remove();
       }
     } else {
       // Standard file input for other platforms

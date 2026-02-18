@@ -133,30 +133,47 @@ export function useAudioPlayer(
   }, []);
 
   const playAudio = React.useCallback(() => {
+    const triggerPlayback = () => {
+      switch (pad.triggerMode) {
+        case 'toggle':
+          playbackManager.triggerToggle(pad.id);
+          break;
+        case 'stutter':
+          playbackManager.triggerStutter(pad.id);
+          break;
+        case 'hold':
+          if (!isHolding) {
+            setIsHolding(true);
+            playbackManager.triggerHoldStart(pad.id);
+          }
+          break;
+        case 'unmute':
+          playbackManager.triggerUnmuteToggle(pad.id);
+          break;
+      }
+      scheduleAudioStateCheck();
+    };
+
     if (!registeredRef.current) {
-      console.warn('Trying to play unregistered pad:', pad.id);
+      if (!pad.audioUrl) {
+        console.warn('Trying to play unregistered pad with no audio URL:', pad.id);
+        return;
+      }
+      void playbackManager
+        .registerPad(pad.id, pad, bankId, bankName)
+        .then(() => {
+          registeredRef.current = true;
+          padIdRef.current = pad.id;
+          triggerPlayback();
+        })
+        .catch((error) => {
+          console.warn('Failed late pad registration on play:', pad.id, error);
+        });
       return;
     }
 
-    switch (pad.triggerMode) {
-      case 'toggle':
-        playbackManager.triggerToggle(pad.id);
-        break;
-      case 'stutter':
-        playbackManager.triggerStutter(pad.id);
-        break;
-      case 'hold':
-        if (!isHolding) {
-          setIsHolding(true);
-          playbackManager.triggerHoldStart(pad.id);
-        }
-        break;
-      case 'unmute':
-        playbackManager.triggerUnmuteToggle(pad.id);
-        break;
-    }
-    scheduleAudioStateCheck();
-  }, [pad.id, pad.triggerMode, isHolding, isPlaying, playbackManager, scheduleAudioStateCheck]);
+    triggerPlayback();
+  }, [pad.id, pad.audioUrl, pad.triggerMode, pad, bankId, bankName, isHolding, playbackManager, scheduleAudioStateCheck]);
 
   const stopAudio = React.useCallback(() => {
     if (!registeredRef.current) return;

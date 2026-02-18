@@ -5,10 +5,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { LogOut } from 'lucide-react';
 import { MidiInputInfo, MidiMessage } from '@/lib/midi';
 import { MidiDeviceProfile } from '@/lib/midi/device-profiles';
 import { DEFAULT_SYSTEM_MAPPINGS, SystemAction, SystemMappings, SYSTEM_ACTION_LABELS } from '@/lib/system-mappings';
 import { normalizeShortcutKey } from '@/lib/keyboard-shortcuts';
+import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
+import { ProgressDialog } from '@/components/ui/progress-dialog';
 
 const DEFAULT_DESCRIPTION =
   'VDJV Sampler Pad is a fast, performance-ready sampler for launching audio clips, banks, and live mixes across web and mobile.';
@@ -133,6 +136,19 @@ export function AboutDialog({
   const [mappingNotice, setMappingNotice] = React.useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [backupNotice, setBackupNotice] = React.useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [isSigningOut, setIsSigningOut] = React.useState(false);
+  const [showSignOutConfirm, setShowSignOutConfirm] = React.useState(false);
+  const [showBackupExportConfirm, setShowBackupExportConfirm] = React.useState(false);
+  const [showBackupRestoreConfirm, setShowBackupRestoreConfirm] = React.useState(false);
+  const [pendingRestoreFile, setPendingRestoreFile] = React.useState<File | null>(null);
+  const [backupProgressOpen, setBackupProgressOpen] = React.useState(false);
+  const [backupProgress, setBackupProgress] = React.useState(0);
+  const [backupProgressStatus, setBackupProgressStatus] = React.useState<'loading' | 'success' | 'error'>('loading');
+  const [backupProgressType, setBackupProgressType] = React.useState<'export' | 'import'>('export');
+  const [backupProgressTitle, setBackupProgressTitle] = React.useState('Preparing Backup');
+  const [backupProgressDescription, setBackupProgressDescription] = React.useState('');
+  const [backupProgressMessage, setBackupProgressMessage] = React.useState<string | undefined>(undefined);
+  const backupProgressTimerRef = React.useRef<number | null>(null);
+  const backupBusy = backupProgressOpen && backupProgressStatus === 'loading';
   const importInputRef = React.useRef<HTMLInputElement>(null);
   const backupRestoreInputRef = React.useRef<HTMLInputElement>(null);
   const recoveryImportInputRef = React.useRef<HTMLInputElement>(null);
@@ -144,8 +160,28 @@ export function AboutDialog({
       setMappingNotice(null);
       setBackupNotice(null);
       setActivePanel('general');
+      setShowSignOutConfirm(false);
+      setShowBackupExportConfirm(false);
+      setShowBackupRestoreConfirm(false);
+      setPendingRestoreFile(null);
+      setBackupProgressOpen(false);
+      setBackupProgress(0);
+      setBackupProgressMessage(undefined);
+      if (backupProgressTimerRef.current !== null) {
+        window.clearInterval(backupProgressTimerRef.current);
+        backupProgressTimerRef.current = null;
+      }
     }
   }, [open]);
+
+  React.useEffect(() => {
+    return () => {
+      if (backupProgressTimerRef.current !== null) {
+        window.clearInterval(backupProgressTimerRef.current);
+        backupProgressTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const channelMappings = systemMappings.channelMappings || [];
   const systemActionKeys = React.useMemo(() => Object.keys(SYSTEM_ACTION_LABELS) as SystemAction[], []);
@@ -484,35 +520,94 @@ export function AboutDialog({
     [onImportMappings]
   );
 
-  const handleExportBackup = React.useCallback(async () => {
+  const beginBackupProgress = React.useCallback(
+    (type: 'export' | 'import', title: string, description: string) => {
+      if (backupProgressTimerRef.current !== null) {
+        window.clearInterval(backupProgressTimerRef.current);
+      }
+      setBackupProgressType(type);
+      setBackupProgressTitle(title);
+      setBackupProgressDescription(description);
+      setBackupProgressStatus('loading');
+      setBackupProgressMessage(undefined);
+      setBackupProgress(8);
+      setBackupProgressOpen(true);
+      backupProgressTimerRef.current = window.setInterval(() => {
+        setBackupProgress((prev) => {
+          if (prev >= 92) return prev;
+          const step = prev < 40 ? 5 : prev < 70 ? 3 : 1;
+          return Math.min(92, prev + step);
+        });
+      }, 350);
+    },
+    []
+  );
+
+  const endBackupProgress = React.useCallback(
+    (status: 'success' | 'error', message: string) => {
+      if (backupProgressTimerRef.current !== null) {
+        window.clearInterval(backupProgressTimerRef.current);
+        backupProgressTimerRef.current = null;
+      }
+      setBackupProgressStatus(status);
+      setBackupProgress(100);
+      setBackupProgressMessage(message);
+    },
+    []
+  );
+
+  const requestExportBackup = React.useCallback(() => {
+    if (backupBusy) return;
+    setShowBackupExportConfirm(true);
+  }, [backupBusy]);
+
+  const confirmExportBackup = React.useCallback(async () => {
+    setShowBackupExportConfirm(false);
+    beginBackupProgress('export', 'Exporting Full Backup', 'Creating encrypted app backup...');
     try {
       const message = await onExportAppBackup();
       setBackupNotice({ type: 'success', message });
+      endBackupProgress('success', message);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Backup export failed.';
       setBackupNotice({ type: 'error', message });
+      endBackupProgress('error', message);
     }
-  }, [onExportAppBackup]);
+  }, [beginBackupProgress, endBackupProgress, onExportAppBackup]);
 
   const handleRestoreBackupClick = React.useCallback(() => {
+    if (backupBusy) return;
     backupRestoreInputRef.current?.click();
-  }, []);
+  }, [backupBusy]);
 
   const handleRestoreBackup = React.useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
       event.target.value = '';
       if (!file) return;
-      try {
-        const message = await onRestoreAppBackup(file);
-        setBackupNotice({ type: 'success', message });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Backup restore failed.';
-        setBackupNotice({ type: 'error', message });
-      }
+      setPendingRestoreFile(file);
+      setShowBackupRestoreConfirm(true);
     },
-    [onRestoreAppBackup]
+    []
   );
+
+  const confirmRestoreBackup = React.useCallback(async () => {
+    const file = pendingRestoreFile;
+    setShowBackupRestoreConfirm(false);
+    if (!file) return;
+    beginBackupProgress('import', 'Restoring Backup', `Restoring from ${file.name}...`);
+    try {
+      const message = await onRestoreAppBackup(file);
+      setBackupNotice({ type: 'success', message });
+      endBackupProgress('success', message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Backup restore failed.';
+      setBackupNotice({ type: 'error', message });
+      endBackupProgress('error', message);
+    } finally {
+      setPendingRestoreFile(null);
+    }
+  }, [pendingRestoreFile, beginBackupProgress, onRestoreAppBackup, endBackupProgress]);
 
   const handleRecoverClick = React.useCallback(() => {
     recoveryImportInputRef.current?.click();
@@ -534,11 +629,12 @@ export function AboutDialog({
     [onRecoverMissingMediaFromBanks]
   );
 
-  const handleSignOut = React.useCallback(async () => {
+  const confirmSignOut = React.useCallback(async () => {
     if (!onSignOut || isSigningOut) return;
     setIsSigningOut(true);
     try {
       await onSignOut();
+      setShowSignOutConfirm(false);
       onOpenChange(false);
     } finally {
       setIsSigningOut(false);
@@ -667,14 +763,16 @@ export function AboutDialog({
             </div>
           </div>
           {isAuthenticated && onSignOut && (
-            <div className="rounded-lg border p-3">
+            <div className="rounded-lg border border-red-300 bg-red-50/60 dark:border-red-700 dark:bg-red-900/20 p-3 space-y-2">
+              <div className="text-xs uppercase tracking-wide text-red-600 dark:text-red-300">Account</div>
               <Button
                 type="button"
                 variant="outline"
-                className="w-full"
-                onClick={handleSignOut}
+                className="w-full border-red-400 text-red-700 hover:bg-red-100 hover:text-red-800 dark:border-red-600 dark:text-red-300 dark:hover:bg-red-900/40 dark:hover:text-red-200"
+                onClick={() => setShowSignOutConfirm(true)}
                 disabled={isSigningOut}
               >
+                <LogOut className="w-4 h-4 mr-2" />
                 {isSigningOut ? 'Signing out...' : 'Sign Out'}
               </Button>
             </div>
@@ -1306,13 +1404,13 @@ export function AboutDialog({
                   </div>
                 )}
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button type="button" variant="outline" size="sm" onClick={handleExportBackup}>
+                  <Button type="button" variant="outline" size="sm" onClick={requestExportBackup} disabled={backupBusy}>
                     Export Full Backup
                   </Button>
-                  <Button type="button" variant="outline" size="sm" onClick={handleRestoreBackupClick}>
+                  <Button type="button" variant="outline" size="sm" onClick={handleRestoreBackupClick} disabled={backupBusy}>
                     Restore from Backup
                   </Button>
-                  <Button type="button" variant="outline" size="sm" onClick={handleRecoverClick}>
+                  <Button type="button" variant="outline" size="sm" onClick={handleRecoverClick} disabled={backupBusy}>
                     Recover Missing Media (.bank)
                   </Button>
                 </div>
@@ -1336,6 +1434,43 @@ export function AboutDialog({
           )}
         </div>
       </DialogContent>
+      <ProgressDialog
+        open={backupProgressOpen}
+        onOpenChange={setBackupProgressOpen}
+        title={backupProgressTitle}
+        description={backupProgressDescription}
+        progress={backupProgress}
+        status={backupProgressStatus}
+        type={backupProgressType}
+        errorMessage={backupProgressMessage}
+        hideCloseButton
+      />
+      <ConfirmationDialog
+        open={showBackupExportConfirm}
+        onOpenChange={setShowBackupExportConfirm}
+        title="Export Full Backup"
+        description="Export encrypted full backup now? This can take time on large libraries."
+        confirmText="Export Backup"
+        onConfirm={confirmExportBackup}
+      />
+      <ConfirmationDialog
+        open={showBackupRestoreConfirm}
+        onOpenChange={setShowBackupRestoreConfirm}
+        title="Restore Backup"
+        description={pendingRestoreFile ? `Restore from "${pendingRestoreFile.name}"? Current local data will be replaced.` : 'Restore selected backup now?'}
+        confirmText="Restore Backup"
+        variant="destructive"
+        onConfirm={confirmRestoreBackup}
+      />
+      <ConfirmationDialog
+        open={showSignOutConfirm}
+        onOpenChange={setShowSignOutConfirm}
+        title="Sign out"
+        description="Are you sure you want to sign out?"
+        confirmText={isSigningOut ? 'Signing out...' : 'Sign out'}
+        variant="destructive"
+        onConfirm={confirmSignOut}
+      />
     </Dialog>
   );
 }

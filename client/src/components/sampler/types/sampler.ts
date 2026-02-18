@@ -7,6 +7,7 @@ export interface PadData {
   imageUrl?: string; // For pad image display
   imageStorageKey?: string; // Persistent image key for native storage recovery
   imageBackend?: 'native' | 'idb'; // Storage backend hint for hybrid persistence
+  hasImageAsset?: boolean; // Persisted signal that this pad should have an image asset
   imageData?: string; // Base64 encoded image data for persistence
   shortcutKey?: string; // Optional keyboard shortcut
   midiNote?: number; // Optional MIDI note mapping

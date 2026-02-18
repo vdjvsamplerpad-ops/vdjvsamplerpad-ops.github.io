@@ -2,10 +2,8 @@ import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Label } from '@/components/ui/label';
-import { Volume2, X, Square, Waves, SlidersHorizontal as Equalizer, LogOut } from 'lucide-react';
+import { Volume2, X, Square, Waves, SlidersHorizontal as Equalizer } from 'lucide-react';
 import { ChannelState, PlayingPadInfo, StopMode } from './types/sampler';
-import { useAuth } from '@/hooks/useAuth';
-import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { createPortal } from 'react-dom';
 
 /** ---------- Slide-down notification system (local to mixer) ---------- */
@@ -128,8 +126,6 @@ export function VolumeMixer({
   theme,
   windowWidth
 }: VolumeMixerProps) {
-  const { user, loading, signOut } = useAuth();
-  const [showLogoutConfirm, setShowLogoutConfirm] = React.useState(false);
   const [localChannelVolumes, setLocalChannelVolumes] = React.useState<number[]>([]);
   const channelVolumeRafRef = React.useRef<Map<number, number>>(new Map());
   const channelVolumePendingRef = React.useRef<Map<number, number>>(new Map());
@@ -139,7 +135,7 @@ export function VolumeMixer({
   const pendingEqRef = React.useRef<EqSettings | null>(null);
   
   // Slide notices
-  const { notices, pushNotice, dismiss } = useNotices();
+  const { notices, dismiss } = useNotices();
 
   const handleMasterVolumeDoubleClick = () => {
     if (masterVolumeRafRef.current !== null) {
@@ -253,20 +249,6 @@ export function VolumeMixer({
   }, []);
 
 
-  const handleLogout = () => {
-      setShowLogoutConfirm(true);
-  };
-
-  const confirmLogout = async () => {
-    setShowLogoutConfirm(false);
-    const { error } = await signOut();
-    if (error) {
-      pushNotice({ variant: 'error', message: 'Logout failed. Please try again.' })
-    } else {
-      pushNotice({ variant: 'success', message: 'Logged out successfully.' })
-    }
-  };
-
   return (
     <>
       {/* Slide-down notifications */}
@@ -278,24 +260,7 @@ export function VolumeMixer({
         } ${open ? 'translate-x-0' : 'translate-x-full'}`}>
         <div className={`flex items-center justify-between p-4 border-b ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'
           }`}>
-          {/* Logout Button (only shown when logged in) */}
-          {user ? (
-          <Button
-              onClick={handleLogout}
-            variant="outline"
-            size="sm"
-            disabled={loading}
-              className={`transition-all duration-200 ${theme === 'dark'
-                ? 'bg-red-600/20 border-red-500 text-red-300 hover:bg-red-500 hover:border-red-400 hover:text-red-200'
-                : 'bg-red-50 border-red-300 text-red-600 hover:bg-red-100 hover:border-red-400 hover:text-red-700'
-              }`}
-              title="Sign out"
-          >
-              <LogOut className="w-4 h-4" />
-          </Button>
-          ) : (
-            <div className="w-8" /> /* Spacer when not logged in */
-          )}
+          <div className="w-8" />
 
           <h2 className={`text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
             Mixer
@@ -580,17 +545,6 @@ export function VolumeMixer({
             </div>
           </div>
 
-      {/* Logout Confirmation */}
-      <ConfirmationDialog
-        open={showLogoutConfirm}
-        onOpenChange={setShowLogoutConfirm}
-        title="Sign out"
-        description="Are you sure you want to sign out?"
-        confirmText="Sign out"
-        variant="destructive"
-        onConfirm={confirmLogout}
-        theme={theme}
-      />
     </>
   );
 }

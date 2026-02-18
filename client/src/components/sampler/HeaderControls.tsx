@@ -237,12 +237,31 @@ export function HeaderControls({
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
-    const handleScroll = () => {
-      setHeaderCompact(window.scrollY > 24);
+    const HIDE_THRESHOLD = 40;
+    const SHOW_THRESHOLD = 8;
+    let rafId: number | null = null;
+
+    const applyCompactFromScroll = () => {
+      rafId = null;
+      const scrollY = Math.max(0, window.scrollY || window.pageYOffset || 0);
+      setHeaderCompact((prev) => {
+        if (!prev && scrollY > HIDE_THRESHOLD) return true;
+        if (prev && scrollY < SHOW_THRESHOLD) return false;
+        return prev;
+      });
     };
-    handleScroll();
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    return () => window.removeEventListener('scroll', handleScroll);
+
+    const onScroll = () => {
+      if (rafId !== null) return;
+      rafId = window.requestAnimationFrame(applyCompactFromScroll);
+    };
+
+    applyCompactFromScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+    };
   }, []);
   
   // Show greeting notification when user logs in
@@ -341,36 +360,39 @@ export function HeaderControls({
         }`}
       >
         <div
-          className={`overflow-hidden will-change-[max-height,opacity,transform] transition-all duration-300 ease-out ${
-            showBranding ? 'max-h-20 opacity-100 translate-y-0 mb-1' : 'max-h-0 opacity-0 -translate-y-1 mb-0 pointer-events-none'
+          className={`grid overflow-hidden will-change-[grid-template-rows,opacity,transform] transition-[grid-template-rows,opacity,transform,margin] duration-300 ease-out ${
+            showBranding ? 'opacity-100 translate-y-0 mb-1' : 'opacity-0 -translate-y-1 mb-0 pointer-events-none'
           }`}
+          style={{ gridTemplateRows: showBranding ? '1fr' : '0fr' }}
         >
-          <div className="flex items-center justify-center gap-4">
-            <button
-              type="button"
-              onClick={() => setAboutOpen(true)}
-              className="rounded-full transition-transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-              aria-label="About VDJV Sampler Pad"
-              tabIndex={showBranding ? 0 : -1}
-            >
-              <img
-                src="./assets/logo.png"
-                alt="VDJV Logo"
-                className="w-12 h-12 object-contain"
-              />
-            </button>
-            <h1
-              className={`font-bold text-red-600 transition-opacity duration-200 ${showBranding ? 'opacity-100' : 'opacity-0'} ${isMobileScreen
-                ? 'text-m'
-                : isMobileScreen
-                  ? 'text-l'
-                  : windowWidth < 1024
-                    ? 'text-xl'
-                    : 'text-2xl xl:text-3xl'
-                }`}
-            >
-              {getTitleText()}
-            </h1>
+          <div className="overflow-hidden">
+            <div className="flex items-center justify-center gap-4">
+              <button
+                type="button"
+                onClick={() => setAboutOpen(true)}
+                className="rounded-full transition-transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                aria-label="About VDJV Sampler Pad"
+                tabIndex={showBranding ? 0 : -1}
+              >
+                <img
+                  src="./assets/logo.png"
+                  alt="VDJV Logo"
+                  className="w-12 h-12 object-contain"
+                />
+              </button>
+              <h1
+                className={`font-bold text-red-600 transition-opacity duration-200 ${showBranding ? 'opacity-100' : 'opacity-0'} ${isMobileScreen
+                  ? 'text-m'
+                  : isMobileScreen
+                    ? 'text-l'
+                    : windowWidth < 1024
+                      ? 'text-xl'
+                      : 'text-2xl xl:text-3xl'
+                  }`}
+              >
+                {getTitleText()}
+              </h1>
+            </div>
           </div>
         </div>
 

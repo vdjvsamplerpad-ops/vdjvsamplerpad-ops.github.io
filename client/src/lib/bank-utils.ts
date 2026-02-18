@@ -15,6 +15,7 @@ export { keyCache };
 // LocalStorage keys for offline caching
 const ACCESSIBLE_BANKS_CACHE_KEY = 'vdjv-accessible-banks';
 const BANK_KEYS_CACHE_KEY = 'vdjv-bank-derived-keys';
+const BANK_ACCESS_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 interface CachedAccessibleBanks {
   userId: string;
@@ -37,7 +38,7 @@ export interface ResolvedBankMetadata {
 const metadataCache = new Map<string, ResolvedBankMetadata>();
 
 // Helper to get cached accessible banks
-function getCachedAccessibleBanks(userId: string): string[] | null {
+function getCachedAccessibleBanks(userId: string, options?: { allowStale?: boolean }): string[] | null {
   if (typeof window === 'undefined') return null;
   try {
     const cached = localStorage.getItem(ACCESSIBLE_BANKS_CACHE_KEY);
@@ -45,8 +46,9 @@ function getCachedAccessibleBanks(userId: string): string[] | null {
     const data: CachedAccessibleBanks = JSON.parse(cached);
     // Check if cache is for the same user
     if (data.userId !== userId) return null;
-    // Cache is valid for 24 hours
-    if (Date.now() - data.timestamp > 24 * 60 * 60 * 1000) return null;
+    // Fresh cache is valid for 24 hours. Stale cache is allowed for offline fallback.
+    if (!options?.allowStale && Date.now() - data.timestamp > BANK_ACCESS_CACHE_MAX_AGE_MS) return null;
+    if (!Array.isArray(data.bankIds)) return null;
     return data.bankIds;
   } catch {
     return null;
@@ -66,15 +68,16 @@ function setCachedAccessibleBanks(userId: string, bankIds: string[]): void {
 }
 
 // Helper to get cached bank derived keys
-function getCachedBankKeys(userId: string): Record<string, string> | null {
+function getCachedBankKeys(userId: string, options?: { allowStale?: boolean }): Record<string, string> | null {
   if (typeof window === 'undefined') return null;
   try {
     const cached = localStorage.getItem(BANK_KEYS_CACHE_KEY);
     if (!cached) return null;
     const data: CachedBankKeys = JSON.parse(cached);
     if (data.userId !== userId) return null;
-    // Cache is valid for 24 hours
-    if (Date.now() - data.timestamp > 24 * 60 * 60 * 1000) return null;
+    // Fresh cache is valid for 24 hours. Stale cache is allowed for offline fallback.
+    if (!options?.allowStale && Date.now() - data.timestamp > BANK_ACCESS_CACHE_MAX_AGE_MS) return null;
+    if (!data.keys || typeof data.keys !== 'object') return null;
     return data.keys;
   } catch {
     return null;
@@ -133,7 +136,7 @@ function removeFromCachedBankKeys(userId: string, bankId: string): void {
 }
 
 export function getCachedBankKeysForUser(userId: string): Record<string, string> {
-  return getCachedBankKeys(userId) || {};
+  return getCachedBankKeys(userId, { allowStale: true }) || {};
 }
 
 /**
@@ -152,20 +155,20 @@ export async function derivePassword(bankId: string): Promise<string> {
  * Encrypt a zip file with a password
  */
 export async function encryptZip(zip: JSZip, password: string): Promise<Blob> {
-  // JSZip doesn't support encryption directly, so we'll use a simple XOR encryption
-  // In production, you might want to use a more robust encryption library
+  // JSZip doesn't support encryption directly, so we apply XOR.
+  // Stream through chunks when possible to avoid large single ArrayBuffer allocations.
   const zipBlob = await zip.generateAsync({ type: 'blob' });
-  
-  // Convert blob to array buffer
+  const passwordBytes = new TextEncoder().encode(password);
+
+  const streamed = await xorTransformBlob(zipBlob, passwordBytes, 'application/octet-stream');
+  if (streamed) return streamed;
+
+  // Fallback for runtimes without stream support.
   const arrayBuffer = await zipBlob.arrayBuffer();
   const uint8Array = new Uint8Array(arrayBuffer);
-  
-  // Simple XOR encryption with password
-  const passwordBytes = new TextEncoder().encode(password);
   for (let i = 0; i < uint8Array.length; i++) {
     uint8Array[i] ^= passwordBytes[i % passwordBytes.length];
   }
-  
   return new Blob([uint8Array], { type: 'application/octet-stream' });
 }
 
@@ -173,17 +176,49 @@ export async function encryptZip(zip: JSZip, password: string): Promise<Blob> {
  * Decrypt a zip file with a password
  */
 export async function decryptZip(encryptedBlob: Blob, password: string): Promise<Blob> {
-  // Convert blob to array buffer
+  const passwordBytes = new TextEncoder().encode(password);
+
+  const streamed = await xorTransformBlob(encryptedBlob, passwordBytes, 'application/zip');
+  if (streamed) return streamed;
+
+  // Fallback for runtimes without stream support.
   const arrayBuffer = await encryptedBlob.arrayBuffer();
   const uint8Array = new Uint8Array(arrayBuffer);
-  
-  // Simple XOR decryption with password
-  const passwordBytes = new TextEncoder().encode(password);
   for (let i = 0; i < uint8Array.length; i++) {
     uint8Array[i] ^= passwordBytes[i % passwordBytes.length];
   }
-  
   return new Blob([uint8Array], { type: 'application/zip' });
+}
+
+async function xorTransformBlob(
+  sourceBlob: Blob,
+  passwordBytes: Uint8Array,
+  mimeType: string
+): Promise<Blob | null> {
+  try {
+    if (typeof sourceBlob.stream !== 'function') return null;
+
+    const reader = sourceBlob.stream().getReader();
+    const chunks: Uint8Array[] = [];
+    let globalOffset = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.length === 0) continue;
+
+      const out = new Uint8Array(value.length);
+      for (let i = 0; i < value.length; i++) {
+        out[i] = value[i] ^ passwordBytes[(globalOffset + i) % passwordBytes.length];
+      }
+      globalOffset += value.length;
+      chunks.push(out);
+    }
+
+    return new Blob(chunks, { type: mimeType });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -223,6 +258,7 @@ export async function isZipPasswordMatch(encryptedBlob: Blob, password: string):
 export async function getDerivedKey(bankId: string, userId: string): Promise<string | null> {
   const cacheKey = `${userId}-${bankId}`;
   const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
+  let allowStaleFallback = !isOnline;
 
   try {
     if (isOnline) {
@@ -233,7 +269,9 @@ export async function getDerivedKey(bankId: string, userId: string): Promise<str
         .eq('bank_id', bankId)
         .maybeSingle();
 
-      if (error || !access) {
+      if (error) {
+        allowStaleFallback = true;
+      } else if (!access) {
         keyCache.delete(cacheKey);
         removeFromCachedBankKeys(userId, bankId);
         return null;
@@ -245,24 +283,29 @@ export async function getDerivedKey(bankId: string, userId: string): Promise<str
         .eq('id', bankId)
         .maybeSingle();
 
-      if (bankError || !bank?.derived_key) {
+      if (bankError) {
+        allowStaleFallback = true;
+      } else if (!bank?.derived_key) {
         keyCache.delete(cacheKey);
         removeFromCachedBankKeys(userId, bankId);
         return null;
       }
 
-      keyCache.set(cacheKey, bank.derived_key);
-      addToCachedBankKeys(userId, bankId, bank.derived_key);
-      return bank.derived_key;
+      if (bank?.derived_key) {
+        keyCache.set(cacheKey, bank.derived_key);
+        addToCachedBankKeys(userId, bankId, bank.derived_key);
+        return bank.derived_key;
+      }
     }
   } catch (error) {
+    allowStaleFallback = true;
     console.error('Error getting derived key:', error);
   }
 
   if (keyCache.has(cacheKey)) {
     return keyCache.get(cacheKey)!;
   }
-  const cachedKeys = getCachedBankKeys(userId);
+  const cachedKeys = getCachedBankKeys(userId, { allowStale: allowStaleFallback });
   if (cachedKeys && cachedKeys[bankId]) {
     const derivedKey = cachedKeys[bankId];
     keyCache.set(cacheKey, derivedKey);
@@ -301,9 +344,10 @@ export async function grantBankAccess(userId: string, bankId: string): Promise<b
  */
 export async function hasBankAccess(userId: string, bankId: string): Promise<boolean> {
   const cachedAccessible = getCachedAccessibleBanks(userId);
+  const staleCachedAccessible = getCachedAccessibleBanks(userId, { allowStale: true });
   const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
   if (!isOnline) {
-    return cachedAccessible ? cachedAccessible.includes(bankId) : false;
+    return staleCachedAccessible ? staleCachedAccessible.includes(bankId) : false;
   }
 
   try {
@@ -315,12 +359,14 @@ export async function hasBankAccess(userId: string, bankId: string): Promise<boo
       .maybeSingle();
 
     if (error) {
+      if (staleCachedAccessible) return staleCachedAccessible.includes(bankId);
       if (cachedAccessible) return cachedAccessible.includes(bankId);
       return false;
     }
 
     return !!data;
   } catch (error) {
+    if (staleCachedAccessible) return staleCachedAccessible.includes(bankId);
     if (cachedAccessible) return cachedAccessible.includes(bankId);
     return false;
   }
@@ -374,10 +420,11 @@ export function parseBankIdFromFileName(fileName: string): string | null {
  */
 export async function listAccessibleBankIds(userId: string): Promise<string[]> {
   const cached = getCachedAccessibleBanks(userId);
+  const staleCached = getCachedAccessibleBanks(userId, { allowStale: true });
   const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
 
   if (!isOnline) {
-    return cached || [];
+    return staleCached || cached || [];
   }
   
   try {
@@ -387,7 +434,7 @@ export async function listAccessibleBankIds(userId: string): Promise<string[]> {
       .eq('user_id', userId);
     
     if (error || !data) {
-      return cached || [];
+      return staleCached || cached || [];
     }
     
     const bankIds = data.map((row: any) => row.bank_id as string);
@@ -397,7 +444,7 @@ export async function listAccessibleBankIds(userId: string): Promise<string[]> {
     return bankIds;
   } catch (error) {
     console.error('Error listing accessible banks:', error);
-    return cached || [];
+    return staleCached || cached || [];
   }
 }
 
