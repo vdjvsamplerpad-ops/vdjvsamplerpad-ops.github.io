@@ -2,83 +2,20 @@ import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Label } from '@/components/ui/label';
-import { Volume2, X, Square, Waves, SlidersHorizontal as Equalizer } from 'lucide-react';
-import { ChannelState, PlayingPadInfo, StopMode } from './types/sampler';
-import { createPortal } from 'react-dom';
-
-/** ---------- Slide-down notification system (local to mixer) ---------- */
-type Notice = { id: string; variant: 'success' | 'error' | 'info'; message: string }
-
-function useNotices() {
-  const [notices, setNotices] = React.useState<Notice[]>([])
-
-  const pushNotice = React.useCallback((n: Omit<Notice, 'id'>) => {
-    const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto) ? (crypto as any).randomUUID() : String(Date.now() + Math.random())
-    const notice: Notice = { id, ...n }
-    setNotices((arr) => [notice, ...arr])
-    // Auto-dismiss after 4s
-    setTimeout(() => dismiss(id), 4000)
-  }, [])
-
-  const dismiss = React.useCallback((id: string) => {
-    setNotices((arr) => arr.filter((n) => n.id !== id))
-  }, [])
-
-  return { notices, pushNotice, dismiss }
-}
-
-function NoticesPortal(
-  { notices, dismiss, theme }: { notices: Notice[]; dismiss: (id: string) => void; theme: 'light' | 'dark' }
-) {
-  if (typeof document === 'undefined') return null
-  return createPortal(
-    <div className="fixed top-0 left-0 right-0 z-[2147483647] flex justify-center pointer-events-none">
-      <div className="w-full max-w-xl px-3">
-        {notices.map((n) => (
-          <NoticeItem key={n.id} notice={n} dismiss={dismiss} theme={theme} />
-        ))}
-      </div>
-    </div>,
-    document.body
-  )
-}
-
-function NoticeItem({ notice, dismiss, theme }: { notice: Notice; dismiss: (id: string) => void; theme: 'light' | 'dark' }) {
-  const [show, setShow] = React.useState(false)
-  React.useEffect(() => {
-    const t = setTimeout(() => setShow(true), 10)
-    return () => clearTimeout(t)
-  }, [])
-
-  const base = 'pointer-events-auto mt-3 rounded-lg border px-4 py-3 shadow-lg transition-all duration-300'
-  const colors =
-    notice.variant === 'success'
-      ? (theme === 'dark' ? 'bg-green-600/90 border-green-500 text-white' : 'bg-green-600 text-white border-green-700')
-      : notice.variant === 'error'
-        ? (theme === 'dark' ? 'bg-red-600/90 border-red-500 text-white' : 'bg-red-600 text-white border-red-700')
-        : (theme === 'dark' ? 'bg-gray-800/90 border-gray-700 text-white' : 'bg-gray-900 text-white border-gray-800')
-
-  return (
-    <div
-      className={`${base} ${colors} ${show ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-3'}`}
-      onMouseEnter={() => setShow(true)}
-      onMouseLeave={() => setShow(true)}
-    >
-      <div className="flex items-start gap-3">
-        <div className="flex-1 text-sm">{notice.message}</div>
-        <button
-          className="text-white/80 hover:text-white"
-          onClick={() => dismiss(notice.id)}
-          aria-label="Dismiss"
-        >
-          ×
-        </button>
-      </div>
-    </div>
-  )
-}
-
-/** --------------------------------------------------------------------- */
+import {
+  ChevronDown,
+  ChevronUp,
+  Pause,
+  Play,
+  SlidersHorizontal as Equalizer,
+  Square,
+  Trash2,
+  Volume2,
+  Waves,
+  X
+} from 'lucide-react';
+import { ChannelDeckState, PlayingPadInfo, StopMode } from './types/sampler';
+import { loadWaveformPeaks, resampleWaveformPeaks } from '@/lib/waveform-peaks';
 
 interface EqSettings {
   low: number;
@@ -89,7 +26,8 @@ interface EqSettings {
 interface VolumeMixerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  channelStates: ChannelState[];
+  channelStates: ChannelDeckState[];
+  channelCount: number;
   legacyPlayingPads: PlayingPadInfo[];
   masterVolume: number;
   onMasterVolumeChange: (volume: number) => void;
@@ -97,23 +35,88 @@ interface VolumeMixerProps {
   onStopPad: (padId: string) => void;
   onChannelVolumeChange: (channelId: number, volume: number) => void;
   onStopChannel: (channelId: number) => void;
+  onPlayChannel: (channelId: number) => void;
+  onPauseChannel: (channelId: number) => void;
+  onSeekChannel: (channelId: number, ms: number) => void;
+  onUnloadChannel: (channelId: number) => void;
+  onArmChannelLoad: (channelId: number) => void;
+  onCancelChannelLoad: () => void;
+  armedLoadChannelId: number | null;
+  onSetChannelHotcue: (channelId: number, slotIndex: number, ms: number | null) => void;
+  onTriggerChannelHotcue: (channelId: number, slotIndex: number) => void;
+  onSetChannelCollapsed: (channelId: number, collapsed: boolean) => void;
+  stopMode: StopMode;
+  editMode: boolean;
   eqSettings: EqSettings;
   onEqChange: (settings: EqSettings) => void;
+  mixerEqCollapsed: boolean;
+  onMixerEqCollapsedChange: (collapsed: boolean) => void;
   theme: 'light' | 'dark';
   windowWidth: number;
 }
 
-const msToMMSS = (ms: number) => {
+const HOTCUE_SLOTS = [0, 1, 2, 3] as const;
+const HOTCUE_COLORS = [
+  { marker: 'bg-red-500', activeDark: 'border-red-500 text-red-200 bg-red-500/20', activeLight: 'border-red-400 text-red-700 bg-red-50' },
+  { marker: 'bg-blue-500', activeDark: 'border-blue-500 text-blue-200 bg-blue-500/20', activeLight: 'border-blue-400 text-blue-700 bg-blue-50' },
+  { marker: 'bg-emerald-500', activeDark: 'border-emerald-500 text-emerald-200 bg-emerald-500/20', activeLight: 'border-emerald-400 text-emerald-700 bg-emerald-50' },
+  { marker: 'bg-yellow-500', activeDark: 'border-yellow-500 text-yellow-200 bg-yellow-500/20', activeLight: 'border-yellow-400 text-yellow-700 bg-yellow-50' }
+] as const;
+
+const formatMs = (ms: number) => {
   const total = Math.max(0, Math.floor(ms / 1000));
-  const m = Math.floor(total / 60).toString().padStart(2, '0');
-  const s = (total % 60).toString().padStart(2, '0');
-  return `${m}:${s}`;
+  const minutes = Math.floor(total / 60).toString().padStart(2, '0');
+  const seconds = (total % 60).toString().padStart(2, '0');
+  return `${minutes}:${seconds}`;
+};
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+const createFallbackState = (channelId: number): ChannelDeckState => ({
+  channelId,
+  loadedPadRef: null,
+  isPlaying: false,
+  isPaused: false,
+  playheadMs: 0,
+  durationMs: 0,
+  channelVolume: 1,
+  hotcuesMs: [null, null, null, null],
+  hasLocalHotcueOverride: false,
+  collapsed: false,
+  waveformKey: null,
+  pad: null
+});
+
+type WaveformTarget = { channelId: number; audioUrl: string; cacheKey: string };
+const WAVEFORM_ANALYZE_STILL_RUNNING_MS = 12000;
+const MIXER_WAVEFORM_LOG_PREFIX = '[VolumeMixerWaveform]';
+
+const extractAudioUrlFromCacheKey = (cacheKey: string): string => {
+  if (!cacheKey) return '';
+  if (/^(blob:|data:|https?:|file:|\/)/.test(cacheKey)) return cacheKey;
+  const splitAt = cacheKey.indexOf(':');
+  if (splitAt < 0 || splitAt >= cacheKey.length - 1) return '';
+  return cacheKey.slice(splitAt + 1);
+};
+
+const truncateLogValue = (value: string, maxLength: number = 140): string => {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 24)}...${value.slice(-16)}`;
+};
+
+const logWaveformStatus = (message: string, details?: Record<string, unknown>) => {
+  if (details) {
+    console.info(`${MIXER_WAVEFORM_LOG_PREFIX} ${message}`, details);
+    return;
+  }
+  console.info(`${MIXER_WAVEFORM_LOG_PREFIX} ${message}`);
 };
 
 export function VolumeMixer({
   open,
   onOpenChange,
   channelStates,
+  channelCount,
   legacyPlayingPads,
   masterVolume,
   onMasterVolumeChange,
@@ -121,433 +124,787 @@ export function VolumeMixer({
   onStopPad,
   onChannelVolumeChange,
   onStopChannel,
+  onPlayChannel,
+  onPauseChannel,
+  onSeekChannel,
+  onUnloadChannel,
+  onArmChannelLoad,
+  onCancelChannelLoad,
+  armedLoadChannelId,
+  onSetChannelHotcue,
+  onTriggerChannelHotcue,
+  onSetChannelCollapsed,
+  stopMode,
+  editMode,
   eqSettings,
   onEqChange,
+  mixerEqCollapsed,
+  onMixerEqCollapsedChange,
   theme,
   windowWidth
 }: VolumeMixerProps) {
-  const [localChannelVolumes, setLocalChannelVolumes] = React.useState<number[]>([]);
+  const isMobile = windowWidth < 768;
+
+  const channelStateKey = channelStates
+    .map((channel) => [
+      channel.channelId,
+      channel.loadedPadRef?.bankId || '',
+      channel.loadedPadRef?.padId || '',
+      channel.pad?.padId || '',
+      channel.pad?.audioUrl || '',
+      channel.pad?.endMs || 0,
+      channel.isPlaying ? 1 : 0,
+      channel.isPaused ? 1 : 0,
+      channel.playheadMs || 0,
+      channel.durationMs || 0,
+      channel.channelVolume,
+      channel.collapsed ? 1 : 0,
+      channel.waveformKey || '',
+      ...channel.hotcuesMs.map((cue) => cue ?? '')
+    ].join('~'))
+    .join('||');
+
+  const channelStateMap = React.useMemo(() => {
+    const map = new Map<number, ChannelDeckState>();
+    channelStates.forEach((channel) => map.set(channel.channelId, channel));
+    return map;
+  }, [channelStateKey, channelStates]);
+
+  const visibleChannels = React.useMemo(() => {
+    const items: ChannelDeckState[] = [];
+    for (let i = 1; i <= channelCount; i += 1) {
+      items.push(channelStateMap.get(i) || createFallbackState(i));
+    }
+    return items;
+  }, [channelCount, channelStateMap]);
+
+  const [channelVolumeDrafts, setChannelVolumeDrafts] = React.useState<Record<number, number>>({});
+  const [channelWaveforms, setChannelWaveforms] = React.useState<Record<number, { key: string; peaks: number[] }>>({});
+  const [waveformByKey, setWaveformByKey] = React.useState<Record<string, number[]>>({});
+  const [waveformLoadingByChannel, setWaveformLoadingByChannel] = React.useState<Record<number, true>>({});
+  const waveformRequestedKeyRef = React.useRef<Map<number, string>>(new Map());
+  const waveformExpectedKeyRef = React.useRef<Map<number, string>>(new Map());
+  const waveformStartedAtRef = React.useRef<Map<number, number>>(new Map());
+  const waveformTimeoutRef = React.useRef<Map<number, number>>(new Map());
+  const isMountedRef = React.useRef(true);
   const channelVolumeRafRef = React.useRef<Map<number, number>>(new Map());
-  const channelVolumePendingRef = React.useRef<Map<number, number>>(new Map());
-  const masterVolumeRafRef = React.useRef<number | null>(null);
-  const pendingMasterVolumeRef = React.useRef<number | null>(null);
-  const eqRafRef = React.useRef<number | null>(null);
-  const pendingEqRef = React.useRef<EqSettings | null>(null);
-  
-  // Slide notices
-  const { notices, dismiss } = useNotices();
+  const pendingChannelVolumeRef = React.useRef<Map<number, number>>(new Map());
+  const activeVolumeDragRef = React.useRef<Set<number>>(new Set());
 
-  const handleMasterVolumeDoubleClick = () => {
-    if (masterVolumeRafRef.current !== null) {
-      cancelAnimationFrame(masterVolumeRafRef.current);
-      masterVolumeRafRef.current = null;
+  const clearWaveformWatch = React.useCallback((channelId: number) => {
+    waveformStartedAtRef.current.delete(channelId);
+    const timeoutId = waveformTimeoutRef.current.get(channelId);
+    if (typeof timeoutId === 'number') {
+      window.clearTimeout(timeoutId);
+      waveformTimeoutRef.current.delete(channelId);
     }
-    pendingMasterVolumeRef.current = null;
-    onMasterVolumeChange(1); // Reset to 100%
-  };
+  }, []);
 
-  const handleEqDoubleClick = (type: keyof EqSettings) => {
-    if (eqRafRef.current !== null) {
-      cancelAnimationFrame(eqRafRef.current);
-      eqRafRef.current = null;
-    }
-    pendingEqRef.current = null;
-    onEqChange({ ...eqSettings, [type]: 0 });
-  };
-
-  React.useEffect(() => {
-    setLocalChannelVolumes((prev) => {
-      if (prev.length !== channelStates.length) {
-        return channelStates.map((channel) => channel.channelVolume);
+  const setWaveformLoading = React.useCallback((channelId: number, loading: boolean) => {
+    setWaveformLoadingByChannel((prev) => {
+      const current = prev[channelId] === true;
+      if (current === loading) return prev;
+      const next = { ...prev };
+      if (loading) {
+        next[channelId] = true;
+      } else {
+        delete next[channelId];
       }
-      return channelStates.map((channel, index) => {
-        if (channelVolumePendingRef.current.has(channel.channelId)) {
-          return prev[index] ?? channel.channelVolume;
-        }
-        return channel.channelVolume;
-      });
+      return next;
     });
-  }, [channelStates]);
-
-  const scheduleChannelVolumeUpdate = React.useCallback(
-    (channelId: number, volume: number) => {
-      channelVolumePendingRef.current.set(channelId, volume);
-      if (channelVolumeRafRef.current.has(channelId)) return;
-      const rafId = requestAnimationFrame(() => {
-        const next = channelVolumePendingRef.current.get(channelId);
-        if (typeof next === 'number') {
-          onChannelVolumeChange(channelId, next);
-        }
-        channelVolumePendingRef.current.delete(channelId);
-        channelVolumeRafRef.current.delete(channelId);
-      });
-      channelVolumeRafRef.current.set(channelId, rafId);
-    },
-    [onChannelVolumeChange]
-  );
-
-  const handleChannelSliderChange = React.useCallback(
-    (channelIndex: number, channelId: number, value: number) => {
-      setLocalChannelVolumes((prev) => {
-        const next = [...prev];
-        next[channelIndex] = value;
-        return next;
-      });
-      scheduleChannelVolumeUpdate(channelId, value);
-    },
-    [scheduleChannelVolumeUpdate]
-  );
-
-  const scheduleMasterVolumeUpdate = React.useCallback(
-    (volume: number) => {
-      pendingMasterVolumeRef.current = volume;
-      if (masterVolumeRafRef.current !== null) return;
-      masterVolumeRafRef.current = requestAnimationFrame(() => {
-        const next = pendingMasterVolumeRef.current;
-        if (typeof next === 'number') {
-          onMasterVolumeChange(next);
-        }
-        pendingMasterVolumeRef.current = null;
-        masterVolumeRafRef.current = null;
-      });
-    },
-    [onMasterVolumeChange]
-  );
-
-  const scheduleEqUpdate = React.useCallback(
-    (next: EqSettings) => {
-      pendingEqRef.current = next;
-      if (eqRafRef.current !== null) return;
-      eqRafRef.current = requestAnimationFrame(() => {
-        const pending = pendingEqRef.current;
-        if (pending) {
-          onEqChange(pending);
-        }
-        pendingEqRef.current = null;
-        eqRafRef.current = null;
-      });
-    },
-    [onEqChange]
-  );
+  }, []);
 
   React.useEffect(() => {
+    isMountedRef.current = true;
     return () => {
-      channelVolumeRafRef.current.forEach((rafId) => cancelAnimationFrame(rafId));
+      isMountedRef.current = false;
+      channelVolumeRafRef.current.forEach((rafId) => window.cancelAnimationFrame(rafId));
       channelVolumeRafRef.current.clear();
-      channelVolumePendingRef.current.clear();
-      if (masterVolumeRafRef.current !== null) {
-        cancelAnimationFrame(masterVolumeRafRef.current);
-        masterVolumeRafRef.current = null;
-      }
-      pendingMasterVolumeRef.current = null;
-      if (eqRafRef.current !== null) {
-        cancelAnimationFrame(eqRafRef.current);
-        eqRafRef.current = null;
-      }
-      pendingEqRef.current = null;
+      pendingChannelVolumeRef.current.clear();
+      waveformTimeoutRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      waveformTimeoutRef.current.clear();
+      waveformStartedAtRef.current.clear();
     };
   }, []);
 
+  React.useEffect(() => {
+    setChannelVolumeDrafts((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      const activeIds = new Set(visibleChannels.map((channel) => channel.channelId));
+
+      visibleChannels.forEach((channel) => {
+        if (activeVolumeDragRef.current.has(channel.channelId)) return;
+        if (typeof next[channel.channelId] !== 'number' || Math.abs(next[channel.channelId] - channel.channelVolume) > 0.002) {
+          next[channel.channelId] = channel.channelVolume;
+          changed = true;
+        }
+      });
+
+      Object.keys(next).forEach((key) => {
+        const id = Number(key);
+        if (!activeIds.has(id)) {
+          delete next[id];
+          changed = true;
+        }
+      });
+
+      return changed ? next : prev;
+    });
+  }, [visibleChannels]);
+
+  const scheduleChannelVolume = React.useCallback((channelId: number, nextVolume: number) => {
+    pendingChannelVolumeRef.current.set(channelId, nextVolume);
+    if (channelVolumeRafRef.current.has(channelId)) return;
+    const rafId = window.requestAnimationFrame(() => {
+      channelVolumeRafRef.current.delete(channelId);
+      const pending = pendingChannelVolumeRef.current.get(channelId);
+      pendingChannelVolumeRef.current.delete(channelId);
+      if (typeof pending !== 'number') return;
+      onChannelVolumeChange(channelId, pending);
+    });
+    channelVolumeRafRef.current.set(channelId, rafId);
+  }, [onChannelVolumeChange]);
+
+  const flushChannelVolume = React.useCallback((channelId: number, nextVolume: number) => {
+    const rafId = channelVolumeRafRef.current.get(channelId);
+    if (typeof rafId === 'number') {
+      window.cancelAnimationFrame(rafId);
+      channelVolumeRafRef.current.delete(channelId);
+    }
+    pendingChannelVolumeRef.current.delete(channelId);
+    onChannelVolumeChange(channelId, nextVolume);
+  }, [onChannelVolumeChange]);
+
+  const handleChannelVolumeDrag = React.useCallback((channelId: number, nextVolume: number) => {
+    activeVolumeDragRef.current.add(channelId);
+    setChannelVolumeDrafts((prev) => ({
+      ...prev,
+      [channelId]: nextVolume
+    }));
+    scheduleChannelVolume(channelId, nextVolume);
+  }, [scheduleChannelVolume]);
+
+  const handleChannelVolumeCommit = React.useCallback((channelId: number, nextVolume: number) => {
+    activeVolumeDragRef.current.delete(channelId);
+    flushChannelVolume(channelId, nextVolume);
+  }, [flushChannelVolume]);
+
+  const waveformTargets = React.useMemo<WaveformTarget[]>(() => {
+    return visibleChannels.map((channel) => {
+      const keyAudioUrl = extractAudioUrlFromCacheKey(channel.waveformKey || '');
+      const audioUrl = channel.pad?.audioUrl || keyAudioUrl;
+      const cacheKey = audioUrl
+        ? (channel.waveformKey || `${channel.pad?.padId || channel.channelId}:${audioUrl}`)
+        : '';
+      return {
+        channelId: channel.channelId,
+        audioUrl,
+        cacheKey
+      };
+    });
+  }, [visibleChannels]);
+
+  React.useEffect(() => {
+    const targets = waveformTargets;
+    const expected = new Map<number, string>();
+    targets.forEach((target) => {
+      if (target.cacheKey) {
+        expected.set(target.channelId, target.cacheKey);
+      }
+    });
+    waveformExpectedKeyRef.current = expected;
+    setWaveformLoadingByChannel((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      Object.keys(next).forEach((id) => {
+        const channelId = Number(id);
+        if (!expected.has(channelId)) {
+          delete next[channelId];
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+
+    waveformRequestedKeyRef.current.forEach((key, channelId) => {
+      const nextKey = expected.get(channelId);
+      if (!nextKey || nextKey !== key) {
+        logWaveformStatus('Drop stale waveform request', {
+          channelId,
+          staleKey: truncateLogValue(key),
+          expectedKey: nextKey ? truncateLogValue(nextKey) : null
+        });
+        clearWaveformWatch(channelId);
+        waveformRequestedKeyRef.current.delete(channelId);
+        setWaveformLoading(channelId, false);
+      }
+    });
+
+    setChannelWaveforms((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      Object.keys(next).forEach((id) => {
+        const channelId = Number(id);
+        const nextKey = expected.get(channelId);
+        if (!nextKey || next[channelId]?.key !== nextKey) {
+          delete next[channelId];
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+
+    targets.forEach((target) => {
+      const audioUrl = target.audioUrl;
+      if (!audioUrl) return;
+      if (waveformRequestedKeyRef.current.get(target.channelId) === target.cacheKey) return;
+      clearWaveformWatch(target.channelId);
+      const startedAt = Date.now();
+      waveformStartedAtRef.current.set(target.channelId, startedAt);
+      waveformRequestedKeyRef.current.set(target.channelId, target.cacheKey);
+      setWaveformLoading(target.channelId, true);
+      const timeoutId = window.setTimeout(() => {
+        if (!isMountedRef.current) return;
+        const expectedKey = waveformExpectedKeyRef.current.get(target.channelId);
+        const requestedKey = waveformRequestedKeyRef.current.get(target.channelId);
+        if (expectedKey !== target.cacheKey || requestedKey !== target.cacheKey) return;
+        const elapsedMs = Date.now() - startedAt;
+        logWaveformStatus('Still analyzing waveform', {
+          channelId: target.channelId,
+          elapsedMs,
+          cacheKey: truncateLogValue(target.cacheKey)
+        });
+      }, WAVEFORM_ANALYZE_STILL_RUNNING_MS);
+      waveformTimeoutRef.current.set(target.channelId, timeoutId);
+      logWaveformStatus('Waveform decode started', {
+        channelId: target.channelId,
+        cacheKey: truncateLogValue(target.cacheKey),
+        audioUrl: truncateLogValue(audioUrl)
+      });
+      void loadWaveformPeaks(audioUrl, target.cacheKey)
+        .then((waveform) => {
+          if (!isMountedRef.current) return;
+          const elapsedMs = Date.now() - startedAt;
+          if (waveformExpectedKeyRef.current.get(target.channelId) !== target.cacheKey) {
+            logWaveformStatus('Waveform result ignored (stale key)', {
+              channelId: target.channelId,
+              elapsedMs,
+              cacheKey: truncateLogValue(target.cacheKey)
+            });
+            clearWaveformWatch(target.channelId);
+            setWaveformLoading(target.channelId, false);
+            if (waveformRequestedKeyRef.current.get(target.channelId) === target.cacheKey) {
+              waveformRequestedKeyRef.current.delete(target.channelId);
+            }
+            return;
+          }
+          clearWaveformWatch(target.channelId);
+          setWaveformLoading(target.channelId, false);
+          logWaveformStatus('Waveform decode complete', {
+            channelId: target.channelId,
+            elapsedMs,
+            points: waveform.peaks.length,
+            cacheKey: truncateLogValue(target.cacheKey)
+          });
+          setWaveformByKey((prev) => {
+            const existingByKey = prev[target.cacheKey];
+            const existingByAudio = prev[target.audioUrl];
+            if (existingByKey === waveform.peaks && existingByAudio === waveform.peaks) return prev;
+            return {
+              ...prev,
+              [target.cacheKey]: waveform.peaks,
+              [target.audioUrl]: waveform.peaks
+            };
+          });
+          setChannelWaveforms((prev) => {
+            const existing = prev[target.channelId];
+            if (existing?.key === target.cacheKey && existing.peaks === waveform.peaks) return prev;
+            return {
+              ...prev,
+              [target.channelId]: {
+                key: target.cacheKey,
+                peaks: waveform.peaks
+              }
+            };
+          });
+        })
+        .catch((error) => {
+          if (!isMountedRef.current) return;
+          const elapsedMs = Date.now() - startedAt;
+          clearWaveformWatch(target.channelId);
+          setWaveformLoading(target.channelId, false);
+          if (waveformExpectedKeyRef.current.get(target.channelId) !== target.cacheKey) {
+            logWaveformStatus('Waveform decode error ignored (stale key)', {
+              channelId: target.channelId,
+              elapsedMs,
+              cacheKey: truncateLogValue(target.cacheKey),
+              error: error instanceof Error ? error.message : String(error)
+            });
+            return;
+          }
+          if (waveformRequestedKeyRef.current.get(target.channelId) === target.cacheKey) {
+            waveformRequestedKeyRef.current.delete(target.channelId);
+          }
+          logWaveformStatus('Waveform decode failed', {
+            channelId: target.channelId,
+            elapsedMs,
+            cacheKey: truncateLogValue(target.cacheKey),
+            error: error instanceof Error ? error.message : String(error)
+          });
+          console.warn(`Failed to decode mixer waveform for CH${target.channelId}:`, error);
+        });
+    });
+  }, [clearWaveformWatch, setWaveformLoading, waveformTargets]);
+
+  const waveformProfiles = React.useMemo(() => {
+    const map = new Map<number, number[]>();
+    visibleChannels.forEach((channel) => {
+      const points = channel.collapsed ? 56 : 96;
+      const targetKey = channel.waveformKey || (
+        channel.pad?.audioUrl
+          ? `${channel.pad?.padId || channel.channelId}:${channel.pad.audioUrl}`
+          : ''
+      );
+      const entry = channelWaveforms[channel.channelId];
+      const targetAudioUrl = channel.pad?.audioUrl || extractAudioUrlFromCacheKey(targetKey);
+      let source: number[] | undefined;
+
+      if (entry?.peaks?.length) {
+        if (entry.key === targetKey) {
+          source = entry.peaks;
+        } else if (targetAudioUrl && extractAudioUrlFromCacheKey(entry.key) === targetAudioUrl) {
+          // Guard against transient key drift while channel state updates.
+          source = entry.peaks;
+        }
+      }
+
+      if (!source && targetKey) {
+        const keyed = waveformByKey[targetKey];
+        if (Array.isArray(keyed) && keyed.length > 0) {
+          source = keyed;
+        }
+      }
+
+      if (!source && targetAudioUrl) {
+        const keyedByUrl = waveformByKey[targetAudioUrl];
+        if (Array.isArray(keyedByUrl) && keyedByUrl.length > 0) {
+          source = keyedByUrl;
+        }
+      }
+
+      if (!source && targetAudioUrl) {
+        const keyedByAudio = Object.entries(waveformByKey).find(([key, peaks]) => (
+          Array.isArray(peaks)
+          && peaks.length > 0
+          && extractAudioUrlFromCacheKey(key) === targetAudioUrl
+        ));
+        if (keyedByAudio) {
+          source = keyedByAudio[1];
+        }
+      }
+
+      if (!source && entry?.peaks?.length) {
+        source = entry.peaks;
+      }
+
+      if (source && source.length > 0) {
+        map.set(channel.channelId, resampleWaveformPeaks(source, points));
+      } else {
+        map.set(channel.channelId, []);
+      }
+    });
+    return map;
+  }, [channelWaveforms, visibleChannels, waveformByKey]);
+
+  const handleWaveformSeek = React.useCallback((event: React.MouseEvent<HTMLDivElement>, channel: ChannelDeckState) => {
+    const duration = Math.max(1, channel.pad?.endMs || channel.durationMs || 0);
+    if (duration <= 1) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = clamp(event.clientX - rect.left, 0, rect.width);
+    const ratio = rect.width > 0 ? x / rect.width : 0;
+    onSeekChannel(channel.channelId, ratio * duration);
+  }, [onSeekChannel]);
+
+  const handleHotcuePress = React.useCallback((channel: ChannelDeckState, slotIndex: number) => {
+    if (editMode) {
+      const existing = channel.hotcuesMs[slotIndex];
+      if (typeof existing === 'number') {
+        onSetChannelHotcue(channel.channelId, slotIndex, null);
+      } else {
+        onSetChannelHotcue(channel.channelId, slotIndex, Math.max(0, channel.playheadMs || 0));
+      }
+      return;
+    }
+    onTriggerChannelHotcue(channel.channelId, slotIndex);
+  }, [editMode, onSetChannelHotcue, onTriggerChannelHotcue]);
+
+  const panelClasses = theme === 'dark'
+    ? 'bg-gray-800/95 border-gray-700 text-white perf-high:backdrop-blur-md'
+    : 'bg-white/95 border-gray-200 text-gray-900 perf-high:backdrop-blur-md';
+
+  const sectionClasses = theme === 'dark'
+    ? 'bg-gray-900/60 border-gray-700 perf-high:backdrop-blur-sm shadow-sm'
+    : 'bg-gray-50/60 border-gray-200 perf-high:backdrop-blur-sm shadow-sm';
 
   return (
-    <>
-      {/* Slide-down notifications */}
-      <NoticesPortal notices={notices} dismiss={dismiss} theme={theme} />
-
-      <div className={`fixed inset-y-0 right-0 z-50 w-64 border-l transition-transform duration-300 will-change-transform ${theme === 'dark'
-        ? 'bg-gray-800 border-gray-700'
-        : 'bg-white border-gray-200'
-        } ${open ? 'translate-x-0' : 'translate-x-full'}`}>
-        <div className={`flex items-center justify-between p-4 border-b ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-          }`}>
-          <div className="w-8" />
-
-          <h2 className={`text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-            Mixer
-          </h2>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onOpenChange(false)}
-            className={theme === 'dark'
-              ? 'h-8 w-8 p-0 border border-red-500/50 bg-red-900/40 text-red-300 hover:bg-red-800/60 hover:text-red-100'
-              : 'h-8 w-8 p-0 border border-red-300 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700'}
-            title="Close Mixer"
-          >
-            <X className="w-4 h-4" />
-          </Button>
+    <div className={`fixed inset-y-0 right-0 z-50 w-[28rem] max-w-[95vw] border-l shadow-2xl transition-transform duration-300 ${panelClasses} ${open ? 'translate-x-0' : 'translate-x-full'}`}>
+      <div className={`flex items-center justify-between px-4 py-3 border-b ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`}>
+        <div>
+          <h2 className="text-sm font-semibold">Mixer Engine V2</h2>
+          <p className={`text-[11px] ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+            {channelCount} loadable channels, stop mode: {stopMode}
+          </p>
         </div>
+        <Button
+          variant="outline"
+          size="icon"
+          onClick={() => onOpenChange(false)}
+          className={theme === 'dark'
+            ? 'h-8 w-8 border-red-500/60 bg-red-900/30 text-red-300 hover:bg-red-800/60'
+            : 'h-8 w-8 border-red-300 bg-red-50 text-red-600 hover:bg-red-100'}
+          title="Close Mixer"
+        >
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
 
-        <div className="p-4 space-y-6 max-h-[calc(100vh-80px)] overflow-y-auto">
-          {/* Master Volume */}
-          <div className="space-y-3">
-            <Label
-              className={`font-medium flex items-center gap-2 cursor-pointer ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}
-              onDoubleClick={handleMasterVolumeDoubleClick}
-              title="Double-click to reset to 100%"
+      <div className="h-[calc(100vh-64px)] overflow-y-auto p-3 space-y-3">
+        {editMode && (
+          <div className={`rounded-md border px-3 py-2 text-xs font-semibold tracking-wide ${theme === 'dark' ? 'border-amber-500 bg-amber-600/20 text-amber-200' : 'border-amber-400 bg-amber-50 text-amber-800'}`}>
+            HOTCUE SET MODE ACTIVE
+            <div className={`mt-1 text-[11px] font-normal ${theme === 'dark' ? 'text-amber-100/90' : 'text-amber-700'}`}>
+              Tap any hotcue button to set or clear at the current playhead.
+            </div>
+          </div>
+        )}
+
+        <section className={`rounded-lg border p-3 ${sectionClasses}`}>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <Label className="text-xs font-semibold flex items-center gap-2">
+              <Volume2 className="h-4 w-4" /> Master and EQ
+            </Label>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2"
+              onClick={() => onMixerEqCollapsedChange(!mixerEqCollapsed)}
             >
-              <Volume2 className="w-4 h-4" />
-              Master Volume: {Math.round(masterVolume * 100)}%
-            </Label>
-            <Slider
-              value={[masterVolume * 100]}
-              onValueChange={([value]) => scheduleMasterVolumeUpdate(value / 100)}
-              max={100}
-              min={0}
-              step={1}
-              className="w-full cursor-pointer"
-              onDoubleClick={handleMasterVolumeDoubleClick}
-              title="Double-click to reset"
-            />
+              {mixerEqCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+            </Button>
           </div>
 
-          {/* Master EQ */}
-          <div className="space-y-3">
-            <Label className={`font-medium flex items-center gap-2 ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-              <Equalizer className="w-4 h-4" />
-              Master EQ
-            </Label>
-
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
-                <Label
-                  className="text-xs cursor-pointer"
-                  onDoubleClick={() => handleEqDoubleClick('high')}
-                  title="Double-click to reset"
-                >
-                  High: {eqSettings.high > 0 ? '+' : ''}{eqSettings.high}dB
-                </Label>
+          {!mixerEqCollapsed && (
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <div className="text-[11px] text-gray-500 dark:text-gray-400">Master Volume {Math.round(masterVolume * 100)}%</div>
+                <Slider
+                  value={[masterVolume * 100]}
+                  onValueChange={([value]) => onMasterVolumeChange(value / 100)}
+                  min={0}
+                  max={100}
+                  step={1}
+                />
               </div>
-              <Slider
-                value={[eqSettings.high]}
-                onValueChange={([value]) => scheduleEqUpdate({ ...eqSettings, high: value })}
-                max={12}
-                min={-12}
-                step={1}
-                className="w-full cursor-pointer"
-                onDoubleClick={() => handleEqDoubleClick('high')}
-              />
-
-              <div className="flex justify-between items-center">
-                <Label
-                  className="text-xs cursor-pointer"
-                  onDoubleClick={() => handleEqDoubleClick('mid')}
-                  title="Double-click to reset"
-                >
-                  Mid: {eqSettings.mid > 0 ? '+' : ''}{eqSettings.mid}dB
-                </Label>
+              <div className="space-y-1">
+                <div className="text-[11px] text-gray-500 dark:text-gray-400">High {eqSettings.high > 0 ? '+' : ''}{eqSettings.high}dB</div>
+                <Slider
+                  value={[eqSettings.high]}
+                  onValueChange={([value]) => onEqChange({ ...eqSettings, high: value })}
+                  min={-12}
+                  max={12}
+                  step={1}
+                />
               </div>
-              <Slider
-                value={[eqSettings.mid]}
-                onValueChange={([value]) => scheduleEqUpdate({ ...eqSettings, mid: value })}
-                max={12}
-                min={-12}
-                step={1}
-                className="w-full cursor-pointer"
-                onDoubleClick={() => handleEqDoubleClick('mid')}
-              />
-
-              <div className="flex justify-between items-center">
-                <Label
-                  className="text-xs cursor-pointer"
-                  onDoubleClick={() => handleEqDoubleClick('low')}
-                  title="Double-click to reset"
-                >
-                  Low: {eqSettings.low > 0 ? '+' : ''}{eqSettings.low}dB
-                </Label>
+              <div className="space-y-1">
+                <div className="text-[11px] text-gray-500 dark:text-gray-400">Mid {eqSettings.mid > 0 ? '+' : ''}{eqSettings.mid}dB</div>
+                <Slider
+                  value={[eqSettings.mid]}
+                  onValueChange={([value]) => onEqChange({ ...eqSettings, mid: value })}
+                  min={-12}
+                  max={12}
+                  step={1}
+                />
               </div>
-              <Slider
-                value={[eqSettings.low]}
-                onValueChange={([value]) => scheduleEqUpdate({ ...eqSettings, low: value })}
-                max={12}
-                min={-12}
-                step={1}
-                className="w-full cursor-pointer"
-                onDoubleClick={() => handleEqDoubleClick('low')}
-              />
-        </div>
-          </div>
+              <div className="space-y-1">
+                <div className="text-[11px] text-gray-500 dark:text-gray-400">Low {eqSettings.low > 0 ? '+' : ''}{eqSettings.low}dB</div>
+                <Slider
+                  value={[eqSettings.low]}
+                  onValueChange={([value]) => onEqChange({ ...eqSettings, low: value })}
+                  min={-12}
+                  max={12}
+                  step={1}
+                />
+              </div>
+            </div>
+          )}
+        </section>
 
-          {/* Currently Playing Pads */}
-          <div className="space-y-3">
-            <Label className={`font-medium flex items-center gap-2 ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-              <Waves className="w-4 h-4" />
-              Channels ({channelStates.filter((c) => c.pad).length}/8)
-            </Label>
+        <section className={`rounded-lg border p-3 ${sectionClasses}`}>
+          <Label className="text-xs font-semibold flex items-center gap-2 mb-2">
+            <Equalizer className="h-4 w-4" />
+            Channel Decks
+          </Label>
+          <div className="space-y-2">
+            {visibleChannels.map((channel) => {
+              const loaded = Boolean(channel.pad && channel.loadedPadRef);
+              const duration = Math.max(1, channel.pad?.endMs || channel.durationMs || 0);
+              const playhead = clamp(channel.playheadMs || 0, 0, duration);
+              const progressPct = duration > 0 ? (playhead / duration) * 100 : 0;
+              const isLoadArmed = armedLoadChannelId === channel.channelId;
+              const isOtherChannelArmed = armedLoadChannelId !== null && armedLoadChannelId !== channel.channelId;
+              const waveform = waveformProfiles.get(channel.channelId) || [];
+              const isWaveformLoading = waveformLoadingByChannel[channel.channelId] === true;
+              const displayedVolume = clamp(
+                typeof channelVolumeDrafts[channel.channelId] === 'number'
+                  ? channelVolumeDrafts[channel.channelId]
+                  : channel.channelVolume,
+                0,
+                1
+              );
 
-            <div className="space-y-2 max-h-128 overflow-y-auto">
-              {channelStates.map((channel, index) => {
-                const playingPad = channel.pad;
-                const pp = playingPad as PlayingPadInfo & { currentMs?: number; endMs?: number };
-                const isActive = !!playingPad;
-                const localVolume = localChannelVolumes[index] ?? channel.channelVolume;
+              return (
+                <div
+                  key={channel.channelId}
+                  className={`rounded-md border ${theme === 'dark' ? 'border-gray-700 bg-gray-950/40' : 'border-gray-200 bg-white'} ${channel.collapsed ? 'p-2' : 'p-2.5'}`}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <div className={`text-[10px] font-semibold rounded px-1.5 py-0.5 ${theme === 'dark' ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-700'}`}>
+                      CH {channel.channelId}
+                    </div>
+                    <div className="min-w-0 flex-1 text-[11px] truncate" title={channel.pad ? `${channel.pad.padName} (${channel.pad.bankName})` : 'No sampler loaded'}>
+                      {channel.pad ? `${channel.pad.padName} (${channel.pad.bankName})` : 'No sampler loaded'}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className={`h-7 px-2 text-[10px] ${isLoadArmed
+                        ? (theme === 'dark'
+                          ? 'border-emerald-400 bg-emerald-900/40 text-emerald-200'
+                          : 'border-emerald-400 bg-emerald-50 text-emerald-700')
+                        : ''}`}
+                      onClick={() => {
+                        if (isLoadArmed) onCancelChannelLoad();
+                        else onArmChannelLoad(channel.channelId);
+                      }}
+                    >
+                      {isLoadArmed ? 'Waiting Pad...' : 'Load'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => onSetChannelCollapsed(channel.channelId, !channel.collapsed)}
+                      title={channel.collapsed ? 'Expand channel' : 'Collapse channel'}
+                    >
+                      {channel.collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+                    </Button>
+                  </div>
 
-                return (
+                  {(isLoadArmed || isOtherChannelArmed) && (
+                    <div className={`mt-1 text-[10px] ${theme === 'dark' ? 'text-emerald-300/90' : 'text-emerald-700'}`}>
+                      {isLoadArmed
+                        ? `Tap highlighted pad to load CH ${channel.channelId}.`
+                        : `CH ${armedLoadChannelId} is waiting for pad selection.`}
+                    </div>
+                  )}
+
+                  <div className="mt-1.5 flex items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => (channel.isPlaying ? onPauseChannel(channel.channelId) : onPlayChannel(channel.channelId))}
+                      disabled={!loaded}
+                      title={channel.isPlaying ? 'Pause' : 'Play'}
+                    >
+                      {channel.isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => onStopChannel(channel.channelId)}
+                      disabled={!loaded}
+                      title="Stop"
+                    >
+                      <Square className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => onUnloadChannel(channel.channelId)}
+                      disabled={!loaded}
+                      title="Unload"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                    <div className="min-w-0 flex-1 text-[10px] text-right text-gray-500 dark:text-gray-400">
+                      {formatMs(playhead)} / {formatMs(duration)}
+                    </div>
+                  </div>
+
                   <div
-                    key={channel.channelId}
-                    className={`p-2 rounded-lg border transition-all ${isActive
-                      ? (theme === 'dark' ? 'bg-green-900 border-green-600' : 'bg-green-50 border-green-300')
-                      : (theme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200')
-                      }`}
+                    className={`relative mt-1.5 rounded border cursor-pointer overflow-hidden ${channel.collapsed ? 'h-4' : 'h-11'} ${theme === 'dark' ? 'border-gray-700 bg-gray-900' : 'border-gray-300 bg-gray-100'}`}
+                    onClick={(event) => handleWaveformSeek(event, channel)}
+                    title={loaded ? 'Seek using waveform' : 'Load a sampler first'}
                   >
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className={`text-xs font-semibold ${theme === 'dark' ? 'text-gray-200' : 'text-gray-700'}`}>
-                        CH {channel.channelId}
-                      </div>
-                      <div className="flex-1 min-w-0" />
-                      <Button
-                        onClick={() => onStopChannel(channel.channelId)}
-                        variant="outline"
-                        size="sm"
-                        disabled={!isActive}
-                        className={`w-5 h-5 p-0 ${isActive
-                          ? (theme === 'dark'
-                            ? 'bg-red-500 border-red-400 text-red-100 hover:bg-red-600'
-                            : 'bg-red-50 border-red-300 text-red-600 hover:bg-red-100')
-                          : (theme === 'dark'
-                            ? 'bg-gray-700 border-gray-600 text-gray-400'
-                            : 'bg-gray-100 border-gray-200 text-gray-400')
-                          } active:scale-95 active:brightness-90 transition-transform`}
-                        title="Stop Channel"
-                      >
-                        <Square className="w-2.5 h-2.5" />
-                      </Button>
-                    </div>
-
-                    <div className="space-y-1 mb-2">
-                      <div className={`flex justify-between text-xs ${theme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
-                        <span>Channel Vol</span>
-                        <span>{Math.round(localVolume * 100)}%</span>
-                      </div>
-                      <Slider
-                        value={[ localVolume * 100 ]}
-                        onValueChange={([value]) => handleChannelSliderChange(index, channel.channelId, value / 100)}
-                        max={100}
-                        min={0}
-                        step={1}
-                        className="w-full cursor-pointer"
-                        onDoubleClick={() => handleChannelSliderChange(index, channel.channelId, 1)}
-                        title="Double-click to reset"
-                      />
-                    </div>
-
-                    {isActive ? (
-                      <>
-                        <div className="flex items-center gap-2 mb-1">
+                    {!channel.collapsed && waveform.length > 0 && (
+                      <div className="absolute inset-0 flex items-end gap-[1px] px-1 py-1 pointer-events-none">
+                        {waveform.map((height, index) => (
                           <div
-                            className="w-2 h-2 rounded-full flex-shrink-0"
-                            style={{ backgroundColor: playingPad.color }}
+                            key={`${channel.channelId}-wf-${index}`}
+                            className={theme === 'dark' ? 'w-full bg-cyan-200/25' : 'w-full bg-cyan-800/20'}
+                            style={{ height: `${Math.max(8, Math.round(Math.max(0, height) * 100))}%` }}
                           />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1">
-                              <span className={`text-xs font-medium truncate ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                                {playingPad.padName.length > 12 ? `${playingPad.padName.substring(0, 12)}...` : playingPad.padName}
-                              </span>
-                              <span className={`text-xs opacity-75 truncate ${theme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
-                                {playingPad.bankName.length > 8 ? `${playingPad.bankName.substring(0, 8)}...` : playingPad.bankName}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="w-1.5 h-1.5 bg-green-400 rounded-full flex-shrink-0" />
-                        </div>
-
-                        {/* Compact timestamp */}
-                        <div className={`text-xs mb-1 ${theme === 'dark' ? 'text-gray-200' : 'text-gray-700'}`}>
-                          {pp?.currentMs != null && pp?.endMs != null
-                            ? `${msToMMSS(pp.currentMs)} - ${msToMMSS(pp.endMs)}`
-                            : '—:— - —:—'}
-                        </div>
-                      </>
-                    ) : (
-                      <div className={`text-xs text-center py-2 ${theme === 'dark' ? 'text-gray-500' : 'text-gray-500'}`}>
-                        Empty
+                        ))}
                       </div>
                     )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
 
-          {legacyPlayingPads.length > 0 && (
-            <div className="space-y-3">
-              <Label className={`font-medium flex items-center gap-2 ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                <Waves className="w-4 h-4" />
-                Ignore Channel ({legacyPlayingPads.length})
-              </Label>
-
-              <div className="space-y-2 max-h-128 overflow-y-auto">
-                {legacyPlayingPads.map((playingPad) => {
-                  const pp = playingPad as PlayingPadInfo & { currentMs?: number; endMs?: number };
-                return (
-                  <div
-                    key={playingPad.padId}
-                    className={`p-2 rounded-lg border transition-all ${theme === 'dark'
-                      ? 'bg-green-900 border-green-600'
-                      : 'bg-green-50 border-green-300'
-                      }`}
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <div
-                        className="w-2 h-2 rounded-full flex-shrink-0"
-                        style={{ backgroundColor: playingPad.color }}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1">
-                          <span className={`text-xs font-medium truncate ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                            {playingPad.padName.length > 12 ? `${playingPad.padName.substring(0, 12)}...` : playingPad.padName}
-                          </span>
-                          <span className={`text-xs opacity-75 truncate ${theme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
-                            {playingPad.bankName.length > 8 ? `${playingPad.bankName.substring(0, 8)}...` : playingPad.bankName}
-                          </span>
-                        </div>
+                    {!channel.collapsed && loaded && isWaveformLoading && waveform.length === 0 && (
+                      <div className={`absolute inset-0 flex items-center justify-center text-[10px] pointer-events-none ${theme === 'dark' ? 'text-gray-500' : 'text-gray-400'}`}>
+                        Analyzing waveform...
                       </div>
-                      <div className="w-1.5 h-1.5 bg-green-400 rounded-full flex-shrink-0" />
-                      <Button
-                        onClick={() => onStopPad(playingPad.padId)}
-                        variant="outline"
-                        size="sm"
-                        className={`w-5 h-5 p-0 ${theme === 'dark'
-                            ? 'bg-red-500 border-red-400 text-red-100 hover:bg-red-600'
-                          : 'bg-red-50 border-red-300 text-red-600 hover:bg-red-100'
-                          }`}
-                        title="Stop"
-                      >
-                        <Square className="w-2.5 h-2.5" />
-                      </Button>
-                    </div>
+                    )}
 
-                    <div className={`text-xs mb-1 ${theme === 'dark' ? 'text-gray-200' : 'text-gray-700'}`}>
-                        {pp?.currentMs != null && pp?.endMs != null
-                        ? `${msToMMSS(pp.currentMs)} - ${msToMMSS(pp.endMs)}`
-                        : '—:— - —:—'}
-                    </div>
+                    <div
+                      className={`absolute inset-y-0 left-0 transition-[width] duration-100 ease-linear ${theme === 'dark' ? 'bg-cyan-300/25' : 'bg-cyan-400/25'}`}
+                      style={{ width: `${progressPct}%` }}
+                    />
 
-                    <div className="space-y-1">
-                      <div className={`flex justify-between text-xs ${theme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
-                          <span>Pad Vol</span>
-                        <span>{Math.round((playingPad.effectiveVolume ?? playingPad.volume) * 100)}%</span>
+                    <div
+                      className={`absolute inset-y-0 w-[2px] transition-[left] duration-100 ease-linear ${theme === 'dark' ? 'bg-cyan-300' : 'bg-cyan-600'}`}
+                      style={{ left: `${progressPct}%` }}
+                    />
+
+                    {HOTCUE_SLOTS.map((slotIndex) => {
+                      const cue = channel.hotcuesMs[slotIndex];
+                      if (typeof cue !== 'number') return null;
+                      const cuePct = clamp((cue / duration) * 100, 0, 100);
+                      const color = HOTCUE_COLORS[slotIndex];
+                      if (channel.collapsed) {
+                        return (
+                          <div
+                            key={`${channel.channelId}-cue-dot-${slotIndex}`}
+                            className={`absolute top-1/2 -translate-x-1/2 -translate-y-1/2 h-2 w-2 rounded-full border border-black/35 ${color.marker}`}
+                            style={{ left: `${cuePct}%` }}
+                          />
+                        );
+                      }
+                      return (
+                        <div
+                          key={`${channel.channelId}-cue-line-${slotIndex}`}
+                          className={`absolute inset-y-0 w-[2px] ${color.marker}`}
+                          style={{ left: `${cuePct}%` }}
+                        />
+                      );
+                    })}
+                  </div>
+
+                  {!channel.collapsed && (
+                    <div className="mt-1.5 grid grid-cols-4 gap-1">
+                      {HOTCUE_SLOTS.map((slotIndex) => {
+                        const cue = channel.hotcuesMs[slotIndex];
+                        const hasCue = typeof cue === 'number';
+                        const color = HOTCUE_COLORS[slotIndex];
+                        const activeClass = theme === 'dark' ? color.activeDark : color.activeLight;
+                        return (
+                          <Button
+                            key={`${channel.channelId}-hotcue-${slotIndex}`}
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className={`h-8 px-0 text-[11px] ${hasCue ? activeClass : ''} ${editMode && !hasCue ? (theme === 'dark' ? 'border-amber-500/70 text-amber-300' : 'border-amber-400 text-amber-700') : ''}`}
+                            onClick={() => handleHotcuePress(channel, slotIndex)}
+                            disabled={!loaded}
+                            title={editMode
+                              ? (hasCue ? `Clear C${slotIndex + 1}` : `Set C${slotIndex + 1}`)
+                              : (hasCue ? `Jump to ${formatMs(cue || 0)}` : `C${slotIndex + 1} not set`)}
+                          >
+                            C{slotIndex + 1}
+                          </Button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div className="mt-1.5 space-y-1">
+                    <div className="flex justify-between text-[10px] text-gray-500 dark:text-gray-400">
+                      <span>Channel Volume</span>
+                      <span>{Math.round(displayedVolume * 100)}%</span>
+                    </div>
+                    <Slider
+                      value={[displayedVolume * 100]}
+                      min={0}
+                      max={100}
+                      step={0.1}
+                      onValueChange={([value]) => handleChannelVolumeDrag(channel.channelId, value / 100)}
+                      onValueCommit={([value]) => handleChannelVolumeCommit(channel.channelId, value / 100)}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className={`rounded-lg border p-3 ${sectionClasses}`}>
+          <Label className="text-xs font-semibold flex items-center gap-2 mb-2">
+            <Waves className="h-4 w-4" /> Current Playing Sampler
+          </Label>
+          <div className="space-y-2 max-h-56 overflow-y-auto">
+            {legacyPlayingPads.length === 0 && (
+              <div className="text-xs text-gray-500 dark:text-gray-400">No pad-grid playback running.</div>
+            )}
+            {legacyPlayingPads.map((pad) => {
+              const duration = Math.max(1, pad.endMs || 0);
+              const progress = clamp(pad.currentMs || 0, 0, duration);
+              return (
+                <div key={pad.padId} className={`rounded-md border p-2 ${theme === 'dark' ? 'border-gray-700 bg-gray-950/40' : 'border-gray-200 bg-white'}`}>
+                  <div className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-medium truncate">{pad.padName}</div>
+                      <div className="text-[10px] text-gray-500 dark:text-gray-400 truncate">{pad.bankName}</div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => onStopPad(pad.padId)}
+                      title="Stop pad"
+                    >
+                      <Square className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  {!isMobile && (
+                    <div className="mt-2 space-y-1">
+                      <div className="flex justify-between text-[10px] text-gray-500 dark:text-gray-400">
+                        <span>{formatMs(progress)} / {formatMs(duration)}</span>
+                        <span>{Math.round((pad.effectiveVolume ?? pad.volume) * 100)}%</span>
                       </div>
                       <Slider
-                        value={[ (playingPad.effectiveVolume ?? playingPad.volume) * 100 ]}
-                        onValueChange={([value]) => onPadVolumeChange(playingPad.padId, value / 100)}
-                        max={100}
+                        value={[pad.volume * 100]}
                         min={0}
+                        max={100}
                         step={1}
-                        className="w-full cursor-pointer"
-                        onDoubleClick={() => onPadVolumeChange(playingPad.padId, 1)}
-                        title="Double-click to reset"
+                        onValueChange={([value]) => onPadVolumeChange(pad.padId, value / 100)}
                       />
                     </div>
-                  </div>
-                );
-              })}
-              </div>
+                  )}
                 </div>
-              )}
-            </div>
+              );
+            })}
           </div>
-
-    </>
+        </section>
+      </div>
+    </div>
   );
 }

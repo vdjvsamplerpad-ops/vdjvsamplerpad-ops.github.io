@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { Play, Square, ZoomIn, ZoomOut } from 'lucide-react';
+import { loadWaveformPeaks } from '@/lib/waveform-peaks';
 
 interface WaveformTrimProps {
   audioUrl: string;
@@ -99,49 +100,17 @@ export function WaveformTrim({
     }
 
     let cancelled = false;
-    let audioContext: AudioContext | null = null;
 
     const generateWaveform = async () => {
       setIsLoading(true);
       try {
-        const response = await fetch(audioUrl);
+        const waveform = await loadWaveformPeaks(audioUrl, audioUrl);
         if (cancelled) return;
-        const arrayBuffer = await response.arrayBuffer();
-        if (cancelled) return;
-
-        audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-        if (cancelled) return;
-
-        const samples = audioBuffer.getChannelData(0);
-        const numPeaks = 2000; 
-        const samplesPerPeak = Math.floor(samples.length / numPeaks);
-        const peaks: number[] = [];
-
-        for (let i = 0; i < numPeaks; i++) {
-          const start = i * samplesPerPeak;
-          const end = start + samplesPerPeak;
-          let max = 0;
-          for (let j = start; j < end; j += 10) { 
-            const sample = Math.abs(samples[j]);
-            if (sample > max) max = sample;
-          }
-          peaks.push(max);
-        }
-
-        const maxPeak = Math.max(...peaks) || 1;
-        const normalizedPeaks = peaks.map(p => p / maxPeak);
-
-        if (!cancelled) {
-          setWaveformData({ peaks: normalizedPeaks, duration: audioBuffer.duration });
-          setIsLoading(false);
-        }
+        setWaveformData(waveform);
+        setIsLoading(false);
       } catch (error) {
         console.error('Failed to generate waveform:', error);
         if (!cancelled) setIsLoading(false);
-      } finally {
-        if (audioContext && audioContext.state !== 'closed') audioContext.close();
       }
     };
 

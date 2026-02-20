@@ -93,11 +93,86 @@ interface StopTimingProfile {
   masterSmoothingSec: number;
 }
 
+type StopMode = 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter';
+type HotcueTuple = [number | null, number | null, number | null, number | null];
+
+interface DeckLoadedPadRef {
+  bankId: string;
+  padId: string;
+}
+
+interface DeckPadSnapshot {
+  padId: string;
+  padName: string;
+  bankId: string;
+  bankName: string;
+  color: string;
+  audioUrl: string;
+  volume: number;
+  startTimeMs: number;
+  endTimeMs: number;
+  fadeInMs: number;
+  fadeOutMs: number;
+  pitch: number;
+  playbackMode: 'once' | 'loop' | 'stopper';
+  savedHotcuesMs: HotcueTuple;
+}
+
+interface DeckChannelRuntime {
+  channelId: number;
+  channelVolume: number;
+  loadedPadRef: DeckLoadedPadRef | null;
+  pad: DeckPadSnapshot | null;
+  audioElement: HTMLAudioElement | null;
+  sourceNode: MediaElementAudioSourceNode | null;
+  sourceConnected: boolean;
+  gainNode: GainNode | null;
+  eqNodes: { low: BiquadFilterNode | null; mid: BiquadFilterNode | null; high: BiquadFilterNode | null };
+  graphConnected: boolean;
+  pendingInitialSeekSec: number | null;
+  isPlaying: boolean;
+  isPaused: boolean;
+  playheadMs: number;
+  durationMs: number;
+  hotcuesMs: HotcueTuple;
+  hasLocalHotcueOverride: boolean;
+  collapsed: boolean;
+  waveformKey: string | null;
+}
+
+interface DeckChannelState {
+  channelId: number;
+  channelVolume: number;
+  loadedPadRef: DeckLoadedPadRef | null;
+  isPlaying: boolean;
+  isPaused: boolean;
+  playheadMs: number;
+  durationMs: number;
+  hotcuesMs: HotcueTuple;
+  hasLocalHotcueOverride: boolean;
+  collapsed: boolean;
+  waveformKey: string | null;
+  pad: {
+    padId: string;
+    padName: string;
+    bankId: string;
+    bankName: string;
+    audioUrl?: string;
+    color: string;
+    volume: number;
+    effectiveVolume: number;
+    currentMs: number;
+    endMs: number;
+    playStartTime: number;
+    channelId?: number | null;
+  } | null;
+}
+
 interface GlobalPlaybackManager {
   registerPad: (padId: string, padData: any, bankId: string, bankName: string) => Promise<void>;
   unregisterPad: (padId: string) => void;
   playPad: (padId: string) => void;
-  stopPad: (padId: string, mode?: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter', keepChannel?: boolean) => void;
+  stopPad: (padId: string, mode?: StopMode, keepChannel?: boolean) => void;
   togglePad: (padId: string) => void;
   triggerToggle: (padId: string) => void;
   triggerHoldStart: (padId: string) => void;
@@ -107,14 +182,30 @@ interface GlobalPlaybackManager {
   updatePadSettings: (padId: string, settings: any) => void;
   updatePadSettingsNextPlay: (padId: string, settings: any) => void;
   updatePadMetadata: (padId: string, metadata: { name?: string; color?: string; bankId?: string; bankName?: string }) => void;
-  getPadState: (padId: string) => { isPlaying: boolean; progress: number } | null;
+  getPadState: (padId: string) => { isPlaying: boolean; progress: number; effectiveVolume: number } | null;
   getAllPlayingPads: () => { padId: string; padName: string; bankId: string; bankName: string; color: string; volume: number; currentMs: number; endMs: number; playStartTime: number; channelId?: number | null }[];
   getLegacyPlayingPads: () => { padId: string; padName: string; bankId: string; bankName: string; color: string; volume: number; currentMs: number; endMs: number; playStartTime: number }[];
-  getChannelStates: () => { channelId: number; channelVolume: number; pad: { padId: string; padName: string; bankId: string; bankName: string; color: string; volume: number; effectiveVolume: number; currentMs: number; endMs: number; playStartTime: number; channelId?: number | null } | null }[];
+  getChannelStates: () => DeckChannelState[];
+  getDeckChannelStates: () => DeckChannelState[];
+  loadPadToChannel: (channelId: number, padId: string) => boolean;
+  unloadChannel: (channelId: number) => void;
+  playChannel: (channelId: number) => void;
+  pauseChannel: (channelId: number) => void;
+  seekChannel: (channelId: number, ms: number) => void;
+  setChannelHotcue: (channelId: number, slotIndex: number, ms: number | null) => void;
+  clearChannelHotcue: (channelId: number, slotIndex: number) => void;
+  triggerChannelHotcue: (channelId: number, slotIndex: number) => void;
+  setChannelCollapsed: (channelId: number, collapsed: boolean) => void;
+  setChannelCount: (count: number) => void;
+  getChannelCount: () => number;
+  resetDeckPlaybackToStart: () => void;
+  hydrateDeckLayout: (deckState: Array<{ channelId: number; loadedPadRef: DeckLoadedPadRef | null; hotcuesMs?: HotcueTuple; collapsed?: boolean; channelVolume?: number }>) => void;
+  persistDeckLayoutSnapshot: () => Array<{ channelId: number; loadedPadRef: DeckLoadedPadRef | null; hotcuesMs: HotcueTuple; collapsed: boolean; channelVolume: number }>;
+  saveChannelHotcuesToPad: (channelId: number) => { ok: boolean; padId?: string };
   setChannelVolume: (channelId: number, volume: number) => void;
   getChannelVolume: (channelId: number) => number;
-  stopChannel: (channelId: number) => void;
-  stopAllPads: (mode?: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter') => void;
+  stopChannel: (channelId: number, mode?: StopMode) => void;
+  stopAllPads: (mode?: StopMode) => void;
   setGlobalMute: (muted: boolean) => void;
   setMasterVolume: (volume: number) => void;
   applyGlobalEQ: (eqSettings: EqSettings) => void;
@@ -156,6 +247,7 @@ export interface AudioSystemState {
 
 class GlobalPlaybackManagerClass {
   private audioInstances: Map<string, AudioInstance> = new Map();
+  private registeredPads: Map<string, DeckPadSnapshot> = new Map();
   private stateChangeListeners: Set<() => void> = new Set();
   private globalMuted: boolean = false;
   private masterVolume: number = 1;
@@ -171,6 +263,10 @@ class GlobalPlaybackManagerClass {
   private sharedIOSGainNode: GainNode | null = null;
   private channelAssignments: Map<number, string> = new Map();
   private channelVolumes: Map<number, number> = new Map();
+  private deckChannels: Map<number, DeckChannelRuntime> = new Map();
+  private deckChannelCount: number = 4;
+  private waveformCacheRefs: Map<string, number> = new Map();
+  private deckPlaybackRafId: number | null = null;
   // Pre-warming state
   private isPrewarmed: boolean = false;
   // Audio buffer cache for iOS with memory tracking
@@ -197,7 +293,7 @@ class GlobalPlaybackManagerClass {
     this.isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
     this.isAndroid = /Android/.test(navigator.userAgent);
     for (let i = 1; i <= MAX_PLAYBACK_CHANNELS; i += 1) {
-      this.channelVolumes.set(i, 1);
+      this.ensureDeckChannelRuntime(i);
     }
 
     if (this.isIOS) {
@@ -274,6 +370,10 @@ class GlobalPlaybackManagerClass {
       this.sharedIOSGainNode = this.audioContext.createGain();
       this.sharedIOSGainNode.gain.setValueAtTime(this.masterVolume, this.audioContext.currentTime);
       this.sharedIOSGainNode.connect(this.audioContext.destination);
+      for (let i = 1; i <= this.deckChannelCount; i += 1) {
+        const channel = this.getDeckChannel(i);
+        if (channel?.audioElement) this.ensureDeckChannelAudioGraph(channel);
+      }
       console.log('🎧 iOS shared audio nodes created');
     } catch (error) {
       console.error('Failed to setup shared iOS nodes:', error);
@@ -603,6 +703,24 @@ class GlobalPlaybackManagerClass {
         ignoreChannel: padData.ignoreChannel
       });
       existing.lastUsedTime = Date.now(); 
+      this.registeredPads.set(padId, {
+        padId,
+        padName: padData.name,
+        bankId,
+        bankName,
+        color: padData.color,
+        audioUrl: padData.audioUrl,
+        volume: typeof padData.volume === 'number' ? padData.volume : 1,
+        startTimeMs: typeof padData.startTimeMs === 'number' ? padData.startTimeMs : 0,
+        endTimeMs: typeof padData.endTimeMs === 'number' ? padData.endTimeMs : 0,
+        fadeInMs: typeof padData.fadeInMs === 'number' ? padData.fadeInMs : 0,
+        fadeOutMs: typeof padData.fadeOutMs === 'number' ? padData.fadeOutMs : 0,
+        pitch: typeof padData.pitch === 'number' ? padData.pitch : 0,
+        playbackMode: padData.playbackMode === 'loop' ? 'loop' : padData.playbackMode === 'stopper' ? 'stopper' : 'once',
+        savedHotcuesMs: Array.isArray(padData.savedHotcuesMs)
+          ? (padData.savedHotcuesMs.slice(0, 4) as HotcueTuple)
+          : [null, null, null, null]
+      });
       
       // iOS: Buffer will be decoded on-demand when pad is played (lazy loading)
       // This prevents memory overflow from decoding all samples upfront
@@ -668,6 +786,24 @@ class GlobalPlaybackManagerClass {
     };
 
     this.audioInstances.set(padId, instance);
+    this.registeredPads.set(padId, {
+      padId,
+      padName: padData.name,
+      bankId,
+      bankName,
+      color: padData.color,
+      audioUrl: padData.audioUrl,
+      volume: typeof padData.volume === 'number' ? padData.volume : 1,
+      startTimeMs: typeof padData.startTimeMs === 'number' ? padData.startTimeMs : 0,
+      endTimeMs: typeof padData.endTimeMs === 'number' ? padData.endTimeMs : 0,
+      fadeInMs: typeof padData.fadeInMs === 'number' ? padData.fadeInMs : 0,
+      fadeOutMs: typeof padData.fadeOutMs === 'number' ? padData.fadeOutMs : 0,
+      pitch: typeof padData.pitch === 'number' ? padData.pitch : 0,
+      playbackMode: padData.playbackMode === 'loop' ? 'loop' : padData.playbackMode === 'stopper' ? 'stopper' : 'once',
+      savedHotcuesMs: Array.isArray(padData.savedHotcuesMs)
+        ? (padData.savedHotcuesMs.slice(0, 4) as HotcueTuple)
+        : [null, null, null, null]
+    });
     
     // iOS: Buffer will be decoded on-demand when pad is played (lazy loading)
     // This prevents memory overflow from decoding all samples upfront
@@ -1119,11 +1255,6 @@ class GlobalPlaybackManagerClass {
     const playToken = (instance.playToken || 0) + 1;
     instance.playToken = playToken;
     instance.pendingDecodePlayToken = null;
-
-    if (!this.assignChannel(instance)) {
-      console.warn('No available playback channels. Playback blocked for:', padId);
-      return;
-    }
 
     // iOS: Use buffer-based playback for instant response
     if (this.isIOS) {
@@ -1767,8 +1898,10 @@ class GlobalPlaybackManagerClass {
   }
 
   private notifyStateChange(): void {
-    if (this.notificationTimeout) clearTimeout(this.notificationTimeout);
+    // Coalesce high-frequency updates without starving renders.
+    if (this.notificationTimeout) return;
     this.notificationTimeout = setTimeout(() => {
+      this.notificationTimeout = null;
       this.stateChangeListeners.forEach(listener => { try { listener(); } catch (e) { } });
     }, NOTIFICATION_THROTTLE_MS);
   }
@@ -1826,9 +1959,15 @@ class GlobalPlaybackManagerClass {
   unregisterPad(padId: string): void {
     const instance = this.audioInstances.get(padId);
     if (!instance) return;
+    this.deckChannels.forEach((channel) => {
+      if (channel.loadedPadRef?.padId === padId) {
+        this.unloadChannel(channel.channelId);
+      }
+    });
     this.releaseChannel(instance);
     this.cleanupInstance(instance);
     this.audioInstances.delete(padId);
+    this.registeredPads.delete(padId);
     this.notifyStateChange();
   }
 
@@ -1842,6 +1981,7 @@ class GlobalPlaybackManagerClass {
   updatePadSettings(padId: string, settings: any): void {
     const instance = this.audioInstances.get(padId);
     if (!instance) return;
+    const registered = this.registeredPads.get(padId);
     
     const fadeSettingsChanged = 
       settings.fadeInMs !== undefined || 
@@ -1853,13 +1993,33 @@ class GlobalPlaybackManagerClass {
     if (settings.playbackMode !== undefined) {
       instance.playbackMode = settings.playbackMode;
       if (instance.audioElement) instance.audioElement.loop = settings.playbackMode === 'loop';
+      if (registered) {
+        registered.playbackMode = settings.playbackMode === 'loop'
+          ? 'loop'
+          : settings.playbackMode === 'stopper'
+            ? 'stopper'
+            : 'once';
+      }
     }
-    if (settings.startTimeMs !== undefined) instance.startTimeMs = settings.startTimeMs;
-    if (settings.endTimeMs !== undefined) instance.endTimeMs = settings.endTimeMs;
-    if (settings.fadeInMs !== undefined) instance.fadeInMs = settings.fadeInMs;
-    if (settings.fadeOutMs !== undefined) instance.fadeOutMs = settings.fadeOutMs;
+    if (settings.startTimeMs !== undefined) {
+      instance.startTimeMs = settings.startTimeMs;
+      if (registered) registered.startTimeMs = settings.startTimeMs;
+    }
+    if (settings.endTimeMs !== undefined) {
+      instance.endTimeMs = settings.endTimeMs;
+      if (registered) registered.endTimeMs = settings.endTimeMs;
+    }
+    if (settings.fadeInMs !== undefined) {
+      instance.fadeInMs = settings.fadeInMs;
+      if (registered) registered.fadeInMs = settings.fadeInMs;
+    }
+    if (settings.fadeOutMs !== undefined) {
+      instance.fadeOutMs = settings.fadeOutMs;
+      if (registered) registered.fadeOutMs = settings.fadeOutMs;
+    }
     if (settings.pitch !== undefined) {
       instance.pitch = settings.pitch;
+      if (registered) registered.pitch = settings.pitch;
       if (instance.audioElement) instance.audioElement.playbackRate = Math.pow(2, settings.pitch / 12);
       if (instance.bufferSourceNode && this.audioContext) {
         instance.bufferSourceNode.playbackRate.setValueAtTime(Math.pow(2, settings.pitch / 12), this.audioContext.currentTime);
@@ -1867,7 +2027,13 @@ class GlobalPlaybackManagerClass {
     }
     if (settings.volume !== undefined) {
       instance.volume = settings.volume;
+      if (registered) registered.volume = settings.volume;
       this.updateInstanceVolume(instance);
+    }
+    if (settings.savedHotcuesMs !== undefined && registered) {
+      registered.savedHotcuesMs = Array.isArray(settings.savedHotcuesMs)
+        ? (settings.savedHotcuesMs.slice(0, 4) as HotcueTuple)
+        : [null, null, null, null];
     }
     if (settings.ignoreChannel !== undefined) {
       instance.ignoreChannel = settings.ignoreChannel;
@@ -1897,10 +2063,17 @@ class GlobalPlaybackManagerClass {
   updatePadMetadata(padId: string, metadata: { name?: string; color?: string; bankId?: string; bankName?: string }): void {
     const instance = this.audioInstances.get(padId);
     if (!instance) return;
+    const registered = this.registeredPads.get(padId);
     if (metadata.name !== undefined) instance.padName = metadata.name;
     if (metadata.color !== undefined) instance.color = metadata.color;
     if (metadata.bankId !== undefined) instance.bankId = metadata.bankId;
     if (metadata.bankName !== undefined) instance.bankName = metadata.bankName;
+    if (registered) {
+      if (metadata.name !== undefined) registered.padName = metadata.name;
+      if (metadata.color !== undefined) registered.color = metadata.color;
+      if (metadata.bankId !== undefined) registered.bankId = metadata.bankId;
+      if (metadata.bankName !== undefined) registered.bankName = metadata.bankName;
+    }
     this.notifyStateChange();
   }
 
@@ -1966,7 +2139,7 @@ class GlobalPlaybackManagerClass {
   getLegacyPlayingPads() {
       const playing: any[] = [];
       this.audioInstances.forEach(instance => {
-          if (instance.isPlaying && instance.ignoreChannel) {
+          if (instance.isPlaying) {
               let currentRelMs = 0;
               let endRelMs = 0;
 
@@ -2000,87 +2173,758 @@ class GlobalPlaybackManagerClass {
       return playing.sort((a, b) => (a.playStartTime || 0) - (b.playStartTime || 0));
   }
 
-  getChannelStates() {
-    const channels: any[] = [];
-    for (let i = 1; i <= MAX_PLAYBACK_CHANNELS; i += 1) {
-      const padId = this.channelAssignments.get(i);
-      let pad = null;
-      if (padId) {
-        const instance = this.audioInstances.get(padId);
-        if (instance && instance.isPlaying) {
-          let currentRelMs = 0;
-          let endRelMs = 0;
-          if (instance.audioElement) {
-            const nowAbsMs = instance.audioElement.currentTime * 1000;
-            const regionStart = instance.startTimeMs || 0;
-            const regionEnd = instance.endTimeMs > 0 ? instance.endTimeMs : instance.audioElement.duration * 1000;
-            currentRelMs = Math.max(0, Math.min(regionEnd - regionStart, nowAbsMs - regionStart));
-            endRelMs = Math.max(0, regionEnd - regionStart);
-          } else if (instance.bufferSourceNode && instance.playStartTime) {
-            const elapsed = (Date.now() - instance.playStartTime) * Math.pow(2, (instance.pitch || 0) / 12);
-            const regionStart = instance.startTimeMs || 0;
-            const regionEnd = instance.endTimeMs || instance.bufferDuration;
-            currentRelMs = Math.min(elapsed, regionEnd - regionStart);
-            endRelMs = regionEnd - regionStart;
-          }
-          const factor = this.computeEffectiveVolumeFactor(instance);
-          pad = {
-            padId: instance.padId,
-            padName: instance.padName,
-            bankId: instance.bankId,
-            bankName: instance.bankName,
-            color: instance.color,
-            volume: instance.volume,
-            effectiveVolume: instance.volume * factor,
-            currentMs: currentRelMs,
-            endMs: endRelMs,
-            playStartTime: instance.playStartTime || 0,
-            channelId: instance.channelId ?? null
-          };
-        }
-      }
-      channels.push({
-        channelId: i,
-        channelVolume: this.channelVolumes.get(i) ?? 1,
-        pad
-      });
+  private cloneHotcues(value?: unknown): HotcueTuple {
+    if (!Array.isArray(value)) return [null, null, null, null];
+    const next: HotcueTuple = [null, null, null, null];
+    for (let i = 0; i < 4; i += 1) {
+      const cue = value[i];
+      next[i] = typeof cue === 'number' && Number.isFinite(cue) && cue >= 0 ? cue : null;
     }
-    return channels;
+    return next;
   }
 
-  setChannelVolume(channelId: number, volume: number) {
-    const safe = Math.max(0, Math.min(1, volume));
-    this.channelVolumes.set(channelId, safe);
-    const padId = this.channelAssignments.get(channelId);
-    if (padId) {
-      const instance = this.audioInstances.get(padId);
-      if (instance) {
-        this.updateInstanceVolume(instance);
+  private ensureDeckChannelRuntime(channelId: number): DeckChannelRuntime | null {
+    if (!Number.isFinite(channelId)) return null;
+    if (channelId < 1 || channelId > MAX_PLAYBACK_CHANNELS) return null;
+    const existing = this.deckChannels.get(channelId);
+    if (existing) {
+      if (!this.channelVolumes.has(channelId)) {
+        this.channelVolumes.set(channelId, existing.channelVolume);
+      }
+      return existing;
+    }
+
+    const runtime: DeckChannelRuntime = {
+      channelId,
+      channelVolume: this.channelVolumes.get(channelId) ?? 1,
+      loadedPadRef: null,
+      pad: null,
+      audioElement: null,
+      sourceNode: null,
+      sourceConnected: false,
+      gainNode: null,
+      eqNodes: { low: null, mid: null, high: null },
+      graphConnected: false,
+      pendingInitialSeekSec: null,
+      isPlaying: false,
+      isPaused: false,
+      playheadMs: 0,
+      durationMs: 0,
+      hotcuesMs: [null, null, null, null],
+      hasLocalHotcueOverride: false,
+      collapsed: false,
+      waveformKey: null
+    };
+    this.channelVolumes.set(channelId, runtime.channelVolume);
+    this.deckChannels.set(channelId, runtime);
+    return runtime;
+  }
+
+  private getDeckChannel(channelId: number): DeckChannelRuntime | null {
+    if (!Number.isFinite(channelId)) return null;
+    if (channelId < 1 || channelId > MAX_PLAYBACK_CHANNELS) return null;
+    return this.deckChannels.get(channelId) || null;
+  }
+
+  private getDeckStartMs(channel: DeckChannelRuntime): number {
+    return channel.pad?.startTimeMs || 0;
+  }
+
+  private getDeckEndMs(channel: DeckChannelRuntime): number {
+    if (!channel.pad) return 0;
+    if (channel.pad.endTimeMs > channel.pad.startTimeMs) return channel.pad.endTimeMs;
+    return channel.durationMs > channel.pad.startTimeMs ? channel.durationMs : channel.pad.startTimeMs;
+  }
+
+  private startDeckPlaybackLoop(): void {
+    if (this.deckPlaybackRafId !== null) return;
+
+    const tick = () => {
+      this.deckPlaybackRafId = null;
+      let hasPlayingChannel = false;
+
+      for (let i = 1; i <= this.deckChannelCount; i += 1) {
+        const channel = this.getDeckChannel(i);
+        if (!channel?.audioElement || !channel.pad || !channel.isPlaying) continue;
+
+        hasPlayingChannel = true;
+        const nowAbsMs = channel.audioElement.currentTime * 1000;
+        const start = this.getDeckStartMs(channel);
+        const end = this.getDeckEndMs(channel);
+        channel.playheadMs = Math.max(0, Math.min(Math.max(0, end - start), nowAbsMs - start));
+
+        if (end > start && nowAbsMs >= end) {
+          this.stopChannel(channel.channelId, 'instant');
+          continue;
+        }
+      }
+
+      if (hasPlayingChannel) {
+        this.notifyStateChange();
+        this.deckPlaybackRafId = requestAnimationFrame(tick);
+      }
+    };
+
+    this.deckPlaybackRafId = requestAnimationFrame(tick);
+  }
+
+  private stopDeckPlaybackLoopIfIdle(): void {
+    for (let i = 1; i <= this.deckChannelCount; i += 1) {
+      const channel = this.getDeckChannel(i);
+      if (channel?.isPlaying) return;
+    }
+    if (this.deckPlaybackRafId !== null) {
+      cancelAnimationFrame(this.deckPlaybackRafId);
+      this.deckPlaybackRafId = null;
+    }
+  }
+
+  private setDeckChannelCurrentTimeSafe(channel: DeckChannelRuntime, nextSec: number): void {
+    const audio = channel.audioElement;
+    if (!audio) return;
+    const safeSec = Math.max(0, nextSec);
+    if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      try {
+        audio.currentTime = safeSec;
+        channel.pendingInitialSeekSec = null;
+        return;
+      } catch {}
+    }
+    channel.pendingInitialSeekSec = safeSec;
+  }
+
+  private ensureDeckChannelAudioGraph(channel: DeckChannelRuntime): void {
+    if (!channel.audioElement) return;
+    if (!this.audioContext) this.initializeAudioContext();
+    if (!this.audioContext) return;
+
+    // iOS deck channels route through WebAudio to make EQ and channel volume reliable.
+    if (this.isIOS && !this.sharedIOSGainNode) {
+      this.setupSharedIOSNodes();
+      if (!this.sharedIOSGainNode) return;
+    }
+
+    try {
+      if (!channel.eqNodes.low) {
+        channel.eqNodes.low = this.audioContext.createBiquadFilter();
+        channel.eqNodes.low.type = 'peaking';
+        channel.eqNodes.low.frequency.setValueAtTime(100, this.audioContext.currentTime);
+      }
+      if (!channel.eqNodes.mid) {
+        channel.eqNodes.mid = this.audioContext.createBiquadFilter();
+        channel.eqNodes.mid.type = 'peaking';
+        channel.eqNodes.mid.frequency.setValueAtTime(1000, this.audioContext.currentTime);
+      }
+      if (!channel.eqNodes.high) {
+        channel.eqNodes.high = this.audioContext.createBiquadFilter();
+        channel.eqNodes.high.type = 'peaking';
+        channel.eqNodes.high.frequency.setValueAtTime(10000, this.audioContext.currentTime);
+      }
+      if (!channel.gainNode) {
+        channel.gainNode = this.audioContext.createGain();
+      }
+
+      if (!channel.sourceNode) {
+        channel.sourceNode = this.audioContext.createMediaElementSource(channel.audioElement);
+      }
+
+      if (!channel.sourceConnected && channel.sourceNode) {
+        channel.sourceNode.connect(channel.eqNodes.low!);
+        channel.eqNodes.low!.connect(channel.eqNodes.mid!);
+        channel.eqNodes.mid!.connect(channel.eqNodes.high!);
+        channel.eqNodes.high!.connect(channel.gainNode!);
+        if (this.isIOS && this.sharedIOSGainNode) {
+          channel.gainNode!.connect(this.sharedIOSGainNode);
+        } else {
+          channel.gainNode!.connect(this.audioContext.destination);
+        }
+        channel.sourceConnected = true;
+      }
+
+      channel.graphConnected = true;
+      channel.audioElement.muted = false;
+      channel.audioElement.volume = 1.0;
+      this.updateDeckChannelEQ(channel);
+      this.syncDeckChannelVolume(channel);
+    } catch (error) {
+      console.warn(`Failed to connect deck channel ${channel.channelId} WebAudio graph:`, error);
+      channel.graphConnected = false;
+    }
+  }
+
+  private disconnectDeckChannelAudioGraph(channel: DeckChannelRuntime): void {
+    try {
+      channel.sourceNode?.disconnect();
+    } catch {}
+    try {
+      channel.eqNodes.low?.disconnect();
+    } catch {}
+    try {
+      channel.eqNodes.mid?.disconnect();
+    } catch {}
+    try {
+      channel.eqNodes.high?.disconnect();
+    } catch {}
+    try {
+      channel.gainNode?.disconnect();
+    } catch {}
+
+    channel.sourceNode = null;
+    channel.sourceConnected = false;
+    channel.eqNodes = { low: null, mid: null, high: null };
+    channel.gainNode = null;
+    channel.graphConnected = false;
+    channel.pendingInitialSeekSec = null;
+  }
+
+  private getDeckChannelTargetGain(channel: DeckChannelRuntime): number {
+    if (!channel.pad) return 0;
+    const padVolume = Math.max(0, Math.min(1, channel.pad.volume || 1));
+    const channelVolume = Math.max(0, Math.min(1, channel.channelVolume || 1));
+    if (this.globalMuted) return 0;
+
+    // On iOS graph path, master is controlled by sharedIOSGainNode.
+    if (this.isIOS && channel.graphConnected && this.sharedIOSGainNode) {
+      return Math.max(0, Math.min(1, padVolume * channelVolume));
+    }
+    return Math.max(0, Math.min(1, padVolume * channelVolume * this.masterVolume));
+  }
+
+  private setDeckChannelGain(channel: DeckChannelRuntime, next: number, immediate: boolean = false): void {
+    const target = Math.max(0, Math.min(1, next));
+    if (channel.gainNode && channel.graphConnected && this.audioContext) {
+      const now = this.audioContext.currentTime;
+      channel.gainNode.gain.cancelScheduledValues(now);
+      if (immediate) {
+        channel.gainNode.gain.setValueAtTime(target, now);
+      } else {
+        const timing = this.getStopTimingProfile();
+        channel.gainNode.gain.setTargetAtTime(target, now, timing.volumeSmoothingSec);
+      }
+      if (channel.audioElement) channel.audioElement.volume = 1.0;
+      return;
+    }
+    if (channel.audioElement) {
+      channel.audioElement.volume = target;
+    }
+  }
+
+  private getDeckChannelCurrentGain(channel: DeckChannelRuntime): number {
+    if (channel.gainNode && channel.graphConnected) {
+      return Math.max(0, channel.gainNode.gain.value || 0);
+    }
+    return Math.max(0, channel.audioElement?.volume || 0);
+  }
+
+  private updateDeckChannelEQ(channel: DeckChannelRuntime): void {
+    if (!this.audioContext || !channel.graphConnected) return;
+    const now = this.audioContext.currentTime;
+    if (channel.eqNodes.low) channel.eqNodes.low.gain.setValueAtTime(this.globalEQ.low, now);
+    if (channel.eqNodes.mid) channel.eqNodes.mid.gain.setValueAtTime(this.globalEQ.mid, now);
+    if (channel.eqNodes.high) channel.eqNodes.high.gain.setValueAtTime(this.globalEQ.high, now);
+  }
+
+  private syncDeckChannelVolume(channel: DeckChannelRuntime): void {
+    if (!channel.audioElement || !channel.pad) return;
+    const next = this.getDeckChannelTargetGain(channel);
+    this.setDeckChannelGain(channel, next);
+  }
+
+  private releaseWaveformRef(channel: DeckChannelRuntime): void {
+    if (!channel.waveformKey) return;
+    const key = channel.waveformKey;
+    const count = this.waveformCacheRefs.get(key) || 0;
+    if (count <= 1) this.waveformCacheRefs.delete(key);
+    else this.waveformCacheRefs.set(key, count - 1);
+    channel.waveformKey = null;
+  }
+
+  private retainWaveformRef(channel: DeckChannelRuntime, key: string): void {
+    this.releaseWaveformRef(channel);
+    channel.waveformKey = key;
+    this.waveformCacheRefs.set(key, (this.waveformCacheRefs.get(key) || 0) + 1);
+  }
+
+  private createDeckAudioElement(channel: DeckChannelRuntime): void {
+    if (!channel.pad) return;
+    const audio = new Audio(channel.pad.audioUrl);
+    audio.preload = 'auto';
+    audio.loop = channel.pad.playbackMode === 'loop';
+    audio.playbackRate = Math.pow(2, (channel.pad.pitch || 0) / 12);
+    channel.pendingInitialSeekSec = (channel.pad.startTimeMs || 0) / 1000;
+    this.disconnectDeckChannelAudioGraph(channel);
+
+    audio.addEventListener('loadedmetadata', () => {
+      if (!channel.pad) return;
+      if (channel.pendingInitialSeekSec !== null) {
+        this.setDeckChannelCurrentTimeSafe(channel, channel.pendingInitialSeekSec);
+      }
+      const fullMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
+      const regionEnd = channel.pad.endTimeMs > channel.pad.startTimeMs
+        ? channel.pad.endTimeMs
+        : fullMs;
+      channel.durationMs = Math.max(channel.pad.startTimeMs, regionEnd);
+      this.notifyStateChange();
+    });
+
+    audio.addEventListener('timeupdate', () => {
+      if (!channel.pad) return;
+      const nowAbsMs = audio.currentTime * 1000;
+      const start = this.getDeckStartMs(channel);
+      const end = this.getDeckEndMs(channel);
+      channel.playheadMs = Math.max(0, Math.min(Math.max(0, end - start), nowAbsMs - start));
+      if (end > start && nowAbsMs >= end) {
+        this.stopChannel(channel.channelId, 'instant');
+        return;
+      }
+    });
+
+    audio.addEventListener('ended', () => {
+      channel.isPlaying = false;
+      channel.isPaused = false;
+      channel.playheadMs = 0;
+      if (channel.pad && channel.audioElement) {
+        this.setDeckChannelCurrentTimeSafe(channel, (channel.pad.startTimeMs || 0) / 1000);
+      }
+      this.stopDeckPlaybackLoopIfIdle();
+      this.notifyStateChange();
+    });
+
+    channel.audioElement = audio;
+    this.ensureDeckChannelAudioGraph(channel);
+    this.syncDeckChannelVolume(channel);
+  }
+
+  private stopDeckChannelInternal(channel: DeckChannelRuntime, mode: StopMode = 'instant'): void {
+    const audio = channel.audioElement;
+    const pad = channel.pad;
+    if (!audio || !pad) {
+      channel.isPlaying = false;
+      channel.isPaused = false;
+      channel.playheadMs = 0;
+      this.stopDeckPlaybackLoopIfIdle();
+      return;
+    }
+
+    const startAtSec = (pad.startTimeMs || 0) / 1000;
+    const finalizeStop = () => {
+      try {
+        audio.pause();
+        this.setDeckChannelCurrentTimeSafe(channel, startAtSec);
+        audio.playbackRate = Math.pow(2, (pad.pitch || 0) / 12);
+      } catch {}
+      channel.isPlaying = false;
+      channel.isPaused = false;
+      channel.playheadMs = 0;
+      this.syncDeckChannelVolume(channel);
+      this.stopDeckPlaybackLoopIfIdle();
+      this.notifyStateChange();
+    };
+
+    if (!channel.isPlaying && mode !== 'instant') {
+      finalizeStop();
+      return;
+    }
+
+    if (mode === 'instant') {
+      const startVolume = this.getDeckChannelCurrentGain(channel);
+      const fadeMs = Math.max(10, this.getStopTimingProfile().instantStopFinalizeDelayMs);
+      const startedAt = performance.now();
+      const fadeTick = () => {
+        const progress = Math.min(1, (performance.now() - startedAt) / fadeMs);
+        this.setDeckChannelGain(channel, Math.max(0, startVolume * (1 - progress)), true);
+        if (progress >= 1 || !channel.isPlaying) {
+          finalizeStop();
+          return;
+        }
+        requestAnimationFrame(fadeTick);
+      };
+      requestAnimationFrame(fadeTick);
+      return;
+    }
+
+    const runAnimatedStop = (durationMs: number, onFrame: (progress: number, startVolume: number, originalRate: number) => void, onEnd?: () => void) => {
+      const startVolume = this.getDeckChannelCurrentGain(channel);
+      const originalRate = audio.playbackRate;
+      const startedAt = performance.now();
+      const tick = () => {
+        const progress = Math.min(1, (performance.now() - startedAt) / durationMs);
+        onFrame(progress, startVolume, originalRate);
+        if (progress >= 1 || !channel.isPlaying) {
+          if (onEnd) onEnd();
+          finalizeStop();
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      channel.isPlaying = true;
+      channel.isPaused = false;
+      requestAnimationFrame(tick);
+    };
+
+    if (mode === 'fadeout' || mode === 'filter') {
+      const durationMs = mode === 'filter' ? 850 : 650;
+      runAnimatedStop(durationMs, (progress, startVolume, originalRate) => {
+        audio.playbackRate = Math.max(0.9, originalRate - (originalRate - 0.85) * progress);
+        this.setDeckChannelGain(channel, Math.max(0, startVolume * (1 - progress)), true);
+      });
+      return;
+    }
+
+    if (mode === 'brake') {
+      const durationMs = this.getStopTimingProfile().brakeWebDurationMs;
+      runAnimatedStop(durationMs, (progress, startVolume, originalRate) => {
+        const nextRate = Math.max(0.08, originalRate * (1 - progress * 0.94));
+        audio.playbackRate = nextRate;
+        this.setDeckChannelGain(channel, Math.max(0, startVolume * (1 - progress)), true);
+      }, () => {
+        audio.playbackRate = Math.max(0.08, audio.playbackRate);
+      });
+      return;
+    }
+
+    // backspin approximation for HTMLAudioElement path
+    const backspinBaseRate = audio.playbackRate;
+    runAnimatedStop(820, (progress, startVolume, originalRate) => {
+      if (progress < 0.45) {
+        const p = progress / 0.45;
+        audio.playbackRate = originalRate + (2.8 - originalRate) * p;
+      } else {
+        const p = (progress - 0.45) / 0.55;
+        audio.playbackRate = Math.max(0.2, 2.8 - (2.6 * p));
+      }
+      this.setDeckChannelGain(channel, Math.max(0, startVolume * (1 - progress)), true);
+    }, () => {
+      audio.playbackRate = backspinBaseRate;
+    });
+  }
+
+  loadPadToChannel(channelId: number, padId: string): boolean {
+    if (channelId < 1 || channelId > this.deckChannelCount) return false;
+    const channel = this.getDeckChannel(channelId) || this.ensureDeckChannelRuntime(channelId);
+    if (!channel) return false;
+    const pad = this.registeredPads.get(padId);
+    if (!pad || !pad.audioUrl) return false;
+
+    if (channel.loadedPadRef?.padId === padId && channel.loadedPadRef?.bankId === pad.bankId) {
+      return true;
+    }
+
+    this.stopDeckChannelInternal(channel, 'instant');
+    if (channel.audioElement) {
+      try {
+        channel.audioElement.pause();
+        channel.audioElement.src = '';
+      } catch {}
+    }
+    this.disconnectDeckChannelAudioGraph(channel);
+    this.releaseWaveformRef(channel);
+
+    channel.loadedPadRef = { bankId: pad.bankId, padId: pad.padId };
+    channel.pad = { ...pad, savedHotcuesMs: this.cloneHotcues(pad.savedHotcuesMs) };
+    channel.isPlaying = false;
+    channel.isPaused = false;
+    channel.playheadMs = 0;
+    channel.durationMs = Math.max(channel.pad.startTimeMs || 0, channel.pad.endTimeMs || 0);
+    channel.hotcuesMs = this.cloneHotcues(channel.pad.savedHotcuesMs);
+    channel.hasLocalHotcueOverride = false;
+    this.retainWaveformRef(channel, `${pad.padId}:${pad.audioUrl}`);
+    this.createDeckAudioElement(channel);
+    this.notifyStateChange();
+    return true;
+  }
+
+  unloadChannel(channelId: number): void {
+    const channel = this.getDeckChannel(channelId);
+    if (!channel) return;
+    this.stopDeckChannelInternal(channel, 'instant');
+    if (channel.audioElement) {
+      try {
+        channel.audioElement.pause();
+        channel.audioElement.src = '';
+      } catch {}
+    }
+    this.disconnectDeckChannelAudioGraph(channel);
+    channel.audioElement = null;
+    channel.loadedPadRef = null;
+    channel.pad = null;
+    channel.isPlaying = false;
+    channel.isPaused = false;
+    channel.playheadMs = 0;
+    channel.durationMs = 0;
+    channel.hotcuesMs = [null, null, null, null];
+    channel.hasLocalHotcueOverride = false;
+    this.releaseWaveformRef(channel);
+    this.notifyStateChange();
+  }
+
+  playChannel(channelId: number): void {
+    const channel = this.getDeckChannel(channelId);
+    if (!channel || !channel.audioElement || !channel.pad) return;
+
+    if (this.audioContext?.state === 'suspended') {
+      this.audioContext.resume().catch((error) => {
+        console.warn('Failed to resume AudioContext before channel playback:', error);
+      });
+    }
+
+    this.ensureDeckChannelAudioGraph(channel);
+    channel.audioElement.playbackRate = Math.pow(2, (channel.pad.pitch || 0) / 12);
+    channel.audioElement.loop = channel.pad.playbackMode === 'loop';
+    if (channel.pendingInitialSeekSec !== null) {
+      this.setDeckChannelCurrentTimeSafe(channel, channel.pendingInitialSeekSec);
+    }
+    this.syncDeckChannelVolume(channel);
+    channel.audioElement.play().then(() => {
+      channel.isPlaying = true;
+      channel.isPaused = false;
+      this.startDeckPlaybackLoop();
+      this.notifyStateChange();
+    }).catch((error) => {
+      console.warn(`Channel ${channelId} play() failed:`, error);
+      this.notifyStateChange();
+    });
+  }
+
+  pauseChannel(channelId: number): void {
+    const channel = this.getDeckChannel(channelId);
+    if (!channel || !channel.audioElement) return;
+    try {
+      channel.audioElement.pause();
+    } catch {}
+    channel.isPlaying = false;
+    channel.isPaused = true;
+    this.stopDeckPlaybackLoopIfIdle();
+    this.notifyStateChange();
+  }
+
+  seekChannel(channelId: number, ms: number): void {
+    const channel = this.getDeckChannel(channelId);
+    if (!channel || !channel.audioElement || !channel.pad) return;
+    const start = this.getDeckStartMs(channel);
+    const end = this.getDeckEndMs(channel);
+    const clamped = Math.max(0, Math.min(end > start ? end - start : 0, ms));
+    channel.playheadMs = clamped;
+    this.setDeckChannelCurrentTimeSafe(channel, (start + clamped) / 1000);
+    this.notifyStateChange();
+  }
+
+  setChannelHotcue(channelId: number, slotIndex: number, ms: number | null): void {
+    const channel = this.getDeckChannel(channelId);
+    if (!channel) return;
+    if (slotIndex < 0 || slotIndex > 3) return;
+    if (ms === null) {
+      channel.hotcuesMs[slotIndex] = null;
+    } else {
+      const safe = Math.max(0, ms);
+      channel.hotcuesMs[slotIndex] = safe;
+    }
+    channel.hasLocalHotcueOverride = true;
+    this.notifyStateChange();
+  }
+
+  clearChannelHotcue(channelId: number, slotIndex: number): void {
+    this.setChannelHotcue(channelId, slotIndex, null);
+  }
+
+  triggerChannelHotcue(channelId: number, slotIndex: number): void {
+    const channel = this.getDeckChannel(channelId);
+    if (!channel) return;
+    if (slotIndex < 0 || slotIndex > 3) return;
+    const cue = channel.hotcuesMs[slotIndex];
+    if (cue === null || cue === undefined) return;
+    this.seekChannel(channelId, cue);
+    this.playChannel(channelId);
+  }
+
+  setChannelCollapsed(channelId: number, collapsed: boolean): void {
+    const channel = this.getDeckChannel(channelId);
+    if (!channel) return;
+    channel.collapsed = collapsed;
+    this.notifyStateChange();
+  }
+
+  private cleanupRemovedChannels(keepCount: number): void {
+    for (let i = keepCount + 1; i <= MAX_PLAYBACK_CHANNELS; i += 1) {
+      const channel = this.getDeckChannel(i);
+      if (!channel) continue;
+      this.unloadChannel(i);
+      this.deckChannels.delete(i);
+      this.channelVolumes.delete(i);
+    }
+  }
+
+  setChannelCount(count: number): void {
+    const safe = Math.max(2, Math.min(MAX_PLAYBACK_CHANNELS, Math.floor(count)));
+    if (safe === this.deckChannelCount) return;
+    if (safe < this.deckChannelCount) {
+      this.cleanupRemovedChannels(safe);
+    }
+    if (safe > this.deckChannelCount) {
+      for (let i = 1; i <= safe; i += 1) {
+        this.ensureDeckChannelRuntime(i);
+      }
+    }
+    this.deckChannelCount = safe;
+    this.notifyStateChange();
+  }
+
+  getChannelCount(): number {
+    return this.deckChannelCount;
+  }
+
+  resetDeckPlaybackToStart(): void {
+    for (let i = 1; i <= MAX_PLAYBACK_CHANNELS; i += 1) {
+      const channel = this.getDeckChannel(i);
+      if (!channel || !channel.pad) continue;
+      this.stopDeckChannelInternal(channel, 'instant');
+      channel.isPaused = false;
+      channel.playheadMs = 0;
+      if (channel.audioElement) {
+        this.setDeckChannelCurrentTimeSafe(channel, (channel.pad.startTimeMs || 0) / 1000);
       }
     }
     this.notifyStateChange();
   }
 
+  hydrateDeckLayout(deckState: Array<{ channelId: number; loadedPadRef: DeckLoadedPadRef | null; hotcuesMs?: HotcueTuple; collapsed?: boolean; channelVolume?: number }>): void {
+    if (!Array.isArray(deckState)) return;
+    deckState.forEach((entry) => {
+      const channel = this.getDeckChannel(entry.channelId);
+      if (!channel) return;
+      if (typeof entry.channelVolume === 'number' && Number.isFinite(entry.channelVolume)) {
+        this.setChannelVolume(entry.channelId, entry.channelVolume);
+      }
+      if (typeof entry.collapsed === 'boolean') {
+        channel.collapsed = entry.collapsed;
+      }
+      if (!entry.loadedPadRef?.padId) {
+        this.unloadChannel(entry.channelId);
+        return;
+      }
+      const loaded = this.loadPadToChannel(entry.channelId, entry.loadedPadRef.padId);
+      if (!loaded) return;
+      if (Array.isArray(entry.hotcuesMs)) {
+        channel.hotcuesMs = this.cloneHotcues(entry.hotcuesMs);
+        channel.hasLocalHotcueOverride = true;
+      }
+      this.stopDeckChannelInternal(channel, 'instant');
+      channel.isPaused = false;
+      channel.playheadMs = 0;
+    });
+    this.notifyStateChange();
+  }
+
+  persistDeckLayoutSnapshot(): Array<{ channelId: number; loadedPadRef: DeckLoadedPadRef | null; hotcuesMs: HotcueTuple; collapsed: boolean; channelVolume: number }> {
+    const items: Array<{ channelId: number; loadedPadRef: DeckLoadedPadRef | null; hotcuesMs: HotcueTuple; collapsed: boolean; channelVolume: number }> = [];
+    for (let i = 1; i <= this.deckChannelCount; i += 1) {
+      const channel = this.getDeckChannel(i);
+      if (!channel) continue;
+      items.push({
+        channelId: i,
+        loadedPadRef: channel.loadedPadRef ? { ...channel.loadedPadRef } : null,
+        hotcuesMs: this.cloneHotcues(channel.hotcuesMs),
+        collapsed: channel.collapsed,
+        channelVolume: channel.channelVolume
+      });
+    }
+    return items;
+  }
+
+  saveChannelHotcuesToPad(channelId: number): { ok: boolean; padId?: string } {
+    const channel = this.getDeckChannel(channelId);
+    if (!channel?.loadedPadRef?.padId) return { ok: false };
+    const snapshot = this.registeredPads.get(channel.loadedPadRef.padId);
+    if (!snapshot) return { ok: false };
+    snapshot.savedHotcuesMs = this.cloneHotcues(channel.hotcuesMs);
+    channel.hasLocalHotcueOverride = false;
+    this.notifyStateChange();
+    return { ok: true, padId: snapshot.padId };
+  }
+
+  getDeckChannelStates(): DeckChannelState[] {
+    const result: DeckChannelState[] = [];
+    for (let i = 1; i <= this.deckChannelCount; i += 1) {
+      const channel = this.getDeckChannel(i);
+      if (!channel) continue;
+      const pad = channel.pad ? {
+        padId: channel.pad.padId,
+        padName: channel.pad.padName,
+        bankId: channel.pad.bankId,
+        bankName: channel.pad.bankName,
+        audioUrl: channel.pad.audioUrl,
+        color: channel.pad.color,
+        volume: channel.pad.volume,
+        effectiveVolume: Math.max(0, Math.min(1, channel.pad.volume * channel.channelVolume * this.masterVolume)),
+        currentMs: channel.playheadMs,
+        endMs: Math.max(0, this.getDeckEndMs(channel) - this.getDeckStartMs(channel)),
+        playStartTime: 0,
+        channelId: channel.channelId
+      } : null;
+      result.push({
+        channelId: channel.channelId,
+        channelVolume: channel.channelVolume,
+        loadedPadRef: channel.loadedPadRef ? { ...channel.loadedPadRef } : null,
+        isPlaying: channel.isPlaying,
+        isPaused: channel.isPaused,
+        playheadMs: channel.playheadMs,
+        durationMs: channel.durationMs,
+        hotcuesMs: this.cloneHotcues(channel.hotcuesMs),
+        hasLocalHotcueOverride: channel.hasLocalHotcueOverride,
+        collapsed: channel.collapsed,
+        waveformKey: channel.waveformKey,
+        pad
+      });
+    }
+    return result;
+  }
+
+  getChannelStates() {
+    return this.getDeckChannelStates();
+  }
+
+  setChannelVolume(channelId: number, volume: number) {
+    const safe = Math.max(0, Math.min(1, volume));
+    const current = this.getChannelVolume(channelId);
+    if (Math.abs(current - safe) < 0.001) return;
+    this.channelVolumes.set(channelId, safe);
+    const channel = this.getDeckChannel(channelId);
+    if (channel) {
+      channel.channelVolume = safe;
+      this.syncDeckChannelVolume(channel);
+    }
+    this.notifyStateChange();
+  }
+
   getChannelVolume(channelId: number) {
+    const channel = this.getDeckChannel(channelId);
+    if (channel) return channel.channelVolume;
     return this.channelVolumes.get(channelId) ?? 1;
   }
 
-  stopChannel(channelId: number) {
-    const padId = this.channelAssignments.get(channelId);
-    if (padId) {
-      this.stopPad(padId, 'instant');
-    }
+  stopChannel(channelId: number, mode: StopMode = 'instant') {
+    const channel = this.getDeckChannel(channelId);
+    if (!channel) return;
+    this.stopDeckChannelInternal(channel, mode);
   }
 
-  stopAllPads(mode: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter' = 'instant'): void {
+  stopAllPads(mode: StopMode = 'instant'): void {
     this.audioInstances.forEach(instance => {
       if (instance.isPlaying) this.stopPad(instance.padId, mode);
     });
+    for (let i = 1; i <= this.deckChannelCount; i += 1) {
+      this.stopChannel(i, mode);
+    }
   }
 
   setGlobalMute(muted: boolean): void {
     this.globalMuted = muted;
     this.audioInstances.forEach(instance => this.updateInstanceVolume(instance));
+    for (let i = 1; i <= this.deckChannelCount; i += 1) {
+      const channel = this.getDeckChannel(i);
+      if (channel) this.syncDeckChannelVolume(channel);
+    }
+    this.notifyStateChange();
   }
 
   setMasterVolume(volume: number): void {
@@ -2105,6 +2949,11 @@ class GlobalPlaybackManagerClass {
       if (!this.isIOS) {
         this.audioInstances.forEach(instance => this.updateInstanceVolume(instance));
       }
+      for (let i = 1; i <= this.deckChannelCount; i += 1) {
+        const channel = this.getDeckChannel(i);
+        if (channel) this.syncDeckChannelVolume(channel);
+      }
+      this.notifyStateChange();
     });
   }
 
@@ -2130,6 +2979,10 @@ class GlobalPlaybackManagerClass {
 
       this.globalEQ = pending;
       this.audioInstances.forEach(instance => this.updateInstanceEQ(instance));
+      for (let i = 1; i <= this.deckChannelCount; i += 1) {
+        const channel = this.getDeckChannel(i);
+        if (channel) this.updateDeckChannelEQ(channel);
+      }
     });
   }
 
@@ -2371,7 +3224,7 @@ export function useGlobalPlaybackManager(): GlobalPlaybackManager {
       globalPlaybackManager.unregisterPad(padId),
     playPad: (padId: string) =>
       globalPlaybackManager.playPad(padId),
-    stopPad: (padId: string, mode?: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter', keepChannel?: boolean) =>
+    stopPad: (padId: string, mode?: StopMode, keepChannel?: boolean) =>
       globalPlaybackManager.stopPad(padId, mode, keepChannel),
     togglePad: (padId: string) =>
       globalPlaybackManager.togglePad(padId),
@@ -2399,13 +3252,45 @@ export function useGlobalPlaybackManager(): GlobalPlaybackManager {
       globalPlaybackManager.getLegacyPlayingPads(),
     getChannelStates: () =>
       globalPlaybackManager.getChannelStates(),
+    getDeckChannelStates: () =>
+      globalPlaybackManager.getDeckChannelStates(),
+    loadPadToChannel: (channelId: number, padId: string) =>
+      globalPlaybackManager.loadPadToChannel(channelId, padId),
+    unloadChannel: (channelId: number) =>
+      globalPlaybackManager.unloadChannel(channelId),
+    playChannel: (channelId: number) =>
+      globalPlaybackManager.playChannel(channelId),
+    pauseChannel: (channelId: number) =>
+      globalPlaybackManager.pauseChannel(channelId),
+    seekChannel: (channelId: number, ms: number) =>
+      globalPlaybackManager.seekChannel(channelId, ms),
+    setChannelHotcue: (channelId: number, slotIndex: number, ms: number | null) =>
+      globalPlaybackManager.setChannelHotcue(channelId, slotIndex, ms),
+    clearChannelHotcue: (channelId: number, slotIndex: number) =>
+      globalPlaybackManager.clearChannelHotcue(channelId, slotIndex),
+    triggerChannelHotcue: (channelId: number, slotIndex: number) =>
+      globalPlaybackManager.triggerChannelHotcue(channelId, slotIndex),
+    setChannelCollapsed: (channelId: number, collapsed: boolean) =>
+      globalPlaybackManager.setChannelCollapsed(channelId, collapsed),
+    setChannelCount: (count: number) =>
+      globalPlaybackManager.setChannelCount(count),
+    getChannelCount: () =>
+      globalPlaybackManager.getChannelCount(),
+    resetDeckPlaybackToStart: () =>
+      globalPlaybackManager.resetDeckPlaybackToStart(),
+    hydrateDeckLayout: (deckState: Array<{ channelId: number; loadedPadRef: DeckLoadedPadRef | null; hotcuesMs?: HotcueTuple; collapsed?: boolean; channelVolume?: number }>) =>
+      globalPlaybackManager.hydrateDeckLayout(deckState),
+    persistDeckLayoutSnapshot: () =>
+      globalPlaybackManager.persistDeckLayoutSnapshot(),
+    saveChannelHotcuesToPad: (channelId: number) =>
+      globalPlaybackManager.saveChannelHotcuesToPad(channelId),
     setChannelVolume: (channelId: number, volume: number) =>
       globalPlaybackManager.setChannelVolume(channelId, volume),
     getChannelVolume: (channelId: number) =>
       globalPlaybackManager.getChannelVolume(channelId),
-    stopChannel: (channelId: number) =>
-      globalPlaybackManager.stopChannel(channelId),
-    stopAllPads: (mode?: 'instant' | 'fadeout' | 'brake' | 'backspin' | 'filter') =>
+    stopChannel: (channelId: number, mode?: StopMode) =>
+      globalPlaybackManager.stopChannel(channelId, mode),
+    stopAllPads: (mode?: StopMode) =>
       globalPlaybackManager.stopAllPads(mode),
     setGlobalMute: (muted: boolean) =>
       globalPlaybackManager.setGlobalMute(muted),

@@ -12,7 +12,8 @@ export interface PadData {
   shortcutKey?: string; // Optional keyboard shortcut
   midiNote?: number; // Optional MIDI note mapping
   midiCC?: number; // Optional MIDI CC mapping
-  ignoreChannel?: boolean; // Optional: bypass channel assignment
+  ignoreChannel?: boolean; // Deprecated compatibility field; no longer used for routing
+  savedHotcuesMs?: [number | null, number | null, number | null, number | null];
   color: string;
   triggerMode: 'toggle' | 'hold' | 'stutter' | 'unmute';
   playbackMode: 'once' | 'loop' | 'stopper';
@@ -80,6 +81,7 @@ export interface PlayingPadInfo {
   padName: string;
   bankId: string;
   bankName: string;
+  audioUrl?: string;
   color: string;
   volume: number;
   effectiveVolume?: number; // Runtime volume that may differ from original
@@ -91,6 +93,26 @@ export interface PlayingPadInfo {
 export interface ChannelState {
   channelId: number;
   channelVolume: number;
+  pad: PlayingPadInfo | null;
+}
+
+export interface ChannelLoadedPadRef {
+  bankId: string;
+  padId: string;
+}
+
+export interface ChannelDeckState {
+  channelId: number;
+  loadedPadRef: ChannelLoadedPadRef | null;
+  isPlaying: boolean;
+  isPaused: boolean;
+  playheadMs: number;
+  durationMs: number;
+  channelVolume: number;
+  hotcuesMs: [number | null, number | null, number | null, number | null];
+  hasLocalHotcueOverride: boolean;
+  collapsed: boolean;
+  waveformKey: string | null;
   pad: PlayingPadInfo | null;
 }
 

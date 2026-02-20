@@ -25,6 +25,16 @@ interface AppSettings {
   stopMode: StopMode;
   sideMenuOpen: boolean;
   mixerOpen: boolean;
+  channelCount: number;
+  mixerEqCollapsed: boolean;
+  channelCollapsedMap: Record<number, boolean>;
+  deckLayout: Array<{
+    channelId: number;
+    loadedPadRef: { bankId: string; padId: string } | null;
+    hotcuesMs: [number | null, number | null, number | null, number | null];
+    collapsed: boolean;
+    channelVolume: number;
+  }>;
   sidePanelMode: 'overlay' | 'reflow';
   editMode: boolean;
   padSize: number;
@@ -131,9 +141,13 @@ type ExtendedSystemAction =
 const defaultSettings: AppSettings = {
   masterVolume: 1,
   eqSettings: { low: 0, mid: 0, high: 0 },
-  stopMode: 'brake',
+  stopMode: 'instant',
   sideMenuOpen: false,
   mixerOpen: false,
+  channelCount: 4,
+  mixerEqCollapsed: typeof window !== 'undefined' ? window.innerWidth < 768 : true,
+  channelCollapsedMap: {},
+  deckLayout: [],
   sidePanelMode: 'overlay',
   editMode: false,
   padSize: 5,
@@ -145,13 +159,19 @@ const defaultSettings: AppSettings = {
 };
 
 const mergeSystemMappings = (incoming?: Partial<SystemMappings> | null): SystemMappings => {
-  const merged = {
+  const merged: SystemMappings & { toggleTheme?: unknown } = {
     ...DEFAULT_SYSTEM_MAPPINGS,
     ...(incoming || {})
-  } as SystemMappings & { toggleTheme?: unknown };
+  };
 
   if ('toggleTheme' in merged) {
-    delete (merged as Record<string, unknown>).toggleTheme;
+    delete merged.toggleTheme;
+  }
+
+  if (typeof merged.channelCount !== 'number' || !Number.isFinite(merged.channelCount)) {
+    merged.channelCount = DEFAULT_SYSTEM_MAPPINGS.channelCount;
+  } else {
+    merged.channelCount = Math.max(2, Math.min(8, Math.floor(merged.channelCount)));
   }
 
   return merged as SystemMappings;
@@ -199,7 +219,7 @@ export function SamplerPadApp() {
     triggerUnmuteToggle: (padId: string) => void;
   };
   const { theme, toggleTheme } = useTheme();
-  const { width: windowWidth } = useWindowSize();
+  const { width: windowWidth, height: windowHeight } = useWindowSize();
   const midi = useWebMidi();
   const { user, profile } = useAuth();
   const settingsSaveTimeoutRef = React.useRef<number | null>(null);
@@ -214,7 +234,25 @@ export function SamplerPadApp() {
       if (saved) {
         const parsed = JSON.parse(saved);
         const mergedMappings = mergeSystemMappings(parsed.systemMappings || {});
-        return { ...defaultSettings, ...parsed, systemMappings: mergedMappings };
+        const parsedChannelCount = typeof parsed.channelCount === 'number'
+          ? Math.max(2, Math.min(8, Math.floor(parsed.channelCount)))
+          : defaultSettings.channelCount;
+        return {
+          ...defaultSettings,
+          ...parsed,
+          channelCount: parsedChannelCount,
+          mixerEqCollapsed: typeof parsed.mixerEqCollapsed === 'boolean'
+            ? parsed.mixerEqCollapsed
+            : defaultSettings.mixerEqCollapsed,
+          channelCollapsedMap: typeof parsed.channelCollapsedMap === 'object' && parsed.channelCollapsedMap
+            ? parsed.channelCollapsedMap
+            : {},
+          deckLayout: Array.isArray(parsed.deckLayout) ? parsed.deckLayout : [],
+          systemMappings: {
+            ...mergedMappings,
+            channelCount: parsedChannelCount
+          }
+        };
       }
     } catch (error) {
       console.warn('Failed to load settings:', error);
@@ -235,6 +273,7 @@ export function SamplerPadApp() {
   const [VolumeMixer, setVolumeMixer] = React.useState<React.ComponentType<any> | null>(null);
   const [editRequest, setEditRequest] = React.useState<{ padId: string; token: number } | null>(null);
   const [editBankRequest, setEditBankRequest] = React.useState<{ bankId: string; token: number } | null>(null);
+  const [armedLoadChannelId, setArmedLoadChannelId] = React.useState<number | null>(null);
   const bankScrollPositionsRef = React.useRef<Map<string, number>>(new Map());
   const singleScrollRef = React.useRef<HTMLDivElement | null>(null);
   const primaryScrollRef = React.useRef<HTMLDivElement | null>(null);
@@ -245,6 +284,8 @@ export function SamplerPadApp() {
   const lastSingleScrollBankRef = React.useRef<string | null>(null);
   const lastPrimaryScrollBankRef = React.useRef<string | null>(null);
   const lastSecondaryScrollBankRef = React.useRef<string | null>(null);
+  const deckHydratedRef = React.useRef(false);
+  const lastDeckPersistRef = React.useRef('');
 
   // Dynamically load VolumeMixer only when mixer is open
   React.useEffect(() => {
@@ -278,6 +319,21 @@ export function SamplerPadApp() {
       }
     };
   }, [settings]);
+
+  React.useEffect(() => {
+    const mapped = typeof settings.systemMappings.channelCount === 'number'
+      ? Math.max(2, Math.min(8, Math.floor(settings.systemMappings.channelCount)))
+      : null;
+    if (mapped === null || mapped === settings.channelCount) return;
+    setSettings((prev) => ({
+      ...prev,
+      channelCount: mapped,
+      systemMappings: {
+        ...prev.systemMappings,
+        channelCount: mapped
+      }
+    }));
+  }, [settings.channelCount, settings.systemMappings.channelCount]);
 
   React.useEffect(() => {
     if (!settings.midiEnabled) return;
@@ -513,6 +569,31 @@ export function SamplerPadApp() {
     },
     []
   );
+
+  const handleChannelCountChange = React.useCallback((nextCount: number) => {
+    const safeCount = Math.max(2, Math.min(8, Math.floor(nextCount || 4)));
+    const previousCount = Math.max(2, Math.min(8, Math.floor(settings.channelCount || 4)));
+    if (safeCount < previousCount) {
+      const removedHasPlayingDeck = playbackManager
+        .getChannelStates()
+        .some((channel) => channel.channelId > safeCount && channel.isPlaying);
+      if (removedHasPlayingDeck) {
+        const confirmed = window.confirm(
+          `Reduce deck channels to ${safeCount}? This will stop playback on removed channels.`
+        );
+        if (!confirmed) return;
+      }
+    }
+    setSettings((prev) => ({
+      ...prev,
+      channelCount: safeCount,
+      systemMappings: {
+        ...prev.systemMappings,
+        channelCount: safeCount
+      }
+    }));
+    playbackManager.setChannelCount(safeCount);
+  }, [playbackManager, settings.channelCount]);
 
   const systemActions = React.useMemo(
     () =>
@@ -778,6 +859,52 @@ export function SamplerPadApp() {
     return recoverMissingMediaFromBanks(files);
   }, [recoverMissingMediaFromBanks]);
 
+  React.useEffect(() => {
+    playbackManager.setChannelCount(settings.channelCount);
+  }, [playbackManager, settings.channelCount]);
+
+  React.useEffect(() => {
+    if (deckHydratedRef.current) return;
+    if (!banks.length) return;
+
+    let cancelled = false;
+    const hydrateDeck = async () => {
+      for (const entry of settings.deckLayout || []) {
+        if (cancelled) return;
+        if (!entry?.loadedPadRef?.padId || typeof entry.channelId !== 'number') continue;
+        const bank = banks.find((item) => item.id === entry.loadedPadRef?.bankId);
+        const pad = bank?.pads.find((item) => item.id === entry.loadedPadRef?.padId);
+        if (!bank || !pad) continue;
+        await playbackManager.registerPad(pad.id, pad, bank.id, bank.name);
+        const loaded = playbackManager.loadPadToChannel(entry.channelId, pad.id);
+        if (!loaded) continue;
+        if (Array.isArray(entry.hotcuesMs)) {
+          entry.hotcuesMs.slice(0, 4).forEach((cue, index) => {
+            if (typeof cue === 'number') {
+              playbackManager.setChannelHotcue(entry.channelId, index, cue);
+            } else {
+              playbackManager.clearChannelHotcue(entry.channelId, index);
+            }
+          });
+        }
+        if (typeof entry.collapsed === 'boolean') {
+          playbackManager.setChannelCollapsed(entry.channelId, entry.collapsed);
+        }
+        if (typeof entry.channelVolume === 'number') {
+          playbackManager.setChannelVolume(entry.channelId, entry.channelVolume);
+        }
+      }
+
+      playbackManager.resetDeckPlaybackToStart();
+      deckHydratedRef.current = true;
+    };
+
+    void hydrateDeck();
+    return () => {
+      cancelled = true;
+    };
+  }, [banks, playbackManager, settings.deckLayout]);
+
   const normalizeMidiValue = React.useCallback((value: number) => {
     // Scale full MIDI CC range (0-127) to 0-1.
     const clamped = Math.max(0, Math.min(127, value));
@@ -787,6 +914,26 @@ export function SamplerPadApp() {
   // Get playing pads from global manager
   const channelStates = playbackManager.getChannelStates();
   const legacyPlayingPads = playbackManager.getLegacyPlayingPads();
+
+  React.useEffect(() => {
+    const snapshot = playbackManager.persistDeckLayoutSnapshot();
+    const nextJson = JSON.stringify(snapshot);
+    if (lastDeckPersistRef.current === nextJson) return;
+    lastDeckPersistRef.current = nextJson;
+    setSettings((prev) => {
+      const prevJson = JSON.stringify(prev.deckLayout || []);
+      if (prevJson === nextJson) return prev;
+      const collapsedMap: Record<number, boolean> = {};
+      snapshot.forEach((item) => {
+        collapsedMap[item.channelId] = !!item.collapsed;
+      });
+      return {
+        ...prev,
+        deckLayout: snapshot,
+        channelCollapsedMap: collapsedMap
+      };
+    });
+  }, [channelStates, playbackManager]);
 
   const getPreferredOutputName = React.useCallback(() => {
     const selectedInput = midi.inputs.find((input) => input.id === midi.selectedInputId);
@@ -1026,13 +1173,21 @@ export function SamplerPadApp() {
     };
   }, []);
 
+  const isPortraitOrSmallScreen = React.useMemo(() => {
+    const isPhonePortrait = windowWidth < 900 && windowHeight > windowWidth;
+    return windowWidth < 768 || isPhonePortrait;
+  }, [windowHeight, windowWidth]);
+
+  const shouldFocusPadsForChannelLoad = React.useMemo(() => {
+    return settings.sidePanelMode === 'overlay' || isPortraitOrSmallScreen;
+  }, [settings.sidePanelMode, isPortraitOrSmallScreen]);
+
   // Handle responsive side menu behavior
   React.useEffect(() => {
-    const isMobile = windowWidth < 768;
-    if (isMobile && settings.sideMenuOpen && settings.mixerOpen) {
+    if (isPortraitOrSmallScreen && settings.sideMenuOpen && settings.mixerOpen) {
       updateSetting('mixerOpen', false);
     }
-  }, [windowWidth, settings.sideMenuOpen, settings.mixerOpen, updateSetting]);
+  }, [isPortraitOrSmallScreen, settings.sideMenuOpen, settings.mixerOpen, updateSetting]);
 
   // Apply global settings to playback manager
   React.useEffect(() => {
@@ -1049,17 +1204,29 @@ export function SamplerPadApp() {
 
   const handleSideMenuToggle = React.useCallback((open: boolean) => {
     updateSetting('sideMenuOpen', open);
-    if (open && windowWidth < 768) {
+    if (open && isPortraitOrSmallScreen) {
       updateSetting('mixerOpen', false);
+      return;
     }
-  }, [windowWidth, updateSetting]);
+    if (!open && armedLoadChannelId !== null && shouldFocusPadsForChannelLoad) {
+      updateSetting('mixerOpen', true);
+    }
+  }, [armedLoadChannelId, isPortraitOrSmallScreen, shouldFocusPadsForChannelLoad, updateSetting]);
 
   const handleMixerToggle = React.useCallback((open: boolean) => {
     updateSetting('mixerOpen', open);
-    if (open && windowWidth < 768) {
+    if (open && isPortraitOrSmallScreen) {
       updateSetting('sideMenuOpen', false);
     }
-  }, [windowWidth, updateSetting]);
+  }, [isPortraitOrSmallScreen, updateSetting]);
+
+  React.useEffect(() => {
+    if (armedLoadChannelId === null) return;
+    const safeChannelCount = Math.max(2, Math.min(8, settings.channelCount || 4));
+    if (armedLoadChannelId > safeChannelCount) {
+      setArmedLoadChannelId(null);
+    }
+  }, [armedLoadChannelId, settings.channelCount]);
 
   const handleFileUpload = React.useCallback(async (file: File, targetBankId?: string) => {
     try {
@@ -1099,8 +1266,11 @@ export function SamplerPadApp() {
   }, [addPad, user]);
 
   const handleStopAll = React.useCallback(() => {
-
-    playbackManager.stopAllPads(settings.stopMode);
+    // Header STOP ALL should only stop pad-grid playback, not deck channels.
+    const playingPads = playbackManager.getLegacyPlayingPads();
+    playingPads.forEach((pad) => {
+      playbackManager.stopPad(pad.padId, settings.stopMode);
+    });
   }, [playbackManager, settings.stopMode]);
 
   const handleStopSpecificPad = React.useCallback((padId: string) => {
@@ -1131,11 +1301,98 @@ export function SamplerPadApp() {
   }, [playbackManager]);
 
   const handleStopChannel = React.useCallback((channelId: number) => {
-    const channelState = playbackManager.getChannelStates().find((c) => c.channelId === channelId);
-    if (channelState?.pad?.padId) {
-      playbackManager.stopPad(channelState.pad.padId, settings.stopMode);
-    }
+    playbackManager.stopChannel(channelId, settings.stopMode);
   }, [playbackManager, settings.stopMode]);
+
+  const handlePauseChannel = React.useCallback((channelId: number) => {
+    playbackManager.pauseChannel(channelId);
+  }, [playbackManager]);
+
+  const handlePlayChannel = React.useCallback((channelId: number) => {
+    playbackManager.playChannel(channelId);
+  }, [playbackManager]);
+
+  const handleSeekChannel = React.useCallback((channelId: number, ms: number) => {
+    playbackManager.seekChannel(channelId, ms);
+  }, [playbackManager]);
+
+  const handleUnloadChannel = React.useCallback((channelId: number) => {
+    playbackManager.unloadChannel(channelId);
+  }, [playbackManager]);
+
+  const handleTriggerChannelHotcue = React.useCallback((channelId: number, slotIndex: number) => {
+    playbackManager.triggerChannelHotcue(channelId, slotIndex);
+  }, [playbackManager]);
+
+  const persistChannelHotcuesToPad = React.useCallback((channelId: number) => {
+    const result = playbackManager.saveChannelHotcuesToPad(channelId);
+    if (!result.ok || !result.padId) return;
+    for (const bank of banks) {
+      const pad = bank.pads.find((entry) => entry.id === result.padId);
+      if (!pad) continue;
+      const deckChannel = playbackManager.getChannelStates().find((entry) => entry.channelId === channelId);
+      if (!deckChannel) return;
+      updatePad(bank.id, pad.id, {
+        ...pad,
+        savedHotcuesMs: deckChannel.hotcuesMs
+      });
+      return;
+    }
+  }, [banks, playbackManager, updatePad]);
+
+  const handleSetChannelHotcue = React.useCallback((channelId: number, slotIndex: number, ms: number | null) => {
+    playbackManager.setChannelHotcue(channelId, slotIndex, ms);
+    persistChannelHotcuesToPad(channelId);
+  }, [playbackManager, persistChannelHotcuesToPad]);
+
+  const handleSetChannelCollapsed = React.useCallback((channelId: number, collapsed: boolean) => {
+    playbackManager.setChannelCollapsed(channelId, collapsed);
+  }, [playbackManager]);
+
+  const handleArmChannelLoad = React.useCallback((channelId: number) => {
+    const isSameChannel = armedLoadChannelId === channelId;
+    const next = isSameChannel ? null : channelId;
+    setArmedLoadChannelId(next);
+
+    if (!isSameChannel && shouldFocusPadsForChannelLoad) {
+      updateSetting('sideMenuOpen', false);
+      updateSetting('mixerOpen', false);
+    }
+  }, [armedLoadChannelId, shouldFocusPadsForChannelLoad, updateSetting]);
+
+  const handleCancelChannelLoad = React.useCallback(() => {
+    setArmedLoadChannelId(null);
+  }, []);
+
+  const handleCancelChannelLoadFromHeader = React.useCallback(() => {
+    setArmedLoadChannelId(null);
+    if (shouldFocusPadsForChannelLoad) {
+      updateSetting('mixerOpen', false);
+    }
+  }, [shouldFocusPadsForChannelLoad, updateSetting]);
+
+  const handleSelectPadForChannelLoad = React.useCallback(async (pad: PadData, bankId: string, bankName: string) => {
+    if (armedLoadChannelId === null) return;
+    const channelId = armedLoadChannelId;
+
+    try {
+      await playbackManager.registerPad(pad.id, pad, bankId, bankName);
+      const loaded = playbackManager.loadPadToChannel(channelId, pad.id);
+      if (!loaded) {
+        setError(`Failed to load "${pad.name}" into Channel ${channelId}.`);
+        setShowErrorDialog(true);
+        return;
+      }
+      setArmedLoadChannelId(null);
+      if (shouldFocusPadsForChannelLoad) {
+        updateSetting('sideMenuOpen', false);
+      }
+      updateSetting('mixerOpen', true);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Failed to load pad into channel.');
+      setShowErrorDialog(true);
+    }
+  }, [armedLoadChannelId, playbackManager, shouldFocusPadsForChannelLoad, updateSetting]);
 
   const handlePadSizeChange = React.useCallback((size: number) => {
     // In dual mode, ensure pad size is even
@@ -1622,7 +1879,11 @@ export function SamplerPadApp() {
             flashSystemLed(settings.systemMappings.stopAll?.midiNote, '#00ff00', 6);
             return;
           case 'mixer':
-            handleMixerToggle(!settings.mixerOpen);
+            if (armedLoadChannelId !== null) {
+              handleCancelChannelLoadFromHeader();
+            } else {
+              handleMixerToggle(!settings.mixerOpen);
+            }
             return;
           case 'editMode':
             updateSetting('editMode', !settings.editMode);
@@ -1682,7 +1943,8 @@ export function SamplerPadApp() {
       }
 
       const channelMappings = (settings.systemMappings as SystemMappings & { channelMappings?: ChannelMappingEntry[] }).channelMappings || [];
-      for (let i = 0; i < channelMappings.length; i += 1) {
+      const activeChannelLimit = Math.max(2, Math.min(8, settings.channelCount || 4));
+      for (let i = 0; i < Math.min(channelMappings.length, activeChannelLimit); i += 1) {
         const mapping = channelMappings[i];
         if (!mapping) continue;
         if (mapping.keyUp && mapping.keyUp === normalized) {
@@ -1820,6 +2082,7 @@ export function SamplerPadApp() {
     };
   }, [
     handleMixerToggle,
+    handleCancelChannelLoadFromHeader,
     handleSideMenuToggle,
     handleStopAll,
     handleToggleMute,
@@ -1830,6 +2093,7 @@ export function SamplerPadApp() {
     settings.masterVolume,
     settings.mixerOpen,
     settings.sideMenuOpen,
+    armedLoadChannelId,
     settings.systemMappings,
     updateSetting,
     isDualMode,
@@ -1884,7 +2148,11 @@ export function SamplerPadApp() {
           flashSystemLed(settings.systemMappings.stopAll?.midiNote, '#00ff00', 6);
           return true;
         case 'mixer':
-          handleMixerToggle(!settings.mixerOpen);
+          if (armedLoadChannelId !== null) {
+            handleCancelChannelLoadFromHeader();
+          } else {
+            handleMixerToggle(!settings.mixerOpen);
+          }
           return true;
         case 'editMode':
           updateSetting('editMode', !settings.editMode);
@@ -1971,7 +2239,8 @@ export function SamplerPadApp() {
 
       if (message.type === 'noteon') {
       const channelMappings = (settings.systemMappings as SystemMappings & { channelMappings?: ChannelMappingEntry[] }).channelMappings || [];
-      const channelStopIndex = channelMappings.findIndex((mapping) => mapping?.midiNote === message.note);
+      const activeChannelLimit = Math.max(2, Math.min(8, settings.channelCount || 4));
+      const channelStopIndex = channelMappings.findIndex((mapping, index) => index < activeChannelLimit && mapping?.midiNote === message.note);
       if (channelStopIndex >= 0) {
         handleStopChannel(channelStopIndex + 1);
         return;
@@ -2057,7 +2326,8 @@ export function SamplerPadApp() {
       }
     } else if (message.type === 'cc') {
       const channelMappings = (settings.systemMappings as SystemMappings & { channelMappings?: ChannelMappingEntry[] }).channelMappings || [];
-      const channelIndex = channelMappings.findIndex((mapping) => mapping?.midiCC === message.cc);
+      const activeChannelLimit = Math.max(2, Math.min(8, settings.channelCount || 4));
+      const channelIndex = channelMappings.findIndex((mapping, index) => index < activeChannelLimit && mapping?.midiCC === message.cc);
       if (channelIndex >= 0) {
         const next = normalizeMidiValue(message.value);
         playbackManager.setChannelVolume(channelIndex + 1, Number(next.toFixed(3)));
@@ -2153,9 +2423,11 @@ export function SamplerPadApp() {
     settings.masterVolume,
     settings.mixerOpen,
     settings.sideMenuOpen,
+    armedLoadChannelId,
     updateSetting,
     handleStopAll,
     handleMixerToggle,
+    handleCancelChannelLoadFromHeader,
     handleToggleMute,
     handleSideMenuToggle,
     handlePadSizeIncrease,
@@ -2288,13 +2560,12 @@ export function SamplerPadApp() {
   // Overlay mode keeps width stable to minimize reflow.
   // Reflow mode shifts content on desktop only.
   const getMainContentMargin = React.useMemo(() => {
-    const isMobile = windowWidth < 768;
-    if (isMobile || settings.sidePanelMode === 'overlay') return 'mx-0';
+    if (isPortraitOrSmallScreen || settings.sidePanelMode === 'overlay') return 'mx-0';
     if (settings.sideMenuOpen && !settings.mixerOpen) return 'ml-64';
-    if (!settings.sideMenuOpen && settings.mixerOpen) return 'mr-64';
-    if (settings.sideMenuOpen && settings.mixerOpen) return 'mx-64';
+    if (!settings.sideMenuOpen && settings.mixerOpen) return 'mr-[28rem]';
+    if (settings.sideMenuOpen && settings.mixerOpen) return 'ml-64 mr-[28rem]';
     return 'mx-0';
-  }, [windowWidth, settings.sidePanelMode, settings.sideMenuOpen, settings.mixerOpen]);
+  }, [isPortraitOrSmallScreen, settings.sidePanelMode, settings.sideMenuOpen, settings.mixerOpen]);
 
   const getMainContentPadding = React.useMemo(() => {
     const isMobile = windowWidth < 768;
@@ -2415,6 +2686,7 @@ export function SamplerPadApp() {
           open={settings.mixerOpen}
           onOpenChange={handleMixerToggle}
           channelStates={channelStates}
+          channelCount={settings.channelCount}
           legacyPlayingPads={legacyPlayingPads}
           masterVolume={settings.masterVolume}
           onMasterVolumeChange={(volume) => updateSetting('masterVolume', volume)}
@@ -2422,8 +2694,22 @@ export function SamplerPadApp() {
           onStopPad={handleStopSpecificPad}
           onChannelVolumeChange={handleChannelVolumeChange}
           onStopChannel={handleStopChannel}
+          onPlayChannel={handlePlayChannel}
+          onPauseChannel={handlePauseChannel}
+          onSeekChannel={handleSeekChannel}
+          onUnloadChannel={handleUnloadChannel}
+          onArmChannelLoad={handleArmChannelLoad}
+          onCancelChannelLoad={handleCancelChannelLoad}
+          armedLoadChannelId={armedLoadChannelId}
+          onSetChannelHotcue={handleSetChannelHotcue}
+          onTriggerChannelHotcue={handleTriggerChannelHotcue}
+          onSetChannelCollapsed={handleSetChannelCollapsed}
+          stopMode={settings.stopMode}
+          editMode={settings.editMode}
           eqSettings={settings.eqSettings}
           onEqChange={(eq) => updateSetting('eqSettings', eq)}
+          mixerEqCollapsed={settings.mixerEqCollapsed}
+          onMixerEqCollapsedChange={(collapsed) => updateSetting('mixerEqCollapsed', collapsed)}
           theme={theme}
           windowWidth={windowWidth}
         />
@@ -2442,6 +2728,7 @@ export function SamplerPadApp() {
             globalMuted={globalMuted}
             sideMenuOpen={settings.sideMenuOpen}
             mixerOpen={settings.mixerOpen}
+            channelLoadArmed={armedLoadChannelId !== null}
             theme={theme}
             windowWidth={windowWidth}
             onFileUpload={handleFileUpload}
@@ -2450,6 +2737,7 @@ export function SamplerPadApp() {
             onStopAll={handleStopAll}
             onToggleSideMenu={() => handleSideMenuToggle(!settings.sideMenuOpen)}
             onToggleMixer={() => handleMixerToggle(!settings.mixerOpen)}
+            onCancelChannelLoad={handleCancelChannelLoadFromHeader}
             onToggleTheme={toggleTheme}
             onExitDualMode={() => setPrimaryBank(null)}
             onPadSizeChange={handlePadSizeChange}
@@ -2471,6 +2759,8 @@ export function SamplerPadApp() {
             onUpdateSystemMidi={updateSystemMidi}
             onUpdateSystemColor={updateSystemColor}
             onSetMasterVolumeCC={setMasterVolumeCC}
+            channelCount={settings.channelCount}
+            onChangeChannelCount={handleChannelCountChange}
             onUpdateChannelMapping={updateChannelMapping}
             padBankShortcutKeys={padBankShortcutKeys}
             padBankMidiNotes={padBankMidiNotes}
@@ -2538,6 +2828,8 @@ export function SamplerPadApp() {
                     blockedShortcutKeys={blockedShortcutKeys}
                     blockedMidiNotes={blockedMidiNotes}
                     blockedMidiCCs={blockedMidiCCs}
+                    channelLoadArmed={armedLoadChannelId !== null}
+                    onSelectPadForChannelLoad={handleSelectPadForChannelLoad}
                   />
                 </div>
               </div>
@@ -2583,6 +2875,8 @@ export function SamplerPadApp() {
                       blockedShortcutKeys={blockedShortcutKeys}
                       blockedMidiNotes={blockedMidiNotes}
                       blockedMidiCCs={blockedMidiCCs}
+                      channelLoadArmed={armedLoadChannelId !== null}
+                      onSelectPadForChannelLoad={handleSelectPadForChannelLoad}
                     />
                   </div>
                 ) : (
@@ -2638,6 +2932,8 @@ export function SamplerPadApp() {
                   blockedShortcutKeys={blockedShortcutKeys}
                   blockedMidiNotes={blockedMidiNotes}
                   blockedMidiCCs={blockedMidiCCs}
+                  channelLoadArmed={armedLoadChannelId !== null}
+                  onSelectPadForChannelLoad={handleSelectPadForChannelLoad}
                 />
               </div>
             ) : (

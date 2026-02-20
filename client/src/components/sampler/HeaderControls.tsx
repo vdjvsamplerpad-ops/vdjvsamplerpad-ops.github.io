@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
-import { Upload, Menu, Pencil, Volume2, VolumeX, Square, Sliders, Shield, LogIn } from 'lucide-react';
+import { Upload, Menu, Pencil, Volume2, VolumeX, Square, Sliders, Shield, LogIn, X } from 'lucide-react';
 import { SamplerBank, StopMode } from './types/sampler';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { createPortal } from 'react-dom'
@@ -22,6 +22,7 @@ interface HeaderControlsProps {
   globalMuted: boolean;
   sideMenuOpen: boolean;
   mixerOpen: boolean;
+  channelLoadArmed: boolean;
   theme: 'light' | 'dark';
   windowWidth: number;
   onFileUpload: (file: File, targetBankId?: string) => void;
@@ -30,6 +31,7 @@ interface HeaderControlsProps {
   onStopAll: () => void;
   onToggleSideMenu: () => void;
   onToggleMixer: () => void;
+  onCancelChannelLoad: () => void;
   onToggleTheme: () => void;
   onExitDualMode: () => void;
   onPadSizeChange: (size: number) => void;
@@ -51,6 +53,8 @@ interface HeaderControlsProps {
   onUpdateSystemMidi: (action: SystemAction, midiNote?: number, midiCC?: number) => void;
   onUpdateSystemColor: (action: SystemAction, color?: string) => void;
   onSetMasterVolumeCC: (cc?: number) => void;
+  channelCount: number;
+  onChangeChannelCount: (count: number) => void;
   onUpdateChannelMapping: (channelIndex: number, updates: Partial<{ keyUp?: string; keyDown?: string; keyStop?: string; midiCC?: number; midiNote?: number }>) => void;
   padBankShortcutKeys: Set<string>;
   padBankMidiNotes: Set<number>;
@@ -162,6 +166,7 @@ export function HeaderControls({
   globalMuted,
   sideMenuOpen,
   mixerOpen,
+  channelLoadArmed,
   theme,
   windowWidth,
   onFileUpload,
@@ -170,6 +175,7 @@ export function HeaderControls({
   onStopAll,
   onToggleSideMenu,
   onToggleMixer,
+  onCancelChannelLoad,
   onToggleTheme,
   onExitDualMode,
   onPadSizeChange,
@@ -191,6 +197,8 @@ export function HeaderControls({
   onUpdateSystemMidi,
   onUpdateSystemColor,
   onSetMasterVolumeCC,
+  channelCount,
+  onChangeChannelCount,
   onUpdateChannelMapping,
   padBankShortcutKeys,
   padBankMidiNotes,
@@ -462,20 +470,24 @@ export function HeaderControls({
 
           {/* Mixer Button */}
           <Button
-            onClick={onToggleMixer}
+            onClick={channelLoadArmed ? onCancelChannelLoad : onToggleMixer}
             variant="outline"
             size={isMobileScreen ? "sm" : "default"}
-            className={`${isMobileScreen ? 'w-10' : 'w-24'} transition-all duration-200 ${mixerOpen
+            className={`${isMobileScreen ? 'w-10' : 'w-24'} transition-all duration-200 ${channelLoadArmed
               ? theme === 'dark'
-                ? 'bg-green-500 border-green-400 text-green-300'
-                : 'bg-green-50 border-green-300 text-green-600'
-              : theme === 'dark'
-                ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-green-500 hover:border-green-400 hover:text-green-300'
-                : 'bg-white border-gray-300 text-gray-700 hover:bg-green-50 hover:border-green-300 hover:text-green-600'
+                ? 'bg-red-500/20 border-red-400 text-red-300 hover:bg-red-500/40'
+                : 'bg-red-50 border-red-300 text-red-600 hover:bg-red-100'
+              : mixerOpen
+                ? theme === 'dark'
+                  ? 'bg-green-500 border-green-400 text-green-300'
+                  : 'bg-green-50 border-green-300 text-green-600'
+                : theme === 'dark'
+                  ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-green-500 hover:border-green-400 hover:text-green-300'
+                  : 'bg-white border-gray-300 text-gray-700 hover:bg-green-50 hover:border-green-300 hover:text-green-600'
               }`}
           >
-            <Sliders className="w-4 h-4" />
-            {!isMobileScreen && (isMobileScreen ? '' : 'Mixer')}
+            {channelLoadArmed ? <X className="w-4 h-4" /> : <Sliders className="w-4 h-4" />}
+            {!isMobileScreen && (isMobileScreen ? '' : channelLoadArmed ? 'Cancel' : 'Mixer')}
           </Button>
 
           {/* Login Button (only shown when not logged in) */}
@@ -543,6 +555,8 @@ export function HeaderControls({
         onUpdateSystemMidi={onUpdateSystemMidi}
         onUpdateSystemColor={onUpdateSystemColor}
         onSetMasterVolumeCC={onSetMasterVolumeCC}
+        channelCount={channelCount}
+        onChangeChannelCount={onChangeChannelCount}
         onUpdateChannelMapping={onUpdateChannelMapping}
         padBankShortcutKeys={padBankShortcutKeys}
         padBankMidiNotes={padBankMidiNotes}

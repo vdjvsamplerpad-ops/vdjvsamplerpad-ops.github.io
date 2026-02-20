@@ -65,8 +65,7 @@ export function useAudioPlayer(
         startTimeMs: pad.startTimeMs,
         endTimeMs: pad.endTimeMs,
         pitch: pad.pitch,
-        volume: pad.volume,
-        ignoreChannel: pad.ignoreChannel
+        volume: pad.volume
       });
     }
   }, [
@@ -75,8 +74,7 @@ export function useAudioPlayer(
     pad.startTimeMs,
     pad.endTimeMs,
     pad.pitch,
-    pad.volume,
-    pad.ignoreChannel
+    pad.volume
   ]);
 
   // Update pad metadata when it changes

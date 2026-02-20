@@ -94,7 +94,6 @@ export function PadEditDialog({
   const [midiError, setMidiError] = React.useState<string | null>(null);
   const [midiNote, setMidiNote] = React.useState<number | undefined>((pad as PadWithMidi).midiNote);
   const [midiCC, setMidiCC] = React.useState<number | undefined>((pad as PadWithMidi).midiCC);
-  const [ignoreChannel, setIgnoreChannel] = React.useState(!!pad.ignoreChannel);
   const [midiLearnActive, setMidiLearnActive] = React.useState(false);
   const [audioDuration, setAudioDuration] = React.useState(0);
   const [isUploading, setIsUploading] = React.useState(false);
@@ -123,7 +122,6 @@ export function PadEditDialog({
       setShortcutError(null);
       setMidiNote((pad as PadWithMidi).midiNote);
       setMidiCC((pad as PadWithMidi).midiCC);
-      setIgnoreChannel(!!pad.ignoreChannel);
       setMidiLearnActive(false);
       setMidiError(null);
       setUploadError(null);
@@ -142,8 +140,7 @@ export function PadEditDialog({
         imageData: pad.imageData || '',
         shortcutKey: pad.shortcutKey || '',
         midiNote: (pad as PadWithMidi).midiNote ?? null,
-        midiCC: (pad as PadWithMidi).midiCC ?? null,
-        ignoreChannel: !!pad.ignoreChannel
+        midiCC: (pad as PadWithMidi).midiCC ?? null
       });
 
       if (pad.audioUrl) {
@@ -213,8 +210,7 @@ export function PadEditDialog({
       imageData,
       shortcutKey: shortcutKey || '',
       midiNote: midiNote ?? null,
-      midiCC: midiCC ?? null,
-      ignoreChannel
+      midiCC: midiCC ?? null
     });
   }, [
     name,
@@ -231,8 +227,7 @@ export function PadEditDialog({
     imageData,
     shortcutKey,
     midiNote,
-    midiCC,
-    ignoreChannel
+    midiCC
   ]);
 
   const isDirty = React.useMemo(() => {
@@ -505,7 +500,7 @@ export function PadEditDialog({
         shortcutKey: shortcutKey || undefined,
         midiNote,
         midiCC,
-        ignoreChannel
+        ignoreChannel: pad.ignoreChannel
       };
       
       await onSave(updatedPad);
@@ -525,8 +520,7 @@ export function PadEditDialog({
         imageData,
         shortcutKey: shortcutKey || '',
         midiNote: midiNote ?? null,
-        midiCC: midiCC ?? null,
-        ignoreChannel
+        midiCC: midiCC ?? null
       });
       return true;
     } catch (error) {
@@ -816,16 +810,6 @@ export function PadEditDialog({
                 >
                   Volume: {volume[0]}%
                 </Label>
-                <div className="flex items-center gap-2">
-                  <input
-                    id="ignoreChannel"
-                    type="checkbox"
-                    checked={ignoreChannel}
-                    onChange={(event) => setIgnoreChannel(event.target.checked)}
-                    className="h-4 w-4"
-                  />
-                  <Label htmlFor="ignoreChannel">Ignore Channel</Label>
-                </div>
               </div>
               <Slider
                 value={volume}

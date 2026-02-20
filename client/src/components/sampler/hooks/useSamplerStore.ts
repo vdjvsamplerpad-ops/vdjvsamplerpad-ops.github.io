@@ -705,6 +705,9 @@ const sanitizePadForPersistentCache = (pad: PadData, padIndex: number): PadData 
   startTimeMs: pad.startTimeMs || 0,
   endTimeMs: pad.endTimeMs || 0,
   pitch: pad.pitch || 0,
+  savedHotcuesMs: Array.isArray(pad.savedHotcuesMs)
+    ? (pad.savedHotcuesMs.slice(0, 4) as [number | null, number | null, number | null, number | null])
+    : [null, null, null, null],
   position: pad.position ?? padIndex,
 });
 
@@ -720,6 +723,9 @@ const reviveCachedPad = (pad: any, padIndex: number): PadData => ({
   startTimeMs: pad.startTimeMs || 0,
   endTimeMs: pad.endTimeMs || 0,
   pitch: pad.pitch || 0,
+  savedHotcuesMs: Array.isArray(pad.savedHotcuesMs)
+    ? (pad.savedHotcuesMs.slice(0, 4) as [number | null, number | null, number | null, number | null])
+    : [null, null, null, null],
   position: pad.position ?? padIndex,
 });
 
@@ -1774,6 +1780,9 @@ export function useSamplerStore(): SamplerStore {
           startTimeMs: pad.startTimeMs || 0,
           endTimeMs: pad.endTimeMs || 0,
           pitch: pad.pitch || 0,
+          savedHotcuesMs: Array.isArray(pad.savedHotcuesMs)
+            ? (pad.savedHotcuesMs.slice(0, 4) as [number | null, number | null, number | null, number | null])
+            : [null, null, null, null],
           position: pad.position ?? padIndex,
         })),
       }));
@@ -1802,7 +1811,12 @@ export function useSamplerStore(): SamplerStore {
 
       restoredBanks = await Promise.all(restoredBanks.map(async (bank) => {
         const restoredPads = await Promise.all(bank.pads.map(async (pad) => {
-          const restoredPad: PadData = { ...pad };
+          const restoredPad: PadData = {
+            ...pad,
+            savedHotcuesMs: Array.isArray(pad.savedHotcuesMs)
+              ? (pad.savedHotcuesMs.slice(0, 4) as [number | null, number | null, number | null, number | null])
+              : [null, null, null, null],
+          };
           try {
             const restoredAudio = await restoreFileAccess(
               pad.id,
@@ -1913,7 +1927,10 @@ export function useSamplerStore(): SamplerStore {
                 endTimeMs: pad.endTimeMs,
                 pitch: pad.pitch,
                 position: pad.position,
-                ignoreChannel: pad.ignoreChannel
+                ignoreChannel: pad.ignoreChannel,
+                savedHotcuesMs: Array.isArray(pad.savedHotcuesMs)
+                  ? (pad.savedHotcuesMs.slice(0, 4) as [number | null, number | null, number | null, number | null])
+                  : [null, null, null, null]
               }))
             }))
           };
@@ -1962,14 +1979,12 @@ export function useSamplerStore(): SamplerStore {
         endTimeMs: 0,
         pitch: 0,
         position: maxPosition + 1,
-        ignoreChannel: false
+        ignoreChannel: false,
+        savedHotcuesMs: [null, null, null, null]
       };
       const audio = new Audio(audioUrl);
       audio.addEventListener('loadedmetadata', () => {
         newPad.endTimeMs = audio.duration * 1000;
-        if (audio.duration > 0 && audio.duration < 15) {
-          newPad.ignoreChannel = true;
-        }
         setBanks(prev => prev.map(b => b.id === targetBankId ? { ...b, pads: [...b.pads, newPad] } : b));
       });
       setTimeout(() => { if (newPad.endTimeMs === 0) { newPad.endTimeMs = 30000; setBanks(prev => prev.map(b => b.id === targetBankId ? { ...b, pads: [...b.pads, newPad] } : b)); } }, 1000);
@@ -2022,16 +2037,14 @@ export function useSamplerStore(): SamplerStore {
           endTimeMs: 0,
           pitch: 0,
           position: maxPosition,
-          ignoreChannel: false
+          ignoreChannel: false,
+          savedHotcuesMs: [null, null, null, null]
         };
         newPads.push(newPad);
         
         const audio = new Audio(audioUrl);
         audio.addEventListener('loadedmetadata', () => {
           newPad.endTimeMs = audio.duration * 1000;
-          if (audio.duration > 0 && audio.duration < 15) {
-            newPad.ignoreChannel = true;
-          }
           setBanks(p => [...p]);
         });
       }
@@ -2911,6 +2924,9 @@ export function useSamplerStore(): SamplerStore {
             startTimeMs: padData.startTimeMs || 0,
             endTimeMs: padData.endTimeMs || 0,
             pitch: padData.pitch || 0,
+            savedHotcuesMs: Array.isArray(padData.savedHotcuesMs)
+              ? (padData.savedHotcuesMs.slice(0, 4) as [number | null, number | null, number | null, number | null])
+              : [null, null, null, null],
             position: padData.position ?? globalPadIndex,
           };
         } catch (e) {
@@ -3558,6 +3574,9 @@ export function useSamplerStore(): SamplerStore {
             imageBackend,
             hasImageAsset,
             imageData: undefined,
+            savedHotcuesMs: Array.isArray(pad.savedHotcuesMs)
+              ? (pad.savedHotcuesMs.slice(0, 4) as [number | null, number | null, number | null, number | null])
+              : [null, null, null, null],
           } as PadData);
 
           if (restoredPads.length % 8 === 0) await yieldToMainThread();

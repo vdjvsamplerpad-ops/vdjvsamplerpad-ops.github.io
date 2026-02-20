@@ -1,11 +1,11 @@
 import * as React from 'react';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { LogOut, Moon, Sun } from 'lucide-react';
+import { LogOut } from 'lucide-react';
 import { MidiInputInfo, MidiMessage } from '@/lib/midi';
 import { MidiDeviceProfile } from '@/lib/midi/device-profiles';
 import { DEFAULT_SYSTEM_MAPPINGS, SystemAction, SystemMappings, SYSTEM_ACTION_LABELS } from '@/lib/system-mappings';
@@ -13,9 +13,6 @@ import { normalizeShortcutKey } from '@/lib/keyboard-shortcuts';
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { ProgressDialog } from '@/components/ui/progress-dialog';
 import { StopMode } from '@/components/sampler/types/sampler';
-
-const DEFAULT_DESCRIPTION =
-  'VDJV Sampler Pad is a fast, performance-ready sampler for launching audio clips, banks, and live mixes across web and mobile.';
 
 const SYSTEM_COLOR_OPTIONS = [
   { name: 'Red', hex: '#ff0000' },
@@ -57,6 +54,8 @@ interface AboutDialogProps {
   onUpdateSystemMidi: (action: SystemAction, midiNote?: number, midiCC?: number) => void;
   onUpdateSystemColor: (action: SystemAction, color?: string) => void;
   onSetMasterVolumeCC: (cc?: number) => void;
+  channelCount: number;
+  onChangeChannelCount: (count: number) => void;
   onUpdateChannelMapping: (channelIndex: number, updates: Partial<{ keyUp?: string; keyDown?: string; keyStop?: string; midiCC?: number; midiNote?: number }>) => void;
   padBankShortcutKeys: Set<string>;
   padBankMidiNotes: Set<number>;
@@ -115,6 +114,8 @@ export function AboutDialog({
   onUpdateSystemMidi,
   onUpdateSystemColor,
   onSetMasterVolumeCC,
+  channelCount,
+  onChangeChannelCount,
   onUpdateChannelMapping,
   padBankShortcutKeys,
   padBankMidiNotes,
@@ -263,6 +264,15 @@ export function AboutDialog({
   }, []);
 
   const channelMappings = systemMappings.channelMappings || [];
+  const activeChannelCount = Math.max(2, Math.min(8, Math.floor(channelCount || 4)));
+  const activeChannelMappings = React.useMemo(
+    () => channelMappings.slice(0, activeChannelCount),
+    [activeChannelCount, channelMappings]
+  );
+  const visibleChannelMappings = React.useMemo(
+    () => Array.from({ length: activeChannelCount }, (_, index) => channelMappings[index] || {}),
+    [activeChannelCount, channelMappings]
+  );
   const systemActionKeys = React.useMemo(() => Object.keys(SYSTEM_ACTION_LABELS) as SystemAction[], []);
   const midiNoteAssignmentMap = React.useMemo(() => {
     const map = new Map<number, { type: 'pad' | 'bank'; bankName: string; padName?: string }>();
@@ -293,7 +303,7 @@ export function AboutDialog({
       return `system mapping "${SYSTEM_ACTION_LABELS[systemAction]}"`;
     }
 
-    const channelIndex = channelMappings.findIndex(
+    const channelIndex = activeChannelMappings.findIndex(
       (mapping, index) => index !== options?.excludeChannelIndex && mapping?.midiNote === note
     );
     if (channelIndex >= 0) {
@@ -301,7 +311,7 @@ export function AboutDialog({
     }
 
     return null;
-  }, [channelMappings, midiNoteAssignmentMap, systemActionKeys, systemMappings]);
+  }, [activeChannelMappings, midiNoteAssignmentMap, systemActionKeys, systemMappings]);
 
   const isSystemKeyUsed = React.useCallback(
     (key: string, excludeAction?: SystemAction) => {
@@ -314,7 +324,7 @@ export function AboutDialog({
 
   const isChannelKeyUsed = React.useCallback(
     (key: string, excludeIndex?: number, excludeField?: 'keyUp' | 'keyDown' | 'keyStop') => {
-      return channelMappings.some((mapping, index) => {
+      return activeChannelMappings.some((mapping, index) => {
         if (!mapping) return false;
         if (excludeIndex === index) {
           if (excludeField && mapping[excludeField] === key) return false;
@@ -322,7 +332,7 @@ export function AboutDialog({
         return mapping.keyUp === key || mapping.keyDown === key || mapping.keyStop === key;
       });
     },
-    [channelMappings]
+    [activeChannelMappings]
   );
 
   const isSystemMidiNoteUsed = React.useCallback(
@@ -348,24 +358,24 @@ export function AboutDialog({
 
   const isChannelMidiNoteUsed = React.useCallback(
     (note: number, excludeIndex?: number) => {
-      return channelMappings.some((mapping, index) => {
+      return activeChannelMappings.some((mapping, index) => {
         if (!mapping || typeof mapping.midiNote !== 'number') return false;
         if (excludeIndex === index) return false;
         return mapping.midiNote === note;
       });
     },
-    [channelMappings]
+    [activeChannelMappings]
   );
 
   const isChannelMidiCCUsed = React.useCallback(
     (cc: number, excludeIndex?: number) => {
-      return channelMappings.some((mapping, index) => {
+      return activeChannelMappings.some((mapping, index) => {
         if (!mapping || typeof mapping.midiCC !== 'number') return false;
         if (excludeIndex === index) return false;
         return mapping.midiCC === cc;
       });
     },
-    [channelMappings]
+    [activeChannelMappings]
   );
 
   React.useEffect(() => {
@@ -787,17 +797,16 @@ export function AboutDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-[96vw] max-h-[92vh] overflow-hidden sm:max-w-4xl backdrop-blur-md bg-white/95 border-gray-300 dark:bg-gray-800/95 dark:border-gray-600">
         <DialogHeader className="pb-2 border-b border-gray-200 dark:border-gray-700">
-          <DialogTitle>VDJV Sampler Pad</DialogTitle>
-          <DialogDescription>{DEFAULT_DESCRIPTION}</DialogDescription>
+          <DialogTitle>Setting</DialogTitle>
         </DialogHeader>
         <div className="space-y-3 py-2 max-h-[calc(92vh-96px)] overflow-y-auto pr-1 text-sm">
           <div className={`grid gap-2 ${isAuthenticated ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-1'}`}>
             <Button type="button" variant={activePanel === 'general' ? 'default' : 'outline'} size="sm" onClick={() => setActivePanel('general')}>General</Button>
             {isAuthenticated && (
-              <Button type="button" variant={activePanel === 'system' ? 'default' : 'outline'} size="sm" onClick={() => setActivePanel('system')}>System</Button>
+              <Button type="button" variant={activePanel === 'system' ? 'default' : 'outline'} size="sm" onClick={() => setActivePanel('system')}>System Shortcut</Button>
             )}
             {isAuthenticated && (
-              <Button type="button" variant={activePanel === 'channels' ? 'default' : 'outline'} size="sm" onClick={() => setActivePanel('channels')}>Channels</Button>
+              <Button type="button" variant={activePanel === 'channels' ? 'default' : 'outline'} size="sm" onClick={() => setActivePanel('channels')}>Channels Shortcut</Button>
             )}
             {isAuthenticated && (
               <Button type="button" variant={activePanel === 'backup' ? 'default' : 'outline'} size="sm" onClick={() => setActivePanel('backup')}>Backup</Button>
@@ -806,190 +815,192 @@ export function AboutDialog({
 
           {activePanel === 'general' && (
             <>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <div className="rounded-lg border p-3 bg-gray-50/60 dark:bg-gray-900/30">
-              <div className="text-xs uppercase tracking-wide text-gray-500">User</div>
-              <div className="font-medium">{displayName}</div>
-            </div>
-            <div className="rounded-lg border p-3 bg-gray-50/60 dark:bg-gray-900/30">
-              <div className="text-xs uppercase tracking-wide text-gray-500">Version</div>
-              <div className="font-medium">{version}</div>
-            </div>
-          </div>
-          <div className="rounded-lg border p-3 space-y-3 bg-gray-50/60 dark:bg-gray-900/30">
-            <div className="text-xs uppercase tracking-wide text-gray-500">MIDI</div>
-            {!midiSupported && (
-              <p className="text-xs text-red-500">Web MIDI not supported in this browser.</p>
-            )}
-            {midiSupported && (
-              <div className="flex items-center justify-between">
-                <Label className="text-xs">Enable MIDI Input</Label>
-                <Switch checked={midiEnabled} onCheckedChange={onToggleMidiEnabled} disabled={!midiSupported} />
-              </div>
-            )}
-            {midiSupported && midiEnabled && midiAccessGranted && (
-              <div className="space-y-2">
-                <div className="text-[10px] text-gray-500">
-                  Backend: {midiBackend === 'native' ? 'Native MIDI' : 'Web MIDI'}
-                  {!midiOutputSupported && (
-                    <span className="ml-2 text-red-500">LED output not available</span>
-                  )}
+              <div className="rounded-lg border p-3 space-y-3 bg-gray-50/60 dark:bg-gray-900/30">
+                <div className="text-xs uppercase tracking-wide text-gray-500">General Settings</div>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <Label className="text-xs font-medium">Theme</Label>
+                    <p className="text-[10px] text-gray-500">Enable = Light, Disable = Dark.</p>
+                  </div>
+                  <Switch
+                    checked={theme === 'light'}
+                    onCheckedChange={(checked) => {
+                      if (checked && theme !== 'light') onToggleTheme();
+                      if (!checked && theme !== 'dark') onToggleTheme();
+                    }}
+                  />
                 </div>
-                {midiError && <p className="text-xs text-red-500">{midiError}</p>}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <Label className="text-xs font-medium">Side Panel Behavior</Label>
+                    <p className="text-[10px] text-gray-500">Enable = Reflow, Disable = Overlay.</p>
+                  </div>
+                  <Switch
+                    checked={sidePanelMode === 'reflow'}
+                    onCheckedChange={(checked) => onChangeSidePanelMode(checked ? 'reflow' : 'overlay')}
+                  />
+                </div>
                 <div className="space-y-1">
-                  <Label className="text-xs">MIDI Input</Label>
-                  <Select
-                    value={midiSelectedInputId || ''}
-                    onValueChange={(value) => onSelectMidiInput(value || null)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select device" />
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="space-y-0.5">
+                      <Label className="text-xs font-medium">Pad Size</Label>
+                      <p className="text-[10px] text-gray-500">Controls the number of pads visible per row.</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 w-8 p-0"
+                        onClick={() => onPadSizeChange(Math.max(padSizeMin, padSize - (isDualMode ? 2 : 1)))}
+                        disabled={padSize <= padSizeMin}
+                      >
+                        -
+                      </Button>
+                      <span className="w-16 text-center text-xs font-medium">
+                        {padSize}/{padSizeMax}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 w-8 p-0"
+                        onClick={() => onPadSizeChange(Math.min(padSizeMax, padSize + (isDualMode ? 2 : 1)))}
+                        disabled={padSize >= padSizeMax}
+                      >
+                        +
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium">Stop Mode</Label>
+                  <p className="text-[10px] text-gray-500">Choose how pads stop playback when toggled off.</p>
+                  <Select value={stopMode} onValueChange={(value) => onStopModeChange(value as StopMode)}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {midiInputs.length === 0 && (
-                        <SelectItem value="none" disabled>
-                          No MIDI inputs
-                        </SelectItem>
+                      <SelectItem value="instant">Instant Stop</SelectItem>
+                      <SelectItem value="fadeout">Fade Out</SelectItem>
+                      <SelectItem value="brake">Brake</SelectItem>
+                      <SelectItem value="backspin">Backspin</SelectItem>
+                      <SelectItem value="filter">Filter Sweep</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="rounded-lg border p-3 space-y-3 bg-gray-50/60 dark:bg-gray-900/30">
+                <div className="text-xs uppercase tracking-wide text-gray-500">Input & Mapping</div>
+                {!midiSupported && (
+                  <p className="text-xs text-red-500">Web MIDI not supported in this browser.</p>
+                )}
+                {midiSupported && (
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="space-y-0.5">
+                      <Label className="text-xs font-medium">Enable MIDI Input</Label>
+                      <p className="text-[10px] text-gray-500">Turn on MIDI controller input and mapping support.</p>
+                    </div>
+                    <Switch checked={midiEnabled} onCheckedChange={onToggleMidiEnabled} disabled={!midiSupported} />
+                  </div>
+                )}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <Label className="text-xs font-medium">Hide Keyboard Shortcut</Label>
+                    <p className="text-[10px] text-gray-500">Hide key labels on pad buttons for a cleaner look.</p>
+                  </div>
+                  <Switch checked={hideShortcutLabels} onCheckedChange={onToggleHideShortcutLabels} />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <Label className="text-xs font-medium">Auto Pad & Bank Mapping</Label>
+                    <p className="text-[10px] text-gray-500">Auto-assign default keyboard mappings on new/imported content.</p>
+                  </div>
+                  <Switch checked={autoPadBankMapping} onCheckedChange={onToggleAutoPadBankMapping} />
+                </div>
+                {midiSupported && midiEnabled && midiAccessGranted && (
+                  <div className="space-y-2 border-t pt-3 border-gray-200 dark:border-gray-700">
+                    <div className="text-[10px] text-gray-500">
+                      Backend: {midiBackend === 'native' ? 'Native MIDI' : 'Web MIDI'}
+                      {!midiOutputSupported && (
+                        <span className="ml-2 text-red-500">LED output not available</span>
                       )}
-                      {midiInputs.map((input) => (
-                        <SelectItem key={input.id} value={input.id}>
-                          {input.name || input.id}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    </div>
+                    {midiError && <p className="text-xs text-red-500">{midiError}</p>}
+                    <div className="space-y-1">
+                      <Label className="text-xs">MIDI Input</Label>
+                      <Select
+                        value={midiSelectedInputId || ''}
+                        onValueChange={(value) => onSelectMidiInput(value || null)}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select device" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {midiInputs.length === 0 && (
+                            <SelectItem value="none" disabled>
+                              No MIDI inputs
+                            </SelectItem>
+                          )}
+                          {midiInputs.map((input) => (
+                            <SelectItem key={input.id} value={input.id}>
+                              {input.name || input.id}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Device Profile</Label>
+                      <Select
+                        value={midiDeviceProfileId || '__auto__'}
+                        onValueChange={(value) => onSelectMidiDeviceProfile(value === '__auto__' ? null : value)}
+                        disabled={!midiOutputSupported}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Auto-detect" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__auto__">Auto-detect</SelectItem>
+                          {midiDeviceProfiles.map((profile) => (
+                            <SelectItem key={profile.id} value={profile.id}>
+                              {profile.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div className="rounded-lg border p-3 bg-gray-50/60 dark:bg-gray-900/30">
+                  <div className="text-xs uppercase tracking-wide text-gray-500">User</div>
+                  <div className="font-medium">{displayName}</div>
                 </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Device Profile</Label>
-                  <Select
-                    value={midiDeviceProfileId || '__auto__'}
-                    onValueChange={(value) => onSelectMidiDeviceProfile(value === '__auto__' ? null : value)}
-                    disabled={!midiOutputSupported}
+                <div className="rounded-lg border p-3 bg-gray-50/60 dark:bg-gray-900/30">
+                  <div className="text-xs uppercase tracking-wide text-gray-500">Version</div>
+                  <div className="font-medium">{version}</div>
+                </div>
+              </div>
+
+              {isAuthenticated && onSignOut && (
+                <div className="rounded-lg border border-red-300 bg-red-50/60 dark:border-red-700 dark:bg-red-900/20 p-3 space-y-2">
+                  <div className="text-xs uppercase tracking-wide text-red-600 dark:text-red-300">Account</div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full border-red-400 text-red-700 hover:bg-red-100 hover:text-red-800 dark:border-red-600 dark:text-red-300 dark:hover:bg-red-900/40 dark:hover:text-red-200"
+                    onClick={() => setShowSignOutConfirm(true)}
+                    disabled={isSigningOut}
                   >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Auto-detect" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__auto__">Auto-detect</SelectItem>
-                      {midiDeviceProfiles.map((profile) => (
-                        <SelectItem key={profile.id} value={profile.id}>
-                          {profile.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    <LogOut className="w-4 h-4 mr-2" />
+                    {isSigningOut ? 'Signing out...' : 'Sign Out'}
+                  </Button>
                 </div>
-              </div>
-            )}
-          </div>
-          <div className="rounded-lg border p-3 space-y-3 bg-gray-50/60 dark:bg-gray-900/30">
-            <div className="text-xs uppercase tracking-wide text-gray-500">Display</div>
-            <div className="flex items-center justify-between gap-3">
-              <Label className="text-xs font-medium">Theme</Label>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={onToggleTheme}
-                className={`h-8 px-3 ${theme === 'dark'
-                  ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
-                  : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
-                }`}
-              >
-                {theme === 'dark' ? <Sun className="w-3 h-3 mr-2" /> : <Moon className="w-3 h-3 mr-2" />}
-                {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-              </Button>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <Label className="text-xs font-medium">Hide keyboard shortcut text on pads</Label>
-              <Switch checked={hideShortcutLabels} onCheckedChange={onToggleHideShortcutLabels} />
-            </div>
-            <div className="space-y-1">
-              <Label className="text-xs font-medium">Side Panel Behavior</Label>
-              <Select
-                value={sidePanelMode}
-                onValueChange={(value) => onChangeSidePanelMode(value as 'overlay' | 'reflow')}
-              >
-                <SelectTrigger className="h-8 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="overlay">Overlay</SelectItem>
-                  <SelectItem value="reflow">Reflow</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div className="rounded-lg border p-3 space-y-3 bg-gray-50/60 dark:bg-gray-900/30">
-            <div className="text-xs uppercase tracking-wide text-gray-500">Playback</div>
-            <div className="flex items-center justify-between gap-3">
-              <Label className="text-xs font-medium">Pad Size</Label>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-8 w-8 p-0"
-                  onClick={() => onPadSizeChange(Math.max(padSizeMin, padSize - (isDualMode ? 2 : 1)))}
-                  disabled={padSize <= padSizeMin}
-                >
-                  -
-                </Button>
-                <span className="w-16 text-center text-xs font-medium">
-                  {padSize}/{padSizeMax}
-                </span>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-8 w-8 p-0"
-                  onClick={() => onPadSizeChange(Math.min(padSizeMax, padSize + (isDualMode ? 2 : 1)))}
-                  disabled={padSize >= padSizeMax}
-                >
-                  +
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-1">
-              <Label className="text-xs font-medium">Stop Mode</Label>
-              <Select value={stopMode} onValueChange={(value) => onStopModeChange(value as StopMode)}>
-                <SelectTrigger className="h-8 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="instant">Instant Stop</SelectItem>
-                  <SelectItem value="fadeout">Fade Out</SelectItem>
-                  <SelectItem value="brake">Brake</SelectItem>
-                  <SelectItem value="backspin">Backspin</SelectItem>
-                  <SelectItem value="filter">Filter Sweep</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <div className="space-y-0.5">
-                <Label className="text-xs font-medium">Auto Pad & Bank Mapping</Label>
-                <p className="text-[10px] text-gray-500">
-                  Auto-assign default keyboard shortcuts for new/imported banks and pads.
-                </p>
-              </div>
-              <Switch checked={autoPadBankMapping} onCheckedChange={onToggleAutoPadBankMapping} />
-            </div>
-          </div>
-          {isAuthenticated && onSignOut && (
-            <div className="rounded-lg border border-red-300 bg-red-50/60 dark:border-red-700 dark:bg-red-900/20 p-3 space-y-2">
-              <div className="text-xs uppercase tracking-wide text-red-600 dark:text-red-300">Account</div>
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full border-red-400 text-red-700 hover:bg-red-100 hover:text-red-800 dark:border-red-600 dark:text-red-300 dark:hover:bg-red-900/40 dark:hover:text-red-200"
-                onClick={() => setShowSignOutConfirm(true)}
-                disabled={isSigningOut}
-              >
-                <LogOut className="w-4 h-4 mr-2" />
-                {isSigningOut ? 'Signing out...' : 'Sign Out'}
-              </Button>
-            </div>
-          )}
+              )}
             </>
           )}
           {isAuthenticated && activePanel === 'system' && (
@@ -1211,7 +1222,25 @@ export function AboutDialog({
           <div className="rounded-lg border p-3 space-y-3">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="text-xs uppercase tracking-wide text-gray-500">Channel Mapping</div>
-              <div className="flex flex-col gap-2 sm:flex-row">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="flex items-center gap-2 rounded-md border px-2 py-1">
+                  <Label className="text-[10px] uppercase tracking-wide text-gray-500">Deck Channels</Label>
+                  <Select
+                    value={String(activeChannelCount)}
+                    onValueChange={(value) => onChangeChannelCount(Number(value))}
+                  >
+                    <SelectTrigger className="h-7 w-[72px] text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Array.from({ length: 7 }, (_, idx) => idx + 2).map((count) => (
+                        <SelectItem key={`channel-count-${count}`} value={String(count)}>
+                          {count}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
                 <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-[10px]" onClick={onResetAllChannelMappings}>
                   Reset All
                 </Button>
@@ -1224,7 +1253,7 @@ export function AboutDialog({
               <div className="text-xs text-red-500">{channelMappingError}</div>
             )}
             <div className="space-y-2 sm:hidden">
-              {(systemMappings.channelMappings || []).map((mapping, index) => {
+              {visibleChannelMappings.map((mapping, index) => {
                 const keyUpFieldId = `channel-${index}-keyUp`;
                 const keyDownFieldId = `channel-${index}-keyDown`;
                 const keyStopFieldId = `channel-${index}-keyStop`;
@@ -1428,7 +1457,7 @@ export function AboutDialog({
               <div>Stop</div>
               {showMidiColumn && <div>MIDI CC</div>}
             </div>
-            {(systemMappings.channelMappings || []).map((mapping, index) => {
+            {visibleChannelMappings.map((mapping, index) => {
               const keyUpFieldId = `channel-${index}-keyUp`;
               const keyDownFieldId = `channel-${index}-keyDown`;
               const keyStopFieldId = `channel-${index}-keyStop`;
@@ -1635,6 +1664,62 @@ export function AboutDialog({
           )}
           {isAuthenticated && activePanel === 'backup' && (
             <div className="space-y-3">
+              <div className="rounded-lg border p-3 space-y-1 bg-gray-50/60 dark:bg-gray-900/30">
+                <div className="text-xs uppercase tracking-wide text-gray-500">🎧🔥 About Us - VDJV Sampler Pad 🔥🎧</div>
+                <div className="space-y-2 text-xs text-gray-600 dark:text-gray-300">
+                  <p>Welcome, ka-Power! 💪</p>
+                  <p>
+                    <strong>VDJV Sampler Pad</strong> is a powerful and user-friendly DJ soundboard system designed for
+                    hosts, DJs, event organizers, content creators, and anyone who wants to level up events and performances.
+                  </p>
+                  <p>
+                    We are an independent development team focused on practical, affordable, and professional-grade sampler
+                    pad solutions, especially tailored for the Filipino market.
+                  </p>
+
+                  <div>
+                    <p className="font-semibold">🎛️ What Is VDJV Sampler Pad?</p>
+                    <p className="mt-1">Customizable soundboard with ready-to-use banks such as:</p>
+                    <p>🎶 Background Drops (Budots, Chacha, Beat Drops)</p>
+                    <p>😂 Sound Effects (Laugh, Horn, DJ Voice, Anime)</p>
+                    <p>🎂 Birthday & Event Sounds</p>
+                    <p>🏆 Competition & Awarding</p>
+                    <p>🎮 Games & Memes</p>
+                    <p>🎄 Seasonal Events (Christmas, Graduation, Halloween)</p>
+                    <p>🎵 TikTok Banks (2022-2025 Editions)</p>
+                  </div>
+
+                  <div>
+                    <p className="font-semibold">Available Versions</p>
+                    <p>🔥 V1 (Android Version) - Standalone app, no laptop required</p>
+                    <p>🔥 V2 - Laptop-based version with remote control support</p>
+                    <p>🔥 V3 (Complete Pack) - Full features, complete banks, advanced effects, and remote app support</p>
+                  </div>
+
+                  <div>
+                    <p className="font-semibold">🚀 Mission</p>
+                    <p>✔️ Affordable alternative to expensive DJ hardware samplers</p>
+                    <p>✔️ Beginner-friendly setup</p>
+                    <p>✔️ Professional tools for hosts and DJs</p>
+                    <p>✔️ FREE TeamViewer installation assistance</p>
+                  </div>
+
+                  <div>
+                    <p className="font-semibold">🤝 Why Choose VDJV?</p>
+                    <p>💡 Beginner-friendly</p>
+                    <p>💻 Professional-grade features</p>
+                    <p>📱 Remote control via phone/tablet (V2 & V3)</p>
+                    <p>🛠️ FREE TeamViewer installation assistance</p>
+                    <p>🎧 Regular updates and new sound banks</p>
+                  </div>
+
+                  <p>
+                    🎤 At VDJV, this isn&apos;t just a sampler pad - it&apos;s a tool to make your events more dynamic,
+                    engaging, and unforgettable.
+                  </p>
+                  <p>Thank you for your support, ka-Power! ⚡ More power! 💪🔥</p>
+                </div>
+              </div>
               <div className="rounded-lg border p-3 space-y-2">
                 <div className="text-xs uppercase tracking-wide text-gray-500">Mapping Backup</div>
                 {mappingNotice && (
@@ -1759,4 +1844,3 @@ export function AboutDialog({
     </Dialog>
   );
 }
-

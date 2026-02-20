@@ -52,5 +52,12 @@ export default {
       },
     },
   },
-  plugins: [require('tailwindcss-animate')],
+  plugins: [
+    require('tailwindcss-animate'),
+    function ({ addVariant }) {
+      addVariant('perf-high', '.perf-high &');
+      addVariant('perf-medium', '.perf-medium &');
+      addVariant('perf-low', '.perf-low &');
+    }
+  ],
 };

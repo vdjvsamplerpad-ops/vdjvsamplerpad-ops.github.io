@@ -40,6 +40,8 @@ interface SamplerPadProps {
   blockedMidiCCs?: Set<number>;
   hideShortcutLabel?: boolean;
   editRequestToken?: number;
+  channelLoadArmed?: boolean;
+  onSelectPadForChannelLoad?: (pad: PadData, bankId: string, bankName: string) => void;
 }
 
 export function SamplerPad({
@@ -67,7 +69,9 @@ export function SamplerPad({
   blockedMidiNotes,
   blockedMidiCCs,
   hideShortcutLabel = false,
-  editRequestToken
+  editRequestToken,
+  channelLoadArmed = false,
+  onSelectPadForChannelLoad
 }: SamplerPadProps) {
   const audioPlayer = useAudioPlayer(
     pad,
@@ -107,6 +111,11 @@ export function SamplerPad({
       return;
     }
 
+    if (channelLoadArmed && onSelectPadForChannelLoad) {
+      onSelectPadForChannelLoad(pad, bankId, bankName);
+      return;
+    }
+
     if (editMode) {
       setShowEditDialog(true);
     } else if (pad.triggerMode === 'toggle') {
@@ -118,7 +127,7 @@ export function SamplerPad({
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (editMode) return;
+    if (editMode || channelLoadArmed) return;
     if ((e.target as HTMLElement).closest('.transfer-indicator')) {
       return;
     }
@@ -131,7 +140,7 @@ export function SamplerPad({
   };
 
   const handleMouseUp = () => {
-    if (editMode) return;
+    if (editMode || channelLoadArmed) return;
     if (pad.triggerMode === 'hold' && isHolding) {
       setIsHolding(false);
       stopAudio();
@@ -139,7 +148,7 @@ export function SamplerPad({
   };
 
   const handleMouseLeave = () => {
-    if (editMode) return;
+    if (editMode || channelLoadArmed) return;
     if (pad.triggerMode === 'hold' && isHolding) {
       setIsHolding(false);
       stopAudio();
@@ -147,7 +156,7 @@ export function SamplerPad({
   };
 
   const handleTouchStart = (e: React.TouchEvent) => {
-    if (editMode) return;
+    if (editMode || channelLoadArmed) return;
     if (pad.triggerMode === 'hold') {
       e.preventDefault();
       setIsHolding(true);
@@ -156,7 +165,7 @@ export function SamplerPad({
   };
 
   const handleTouchEnd = () => {
-    if (editMode) return;
+    if (editMode || channelLoadArmed) return;
     if (pad.triggerMode === 'hold' && isHolding) {
       setIsHolding(false);
       stopAudio();
@@ -197,12 +206,12 @@ export function SamplerPad({
   const handleTransferClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
-    
+
     // Check if this bank allows transfers
     if (canTransferFromBank && !canTransferFromBank(bankId)) {
       return;
     }
-    
+
     if (availableBanks.length > 1) { // Current bank + other banks
       setShowTransferDialog(true);
     }
@@ -261,6 +270,9 @@ export function SamplerPad({
     if (editMode) {
       return 'ring-2 ring-orange-400 cursor-grab active:cursor-grabbing';
     }
+    if (channelLoadArmed) {
+      return 'ring-2 ring-emerald-400 shadow-[0_0_0_2px_rgba(16,185,129,0.35)] cursor-pointer';
+    }
     return 'cursor-pointer';
   };
 
@@ -314,18 +326,24 @@ export function SamplerPad({
         // Added title for native browser tooltip on hover (shows full name)
         title={shouldShowText ? pad.name : undefined}
         className={`
-          w-full h-full min-h-[80px] font-bold border-2 transition-colors duration-150 relative overflow-hidden select-none
+          w-full h-full min-h-[80px] font-bold border-2 relative overflow-hidden select-none rounded-[0.75rem]
           ${getButtonOpacity()} ${getEditModeClasses()} ${getEditModeButtonClasses()}
+          perf-high:transition-all perf-high:duration-200 perf-high:ease-out 
+          perf-medium:transition-colors perf-medium:duration-150 
+          perf-low:transition-none
+          perf-high:hover:scale-[1.01] perf-high:active:scale-[0.98]
+          perf-high:shadow-sm perf-high:hover:shadow-md
           ${isDragging ? 'z-50' : ''}
           ${isPlaying
-            ? 'bg-green-400 border-green-300 text-white'
+            ? 'border-green-300 text-white perf-high:shadow-[inset_0_0_20px_rgba(255,255,255,0.3)]'
             : theme === 'dark'
-              ? 'bg-gray-700 border-gray-600 hover:bg-gray-600 hover:border-gray-500 text-white'
-              : 'bg-white border-gray-300 hover:bg-gray-100 hover:border-gray-400 text-gray-900'
+              ? 'border-white/10 text-white hover:border-white/30 perf-high:backdrop-blur-sm'
+              : 'border-black/5 text-gray-900 hover:border-black/20 perf-high:backdrop-blur-sm'
           }
         `}
         style={{
-          backgroundColor: isPlaying ? undefined : `${pad.color}CC`,
+          // Use slightly higher opacity (E6 = ~90%) for better contrast, allow backdrop-blur to show through
+          backgroundColor: isPlaying ? '#4ade80' : `${pad.color}${theme === 'dark' ? 'CC' : 'E6'}`,
           ...getEditModeButtonStyle()
         }}
       >
@@ -337,14 +355,21 @@ export function SamplerPad({
             {shortcutLabel}
           </div>
         )}
+        {channelLoadArmed && !editMode && (
+          <div className={`absolute top-0.5 left-0.5 z-20 px-1.5 py-0.5 rounded text-[9px] font-semibold tracking-wide ${theme === 'dark'
+            ? 'bg-emerald-800/80 text-emerald-100'
+            : 'bg-emerald-200/90 text-emerald-900'
+            }`}>
+            LOAD
+          </div>
+        )}
         {/* Drag/Transfer indicator for edit mode - smaller on mobile */}
         {editMode && (
           <div
             onClick={handleTransferClick}
-            className={`transfer-indicator absolute top-0.5 left-0.5 sm:top-1 sm:left-1 p-0.5 sm:p-1 rounded-full transition-all hover:scale-110 z-10 ${
-              transferableBanks.length > 0 && (!canTransferFromBank || canTransferFromBank(bankId))
-                ? 'bg-orange-500 hover:bg-orange-400 cursor-pointer'
-                : 'bg-gray-500 cursor-not-allowed'
+            className={`transfer-indicator absolute top-0.5 left-0.5 sm:top-1 sm:left-1 p-0.5 sm:p-1 rounded-full transition-all hover:scale-110 z-10 ${transferableBanks.length > 0 && (!canTransferFromBank || canTransferFromBank(bankId))
+              ? 'bg-orange-500 hover:bg-orange-400 cursor-pointer'
+              : 'bg-gray-500 cursor-not-allowed'
               }`}
             title={
               transferableBanks.length > 0 && (!canTransferFromBank || canTransferFromBank(bankId))
@@ -367,7 +392,7 @@ export function SamplerPad({
         {/* Trigger Mode Indicator - smaller on mobile to maximize text space */}
         <div className="absolute top-0.5 right-0.5 sm:top-1 sm:right-1 p-0.5 sm:p-1 rounded-full bg-black bg-opacity-20 pointer-events-none z-10">
           <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 flex items-center justify-center">
-          {getTriggerModeIcon()}
+            {getTriggerModeIcon()}
           </div>
         </div>
 
@@ -393,10 +418,10 @@ export function SamplerPad({
                - Tighter line height for better space utilization
             */
             <div className="absolute inset-0 flex items-center justify-center px-0 py-0 w-full h-full overflow-hidden">
-              <span 
+              <span
                 className={`text-center font-bold leading-[1.05] break-words whitespace-normal ${isPlaying
                   ? 'text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]'
-                : theme === 'dark'
+                  : theme === 'dark'
                     ? 'text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]'
                     : 'text-gray-900 drop-shadow-[0_2px_4px_rgba(255,255,255,0.9)]'
                   }`}
@@ -404,7 +429,7 @@ export function SamplerPad({
                   // Responsive font sizing that scales with viewport and pad size
                   // Uses clamp for min/max bounds, viewport units for scaling
                   // Minimum sizes ensure readability even on very small pads
-                  fontSize: padSize <= 4 
+                  fontSize: padSize <= 4
                     ? `clamp(${Math.round(12 * fontScale)}px, min(6vw, 6vh, 1.4em), ${Math.round(24 * fontScale)}px)`
                     : padSize <= 8
                       ? `clamp(${Math.round(11 * fontScale)}px, min(5vw, 5vh, 1.2em), ${Math.round(20 * fontScale)}px)`
@@ -429,26 +454,26 @@ export function SamplerPad({
 
           {/* Volume percentage - smaller and positioned at bottom on mobile, hidden if playing */}
           {!isPlaying && (
-            <div 
+            <div
               className={`absolute bottom-0 right-0 opacity-75 whitespace-nowrap z-20 ${theme === 'dark'
                 ? 'text-gray-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]'
                 : 'text-gray-600 drop-shadow-[0_1px_2px_rgba(255,255,255,0.8)]'
-              }`}
+                }`}
               style={{ fontSize: 'clamp(7px, min(2vw, 2vh), 10px)', padding: '1px 2px' }}
             >
               {Math.round(pad.volume * 100)}%
-          </div>
+            </div>
           )}
 
           {/* Progress bar - only show when playing, positioned at very bottom */}
           {isPlaying && (
             <div className="absolute bottom-0 left-0 right-0 px-0 w-full z-10">
               <Progress value={progress} className="h-0.5 sm:h-1 rounded-full" />
-              <div 
+              <div
                 className={`absolute bottom-0 right-0 opacity-75 whitespace-nowrap ${theme === 'dark'
                   ? 'text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]'
                   : 'text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]'
-                }`}
+                  }`}
                 style={{ fontSize: 'clamp(7px, min(2vw, 2vh), 10px)', padding: '1px 2px' }}
               >
                 {Math.round(effectiveVolume * 100)}%

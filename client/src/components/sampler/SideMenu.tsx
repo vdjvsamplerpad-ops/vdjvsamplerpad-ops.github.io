@@ -93,7 +93,7 @@ export function SideMenu({
   const [showDeleteConfirm, setShowDeleteConfirm] = React.useState(false);
   const [bankToDelete, setBankToDelete] = React.useState<SamplerBank | null>(null);
   const [pendingImportFile, setPendingImportFile] = React.useState<File | null>(null);
-  
+
   // Progress State
   const [showExportProgress, setShowExportProgress] = React.useState(false);
   const [showImportProgress, setShowImportProgress] = React.useState(false);
@@ -107,7 +107,7 @@ export function SideMenu({
   const [renderContent, setRenderContent] = React.useState(open);
   const [pendingBulkClearAction, setPendingBulkClearAction] = React.useState<'keys' | 'midi' | null>(null);
 
-  
+
   // ETA Calculation State
   const [importStartTime, setImportStartTime] = React.useState<number>(0);
   const [importEta, setImportEta] = React.useState<number | null>(null);
@@ -270,9 +270,9 @@ export function SideMenu({
   // Detect Android/WebView environment
   const isAndroid = React.useMemo(() => /Android/.test(navigator.userAgent), []);
   const isWebView = React.useMemo(() => {
-    return !!(window as any).Android || 
-           navigator.userAgent.includes('wv') || 
-           navigator.userAgent.includes('WebView');
+    return !!(window as any).Android ||
+      navigator.userAgent.includes('wv') ||
+      navigator.userAgent.includes('WebView');
   }, []);
 
   // Create Android/WebView compatible file input
@@ -305,11 +305,11 @@ export function SideMenu({
     if (isAndroid || isWebView) {
       console.log('📱 Android/WebView detected, using enhanced file picker...');
       const compatibleInput = createCompatibleFileInput();
-      
+
       const handleChange = async (event: Event) => {
         const target = event.target as HTMLInputElement;
         const file = target.files?.[0];
-        
+
         if (file) {
           console.log('✅ File selected:', file.name, file.size, 'bytes');
           await processFileImport(file);
@@ -317,20 +317,20 @@ export function SideMenu({
           console.warn('⚠️ No file selected');
           pushNotice({ variant: 'error', message: 'No file selected. Please try again.' });
         }
-        
+
         // Clean up
         compatibleInput.removeEventListener('change', handleChange);
         if (compatibleInput.parentNode) compatibleInput.remove();
       };
 
       compatibleInput.addEventListener('change', handleChange);
-      
+
       // Add timeout to detect silent failures
       const timeoutId = setTimeout(() => {
         console.warn('⚠️ File picker timeout - no file selected within 60 seconds');
-        pushNotice({ 
-          variant: 'error', 
-          message: 'File picker did not respond. Please try selecting the file again or use Google Drive to import.' 
+        pushNotice({
+          variant: 'error',
+          message: 'File picker did not respond. Please try selecting the file again or use Google Drive to import.'
         });
         compatibleInput.removeEventListener('change', handleChange);
         if (compatibleInput.parentNode) compatibleInput.remove();
@@ -343,9 +343,9 @@ export function SideMenu({
         console.log('📱 Enhanced file picker triggered');
       } catch (error) {
         console.error('❌ Failed to trigger file picker:', error);
-        pushNotice({ 
-          variant: 'error', 
-          message: 'Failed to open file picker. Please try again or use Google Drive to import.' 
+        pushNotice({
+          variant: 'error',
+          message: 'Failed to open file picker. Please try again or use Google Drive to import.'
         });
         clearTimeout(timeoutId);
         if (compatibleInput.parentNode) compatibleInput.remove();
@@ -387,7 +387,7 @@ export function SideMenu({
     setImportStatus('loading');
     setImportProgress(0);
     setImportError('');
-    
+
     // Reset ETA calculation
     setImportStartTime(Date.now());
     setImportEta(null);
@@ -405,19 +405,19 @@ export function SideMenu({
       const errorMessage = error instanceof Error ? error.message : 'Import failed';
       setImportStatus('error');
       setImportError(errorMessage);
-      
+
       // Check if error is login-related
-      const needsLogin = errorMessage.toLowerCase().includes('sign in') || 
-                        errorMessage.toLowerCase().includes('login required') ||
-                        errorMessage.toLowerCase().includes('please sign in');
-      
+      const needsLogin = errorMessage.toLowerCase().includes('sign in') ||
+        errorMessage.toLowerCase().includes('login required') ||
+        errorMessage.toLowerCase().includes('please sign in');
+
       if (needsLogin) {
         // Store file for auto-import after login
         setPendingImportFile(file);
       } else {
         setPendingImportFile(null);
       }
-      
+
       pushNotice({ variant: 'error', message: `Import failed: ${errorMessage}` });
     } finally {
       window.dispatchEvent(new Event('vdjv-import-end'));
@@ -439,7 +439,7 @@ export function SideMenu({
   React.useEffect(() => {
     const currentUserId = user?.id || null;
     const justLoggedIn = currentUserId && prevUserIdRef.current !== currentUserId;
-    
+
     if (justLoggedIn && pendingImportFile) {
       prevUserIdRef.current = currentUserId;
       // Close login modal
@@ -460,21 +460,21 @@ export function SideMenu({
     let interval: NodeJS.Timeout;
 
     if (showImportProgress && importStatus === 'loading' && importProgress > 0 && importProgress < 100) {
-      
+
       const calculateEta = () => {
         const now = Date.now();
         const elapsedSeconds = (now - importStartTime) / 1000;
-        
+
         // Rate = percent per second
         const rate = importProgress / elapsedSeconds;
-        
+
         if (rate > 0) {
           const remainingPercent = 100 - importProgress;
           let estimatedSeconds = remainingPercent / rate;
 
           // "Smart Floor" Logic
           if (estimatedSeconds < 3 && importProgress < 98) {
-             estimatedSeconds = 5; 
+            estimatedSeconds = 5;
           }
 
           setImportEta(estimatedSeconds);
@@ -642,9 +642,9 @@ export function SideMenu({
     <>
       <div
         className={`fixed inset-y-0 left-0 z-50 w-64 border-r transition-transform duration-200 will-change-transform ${theme === 'dark'
-          ? 'bg-gray-800 border-gray-700'
-          : 'bg-white border-gray-200'
-          } ${open ? 'translate-x-0' : '-translate-x-full'}`}
+          ? 'bg-gray-800/95 border-gray-700 perf-high:backdrop-blur-md'
+          : 'bg-white/95 border-gray-200 perf-high:backdrop-blur-md'
+          } ${open ? 'translate-x-0' : '-translate-x-full'} perf-high:shadow-2xl`}
       >
         <div
           className={`flex items-center gap-3 p-3 border-b ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'
@@ -671,7 +671,7 @@ export function SideMenu({
         </div>
 
         <div
-          className={`flex items-center justify-between p-2 border-b ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'
+          className={`flex items-center justify-between p-3 border-b ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'
             }`}
         >
           <h2
@@ -686,8 +686,8 @@ export function SideMenu({
             size="sm"
             onClick={() => onOpenChange(false)}
             className={theme === 'dark'
-              ? 'h-8 w-8 p-0 border border-red-500/50 bg-red-900/40 text-red-300 hover:bg-red-800/60 hover:text-red-100'
-              : 'h-8 w-8 p-0 border border-red-300 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700'}
+              ? 'h-8 w-8 p-0 inline-flex items-center justify-center border border-red-500/50 bg-red-900/40 text-red-300 hover:bg-red-800/60 hover:text-red-100'
+              : 'h-8 w-8 p-0 inline-flex items-center justify-center border border-red-300 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700'}
             title="Close Banks"
           >
             <X className="w-4 h-4" />
@@ -695,213 +695,213 @@ export function SideMenu({
         </div>
 
         {renderContent && (
-        <div className="p-2 max-h-[calc(100vh-80px)] overflow-y-auto">
-          <div className="grid grid-cols-2 gap-2 mb-1">
-            <div className="flex mb-2">
-              <Button
-                onClick={() => setShowCreateDialog(true)}
-                className={`flex-1 gap-0 transition-all duration-200 ${theme === 'dark'
-                  ? 'bg-blue-600 border-blue-500 text-white hover:bg-blue-500'
-                  : 'bg-blue-50 border-blue-300 text-blue-600 hover:bg-blue-100'
-                  }`}
-              >
-                <Plus className="w-4 h-4 mr-2" />
-                New Bank
-              </Button>
-            </div>
-
-            <div className="flex mb-2">
-              <Button
-                onClick={handleImportClick}
-                variant="outline"
-                className={`flex-1 transition-all duration-200 ${theme === 'dark'
-                  ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
-                  : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
-                  }`}
-              >
-                <Upload className="w-4 h-4 mr-2" />
-                Import
-              </Button>
-            </div>
-          </div>
-
-          {editMode && (
-            <div className={`mb-1 p-2 rounded-lg border ${theme === 'dark'
-              ? 'bg-orange-900 border-orange-600 text-orange-300'
-              : 'bg-orange-50 border-orange-300 text-orange-700'
-              }`}>
-              <p className="text-xs text-center font-medium">
-                🎯 Drag sampler to your bank
-              </p>
-            </div>
-          )}
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".bank,application/zip,application/x-zip-compressed,application/octet-stream,*/*"
-            onChange={handleFileSelect}
-            className="hidden"
-          />
-
-          <div className="space-y-2">
-            {isLoadingBanks && sortedBanks.length === 0 ? (
-              <div className={`flex flex-col gap-2 p-8 items-center justify-center ${theme === 'dark' ? 'text-gray-500' : 'text-gray-400'
-                }`}>
-                <Loader2 className="w-6 h-6 animate-spin" />
-                <span className="text-sm">Loading banks...</span>
-              </div>
-            ) : sortedBanks.map((bank, index) => {
-              const status = getBankStatus(bank.id);
-              const isPrimary = status === 'primary';
-              const isSecondary = status === 'secondary';
-              const isCurrent = status === 'current';
-              const isActive = isPrimary || isSecondary || isCurrent;
-              const isDragOver = dragOverBankId === bank.id;
-              const bankShortcutLabel = normalizeStoredShortcutKey(bank.shortcutKey);
-
-              return (
-                <div
-                  key={bank.id}
-                  className={`p-2 rounded-lg border-2 transition-all duration-200 relative ${isDragOver
-                    ? 'ring-4 ring-orange-400 scale-105 bg-orange-200'
-                    : ''
-                    } ${isActive
-                      ? isPrimary
-                        ? theme === 'dark'
-                          ? 'bg-gray-700 border-blue-400 text-white'
-                          : 'bg-white border-blue-400 text-gray-900'
-                        : isSecondary
-                          ? theme === 'dark'
-                            ? 'bg-gray-700 border-purple-400 text-white'
-                            : 'bg-white border-purple-400 text-gray-900'
-                          : theme === 'dark'
-                            ? 'bg-gray-700 border-green-400 text-white'
-                            : 'bg-white border-green-400 text-gray-900'
-                      : theme === 'dark'
-                        ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600 cursor-pointer'
-                        : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50 cursor-pointer'
+          <div className="p-2 max-h-[calc(100vh-80px)] overflow-y-auto">
+            <div className="grid grid-cols-2 gap-2 mb-1">
+              <div className="flex mb-2">
+                <Button
+                  onClick={() => setShowCreateDialog(true)}
+                  className={`flex-1 gap-0 transition-all duration-200 ${theme === 'dark'
+                    ? 'bg-blue-600 border-blue-500 text-white hover:bg-blue-500'
+                    : 'bg-blue-50 border-blue-300 text-blue-600 hover:bg-blue-100'
                     }`}
-                  style={!isActive ? { backgroundColor: bank.defaultColor, borderColor: bank.defaultColor } : undefined}
-                  onDragOver={(e) => handleBankDragOver(e, bank.id)}
-                  onDrop={(e) => handleBankDrop(e, bank.id)}
-                  onDragLeave={handleBankDragLeave}
                 >
-                  {/* Drop zone indicator for edit mode */}
-                  {editMode && isDragOver && canAcceptDrop(bank.id) && (
-                    <div className={`absolute inset-0 border-4 border-dashed border-orange-400 rounded-xl flex items-center justify-center z-10 ${theme === 'dark'
-                      ? 'bg-orange-900 text-orange-200'
-                      : 'bg-orange-50 text-orange-800'
-                      }`}>
-                      <div className="text-center">
-                        <div className="text-2xl mb-1">🎯</div>
-                        <p className="font-bold text-sm">DROP PAD HERE</p>
-                        <p className="text-xs opacity-75">Transfer to {bank.name}</p>
-                        {isActive && (
-                          <p className="text-xs opacity-60 mt-1">
-                            {isPrimary ? '(Primary Bank)' : isSecondary ? '(Secondary Bank)' : '(Current Bank)'}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  )}
+                  <Plus className="w-4 h-4 mr-2" />
+                  New Bank
+                </Button>
+              </div>
 
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className="flex-1 min-w-0 cursor-pointer" onClick={() => handleBankClick(bank.id)}>
-                      <h3 className="font-medium text-sm truncate" title={bank.name} style={!isActive ? { color: getTextColorForBackground(bank.defaultColor) } : undefined}>
-                        {bank.name.length > 15 ? `${bank.name.substring(0, 15)}...` : bank.name}
-                      </h3>
-                      <p className="text-xs opacity-75" style={!isActive ? { color: getTextColorForBackground(bank.defaultColor) } : undefined}>
-                        {bank.pads.length} pad{bank.pads.length !== 1 ? 's' : ''}
-                      </p>
-                    </div>
-                    {bankShortcutLabel && !hideShortcutLabels && (
-                      <span
-                        className="max-w-[64px] shrink-0 rounded bg-black/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide truncate"
-                        style={!isActive ? { color: getTextColorForBackground(bank.defaultColor) } : undefined}
-                        title={bankShortcutLabel}
-                      >
-                        {bankShortcutLabel}
-                      </span>
-                    )}
-                    <div className="flex items-center gap-1 shrink-0">
-                      <div className="flex flex-col gap-0">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onMoveBankUp(bank.id);
-                          }}
-                          disabled={!canMoveUp(index)}
-                          className={`p-0 h-3 w-4 transition-all duration-200 ${theme === 'dark'
-                            ? 'text-gray-400 hover:text-white hover:bg-gray-600 disabled:text-gray-600'
-                            : 'text-gray-600 hover:text-gray-900 hover:bg-white disabled:text-gray-400'
-                            }`}
-                          title="Move up"
-                        >
-                          <ChevronUp className="w-3 h-3" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onMoveBankDown(bank.id);
-                          }}
-                          disabled={!canMoveDown(index)}
-                          className={`p-0 h-3 w-4 transition-all duration-200 ${theme === 'dark'
-                            ? 'text-gray-400 hover:text-white hover:bg-gray-600 disabled:text-gray-600'
-                            : 'text-gray-600 hover:text-gray-900 hover:bg-white disabled:text-gray-400'
-                            }`}
-                          title="Move down"
-                        >
-                          <ChevronDown className="w-3 h-3" />
-                        </Button>
-                      </div>
+              <div className="flex mb-2">
+                <Button
+                  onClick={handleImportClick}
+                  variant="outline"
+                  className={`flex-1 transition-all duration-200 ${theme === 'dark'
+                    ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
+                    : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
+                    }`}
+                >
+                  <Upload className="w-4 h-4 mr-2" />
+                  Import
+                </Button>
+              </div>
+            </div>
 
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handlePrimaryClick(bank.id);
-                        }}
-                        disabled={bank.id === secondaryBankId}
-                        className={`p-1 h-6 w-6 transition-all duration-200 ${isPrimary
+            {editMode && (
+              <div className={`mb-1 p-2 rounded-lg border ${theme === 'dark'
+                ? 'bg-orange-900 border-orange-600 text-orange-300'
+                : 'bg-orange-50 border-orange-300 text-orange-700'
+                }`}>
+                <p className="text-xs text-center font-medium">
+                  🎯 Drag sampler to transfer bank
+                </p>
+              </div>
+            )}
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".bank,application/zip,application/x-zip-compressed,application/octet-stream,*/*"
+              onChange={handleFileSelect}
+              className="hidden"
+            />
+
+            <div className="space-y-2">
+              {isLoadingBanks && sortedBanks.length === 0 ? (
+                <div className={`flex flex-col gap-2 p-8 items-center justify-center ${theme === 'dark' ? 'text-gray-500' : 'text-gray-400'
+                  }`}>
+                  <Loader2 className="w-6 h-6 animate-spin" />
+                  <span className="text-sm">Loading banks...</span>
+                </div>
+              ) : sortedBanks.map((bank, index) => {
+                const status = getBankStatus(bank.id);
+                const isPrimary = status === 'primary';
+                const isSecondary = status === 'secondary';
+                const isCurrent = status === 'current';
+                const isActive = isPrimary || isSecondary || isCurrent;
+                const isDragOver = dragOverBankId === bank.id;
+                const bankShortcutLabel = normalizeStoredShortcutKey(bank.shortcutKey);
+
+                return (
+                  <div
+                    key={bank.id}
+                    className={`p-2 rounded-lg border-[1.5px] transition-all duration-200 relative ${isDragOver
+                      ? 'ring-4 ring-orange-400 scale-[1.02] bg-orange-200'
+                      : ''
+                      } ${isActive
+                        ? isPrimary
                           ? theme === 'dark'
-                            ? 'bg-yellow-500 text-yellow-300 hover:bg-yellow-400'
-                            : 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
-                          : theme === 'dark'
-                            ? 'text-gray-400 hover:text-yellow-300 hover:bg-yellow-500'
-                            : 'text-gray-600 hover:text-yellow-700 hover:bg-yellow-100'
-                          }`}
-                        title={isPrimary ? 'Primary (click to exit dual mode)' : 'Set as Primary'}
-                      >
-                        <Crown className="w-3 h-3" />
-                      </Button>
+                            ? 'bg-gray-700/80 border-blue-500 text-white shadow-sm perf-high:backdrop-blur-sm'
+                            : 'bg-white/90 border-blue-500 text-gray-900 shadow-sm perf-high:backdrop-blur-sm'
+                          : isSecondary
+                            ? theme === 'dark'
+                              ? 'bg-gray-700/80 border-purple-500 text-white shadow-sm perf-high:backdrop-blur-sm'
+                              : 'bg-white/90 border-purple-500 text-gray-900 shadow-sm perf-high:backdrop-blur-sm'
+                            : theme === 'dark'
+                              ? 'bg-gray-700/80 border-green-500 text-white shadow-sm perf-high:backdrop-blur-sm'
+                              : 'bg-white/90 border-green-500 text-gray-900 shadow-sm perf-high:backdrop-blur-sm'
+                        : theme === 'dark'
+                          ? 'bg-gray-800/40 border-gray-700 text-gray-300 hover:bg-gray-700/60 hover:border-gray-500 cursor-pointer perf-high:backdrop-blur-sm'
+                          : 'bg-white/40 border-gray-300 text-gray-700 hover:bg-white/80 hover:border-gray-400 cursor-pointer perf-high:backdrop-blur-sm'
+                      }`}
+                    style={!isActive ? { backgroundColor: bank.defaultColor, borderColor: bank.defaultColor } : undefined}
+                    onDragOver={(e) => handleBankDragOver(e, bank.id)}
+                    onDrop={(e) => handleBankDrop(e, bank.id)}
+                    onDragLeave={handleBankDragLeave}
+                  >
+                    {/* Drop zone indicator for edit mode */}
+                    {editMode && isDragOver && canAcceptDrop(bank.id) && (
+                      <div className={`absolute inset-0 border-4 border-dashed border-orange-400 rounded-xl flex items-center justify-center z-10 ${theme === 'dark'
+                        ? 'bg-orange-900 text-orange-200'
+                        : 'bg-orange-50 text-orange-800'
+                        }`}>
+                        <div className="text-center">
+                          <div className="text-2xl mb-1">🎯</div>
+                          <p className="font-bold text-sm">DROP PAD HERE</p>
+                          <p className="text-xs opacity-75">Transfer to {bank.name}</p>
+                          {isActive && (
+                            <p className="text-xs opacity-60 mt-1">
+                              {isPrimary ? '(Primary Bank)' : isSecondary ? '(Secondary Bank)' : '(Current Bank)'}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    )}
 
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleEditBank(bank);
-                        }}
-                        className={`p-1 h-6 w-6 transition-all duration-200 ${theme === 'dark'
-                          ? 'text-gray-400 hover:text-white hover:bg-gray-600'
-                          : 'text-gray-600 hover:text-gray-900 hover:bg-white'
-                          }`}
-                      >
-                        <Settings className="w-3 h-3" />
-                      </Button>
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="flex-1 min-w-0 cursor-pointer" onClick={() => handleBankClick(bank.id)}>
+                        <h3 className="font-medium text-sm truncate" title={bank.name} style={!isActive ? { color: getTextColorForBackground(bank.defaultColor) } : undefined}>
+                          {bank.name.length > 15 ? `${bank.name.substring(0, 15)}...` : bank.name}
+                        </h3>
+                        <p className="text-xs opacity-75" style={!isActive ? { color: getTextColorForBackground(bank.defaultColor) } : undefined}>
+                          {bank.pads.length} pad{bank.pads.length !== 1 ? 's' : ''}
+                        </p>
+                      </div>
+                      {bankShortcutLabel && !hideShortcutLabels && (
+                        <span
+                          className="max-w-[64px] shrink-0 rounded bg-black/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide truncate"
+                          style={!isActive ? { color: getTextColorForBackground(bank.defaultColor) } : undefined}
+                          title={bankShortcutLabel}
+                        >
+                          {bankShortcutLabel}
+                        </span>
+                      )}
+                      <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex flex-col gap-0">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onMoveBankUp(bank.id);
+                            }}
+                            disabled={!canMoveUp(index)}
+                            className={`p-0 h-3 w-4 transition-all duration-200 ${theme === 'dark'
+                              ? 'text-gray-400 hover:text-white hover:bg-gray-600 disabled:text-gray-600'
+                              : 'text-gray-600 hover:text-gray-900 hover:bg-white disabled:text-gray-400'
+                              }`}
+                            title="Move up"
+                          >
+                            <ChevronUp className="w-3 h-3" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onMoveBankDown(bank.id);
+                            }}
+                            disabled={!canMoveDown(index)}
+                            className={`p-0 h-3 w-4 transition-all duration-200 ${theme === 'dark'
+                              ? 'text-gray-400 hover:text-white hover:bg-gray-600 disabled:text-gray-600'
+                              : 'text-gray-600 hover:text-gray-900 hover:bg-white disabled:text-gray-400'
+                              }`}
+                            title="Move down"
+                          >
+                            <ChevronDown className="w-3 h-3" />
+                          </Button>
+                        </div>
+
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handlePrimaryClick(bank.id);
+                          }}
+                          disabled={bank.id === secondaryBankId}
+                          className={`p-1 h-6 w-6 transition-all duration-200 ${isPrimary
+                            ? theme === 'dark'
+                              ? 'bg-yellow-500 text-yellow-300 hover:bg-yellow-400'
+                              : 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
+                            : theme === 'dark'
+                              ? 'text-gray-400 hover:text-yellow-300 hover:bg-yellow-500'
+                              : 'text-gray-600 hover:text-yellow-700 hover:bg-yellow-100'
+                            }`}
+                          title={isPrimary ? 'Primary (click to exit dual mode)' : 'Set as Primary'}
+                        >
+                          <Crown className="w-3 h-3" />
+                        </Button>
+
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleEditBank(bank);
+                          }}
+                          className={`p-1 h-6 w-6 transition-all duration-200 ${theme === 'dark'
+                            ? 'text-gray-400 hover:text-white hover:bg-gray-600'
+                            : 'text-gray-600 hover:text-gray-900 hover:bg-white'
+                            }`}
+                        >
+                          <Settings className="w-3 h-3" />
+                        </Button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
         )}
       </div>
 

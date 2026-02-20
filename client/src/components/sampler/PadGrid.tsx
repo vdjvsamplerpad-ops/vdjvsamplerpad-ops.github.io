@@ -36,6 +36,8 @@ export interface PadGridProps {
   blockedMidiCCs?: Set<number>;
   hideShortcutLabel?: boolean;
   editRequest?: { padId: string; token: number } | null;
+  channelLoadArmed?: boolean;
+  onSelectPadForChannelLoad?: (pad: PadData, bankId: string, bankName: string) => void;
 }
 
 export function PadGrid({
@@ -65,7 +67,9 @@ export function PadGrid({
   blockedMidiNotes,
   blockedMidiCCs,
   hideShortcutLabel = false,
-  editRequest = null
+  editRequest = null,
+  channelLoadArmed = false,
+  onSelectPadForChannelLoad
 }: PadGridProps) {
   const [draggedIndex, setDraggedIndex] = React.useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = React.useState<number | null>(null);
@@ -173,6 +177,7 @@ export function PadGrid({
   }, [onFileUpload]);
 
   const handleEmptyAreaClick = () => {
+    if (channelLoadArmed) return;
     if (onFileUpload) {
       fileInputRef.current?.click();
     }
@@ -209,12 +214,12 @@ export function PadGrid({
         />
         <div
           className={`flex items-center justify-center h-64 rounded-2xl border-2 border-dashed transition-all duration-300 cursor-pointer relative ${dragOverPadTransfer
-              ? 'border-orange-400 bg-orange-100 scale-105'
-              : isDragOverGrid
-                ? 'border-blue-400 bg-blue-50'
-                : theme === 'dark'
-                  ? 'bg-gray-800 border-gray-600 hover:bg-gray-700'
-                  : 'bg-white border-gray-300 hover:bg-gray-50'
+            ? 'border-orange-400 bg-orange-100 scale-105'
+            : isDragOverGrid
+              ? 'border-blue-400 bg-blue-50'
+              : theme === 'dark'
+                ? 'bg-gray-800 border-gray-600 hover:bg-gray-700'
+                : 'bg-white border-gray-300 hover:bg-gray-50'
             }`}
           onDrop={handleDrop}
           onDragOver={handleDragOver}
@@ -270,7 +275,9 @@ export function PadGrid({
   return (
     <div
       className={`grid ${gap} w-full transition-all duration-200 ${dragOverPadTransfer
-          ? 'ring-4 ring-orange-400 ring-offset-2 ring-offset-transparent bg-orange-50 dark:bg-orange-900/20 rounded-2xl p-2'
+        ? 'ring-4 ring-orange-400 ring-offset-2 ring-offset-transparent bg-orange-50 dark:bg-orange-900/20 rounded-2xl p-2'
+        : channelLoadArmed
+          ? 'ring-2 ring-emerald-300 rounded-2xl p-1 bg-emerald-50/30 dark:bg-emerald-900/15'
           : ''
         }`}
       style={{
@@ -284,8 +291,8 @@ export function PadGrid({
       {dragOverPadTransfer && (
         <div className="absolute inset-0 flex items-center justify-center z-50 pointer-events-none">
           <div className={`text-center p-4 rounded-xl ${theme === 'dark'
-              ? 'bg-orange-900/80 text-orange-200 border border-orange-600'
-              : 'bg-orange-100/90 text-orange-800 border border-orange-400'
+            ? 'bg-orange-900/80 text-orange-200 border border-orange-600'
+            : 'bg-orange-100/90 text-orange-800 border border-orange-400'
             }`}>
             <div className="text-3xl mb-2">🎯</div>
             <p className="font-bold text-lg">DROP PAD HERE</p>
@@ -331,6 +338,8 @@ export function PadGrid({
             blockedMidiCCs={blockedMidiCCs}
             hideShortcutLabel={hideShortcutLabel}
             editRequestToken={editRequest?.padId === pad.id ? editRequest.token : undefined}
+            channelLoadArmed={channelLoadArmed}
+            onSelectPadForChannelLoad={onSelectPadForChannelLoad}
           />
         </div>
       ))}

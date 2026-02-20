@@ -47,6 +47,7 @@ export interface SystemMappings {
   activateSecondary: SystemMapping;
   midiShift: SystemMapping;
   channelMappings: ChannelMapping[];
+  channelCount?: number;
   masterVolumeCC?: number;
 }
 
@@ -73,6 +74,7 @@ export const DEFAULT_SYSTEM_MAPPINGS: SystemMappings = {
     midiCC: undefined,
     midiNote: undefined
   })),
+  channelCount: 4,
   masterVolumeCC: undefined
 };
 
